@@ -32,13 +32,15 @@ type NetEvent struct {
 func main() {
 	agentID := getEnv("NETWATCH_AGENT_ID", "agent-unknown")
 	apiURL := getEnv("NETWATCH_API_URL", "http://localhost:8000")
-	mode := getEnv("NETWATCH_AGENT_MODE", "mock") // "mock" ou "proc"
+	mode := getEnv("NETWATCH_AGENT_MODE", "mock")                    // "mock" or "proc"
+	procTCPPath := getEnv("NETWATCH_PROC_TCP_PATH", "/proc/net/tcp") // path to /proc/net/tcp
 
-	log.Printf("[AGENT] Starting with ID=%s, backend=%s, mode=%s", agentID, apiURL, mode)
+	log.Printf("[AGENT] Starting with ID=%s, backend=%s, mode=%s, proc_tcp=%s",
+		agentID, apiURL, mode, procTCPPath)
 
 	rand.Seed(time.Now().UnixNano())
 
-	// Alvos simulados para o modo "mock"
+	// Targets for mock mode
 	dstIPs := []string{
 		"10.0.0.20",
 		"10.0.0.21",
@@ -49,12 +51,12 @@ func main() {
 		22,   // SSH
 		80,   // HTTP
 		443,  // HTTPS
-		8080, // alt HTTP
+		8080, // alternative HTTP
 		3306, // MySQL
-		5432, // Postgres
+		5432, // PostgreSQL
 	}
 
-	ticker := time.NewTicker(10 * time.Second)
+	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
 	for range ticker.C {
@@ -63,37 +65,37 @@ func main() {
 
 		switch mode {
 		case "proc":
-			events, err = captureFromProc(agentID)
+			events, err = captureFromProc(agentID, procTCPPath)
 			if err != nil {
 				log.Printf("[AGENT] captureFromProc error: %v", err)
 				continue
 			}
 			if len(events) == 0 {
-				log.Printf("[AGENT] no TCP connections found in /proc/net/tcp")
+				log.Printf("[AGENT] no TCP entries in %s", procTCPPath)
 				continue
 			}
-		default: // "mock"
+		default:
 			events = []NetEvent{generateMockEvent(agentID, dstIPs, dstPorts)}
 		}
 
 		payload, err := json.Marshal(events)
 		if err != nil {
-			log.Printf("[AGENT] Failed to serialize event batch: %v", err)
+			log.Printf("[AGENT] failed to serialize event batch: %v", err)
 			continue
 		}
 
 		resp, err := http.Post(apiURL+"/ingest/events", "application/json", bytes.NewReader(payload))
 		if err != nil {
-			log.Printf("[AGENT] Failed to send event batch: %v", err)
+			log.Printf("[AGENT] failed to send event batch: %v", err)
 			continue
 		}
 		_ = resp.Body.Close()
 
-		log.Printf("[AGENT] Sent %d event(s), status=%d", len(events), resp.StatusCode)
+		log.Printf("[AGENT] sent %d event(s), status=%d", len(events), resp.StatusCode)
 	}
 }
 
-// ---- Modo MOCK ----------------------------------------------------
+// ---- Mock mode ----------------------------------------------------
 
 func generateMockEvent(agentID string, dstIPs []string, dstPorts []int) NetEvent {
 	dstIP := dstIPs[rand.Intn(len(dstIPs))]
@@ -116,17 +118,31 @@ func generateMockEvent(agentID string, dstIPs []string, dstPorts []int) NetEvent
 	}
 }
 
-// ---- Modo PROC (/proc/net/tcp) ------------------------------------
+// ---- Proc mode (/proc/net/tcp) ------------------------------------
 
-func captureFromProc(agentID string) ([]NetEvent, error) {
-	f, err := os.Open("/proc/net/tcp")
+func captureFromProc(agentID string, procPath string) ([]NetEvent, error) {
+	f, err := os.Open(procPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open /proc/net/tcp: %w", err)
+		return nil, fmt.Errorf("failed to open %s: %w", procPath, err)
 	}
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
 	events := make([]NetEvent, 0)
+
+	tcpStates := map[string]string{
+		"01": "ESTABLISHED",
+		"02": "SYN_SENT",
+		"03": "SYN_RECV",
+		"04": "FIN_WAIT1",
+		"05": "FIN_WAIT2",
+		"06": "TIME_WAIT",
+		"07": "CLOSE",
+		"08": "CLOSE_WAIT",
+		"09": "LAST_ACK",
+		"0A": "LISTEN",
+		"0B": "CLOSING",
+	}
 
 	firstLine := true
 	for scanner.Scan() {
@@ -134,7 +150,7 @@ func captureFromProc(agentID string) ([]NetEvent, error) {
 		if line == "" {
 			continue
 		}
-		// pula cabeçalho
+
 		if firstLine {
 			firstLine = false
 			continue
@@ -149,8 +165,8 @@ func captureFromProc(agentID string) ([]NetEvent, error) {
 		remAddr := fields[2]
 		state := fields[3]
 
-		// "01" = ESTABLISHED
-		if state != "01" {
+		// Ignore fully closed entries
+		if state == "07" {
 			continue
 		}
 
@@ -161,6 +177,11 @@ func captureFromProc(agentID string) ([]NetEvent, error) {
 		dstIP, dstPort, err := parseHexIPPort(remAddr)
 		if err != nil {
 			continue
+		}
+
+		stateText, ok := tcpStates[state]
+		if !ok {
+			stateText = "UNKNOWN"
 		}
 
 		ev := NetEvent{
@@ -174,8 +195,10 @@ func captureFromProc(agentID string) ([]NetEvent, error) {
 			Proto:     "tcp",
 			Bytes:     0,
 			Extra: map[string]interface{}{
-				"flow_id": uuid.New().String(),
-				"note":    "tcp entry from /proc/net/tcp",
+				"flow_id":       uuid.New().String(),
+				"note":          "tcp entry from /proc/net/tcp",
+				"tcp_state":     stateText,
+				"tcp_state_hex": state,
 			},
 		}
 		events = append(events, ev)
@@ -188,7 +211,7 @@ func captureFromProc(agentID string) ([]NetEvent, error) {
 	return events, nil
 }
 
-// parseHexIPPort converte o formato "0100007F:0016" em "127.0.0.1", 22
+// parseHexIPPort converts "/proc/net/tcp" hex address to IP:port.
 func parseHexIPPort(s string) (string, int, error) {
 	parts := strings.Split(s, ":")
 	if len(parts) != 2 {
@@ -208,7 +231,7 @@ func parseHexIPPort(s string) (string, int, error) {
 		if err != nil {
 			return "", 0, fmt.Errorf("invalid ip byte in %s: %w", ipHex, err)
 		}
-		// /proc/net/tcp traz IP em little endian
+		// /proc/net/tcp stores IP in little-endian
 		ipBytes[3-i] = byte(b)
 	}
 
@@ -222,7 +245,7 @@ func parseHexIPPort(s string) (string, int, error) {
 	return ip, int(port64), nil
 }
 
-// ---- Util ---------------------------------------------------------
+// ---- Utils --------------------------------------------------------
 
 func getEnv(key, def string) string {
 	if v, ok := os.LookupEnv(key); ok {
