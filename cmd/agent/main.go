@@ -32,15 +32,20 @@ type NetEvent struct {
 func main() {
 	agentID := getEnv("NETWATCH_AGENT_ID", "agent-unknown")
 	apiURL := getEnv("NETWATCH_API_URL", "http://localhost:8000")
-	mode := getEnv("NETWATCH_AGENT_MODE", "mock")                    // "mock" or "proc"
-	procTCPPath := getEnv("NETWATCH_PROC_TCP_PATH", "/proc/net/tcp") // path to /proc/net/tcp
+	mode := getEnv("NETWATCH_AGENT_MODE", "mock")
 
-	log.Printf("[AGENT] Starting with ID=%s, backend=%s, mode=%s, proc_tcp=%s",
-		agentID, apiURL, mode, procTCPPath)
+	// Backwards compatible: prefer NETWATCH_PROC_TCP4_PATH, then NETWATCH_PROC_TCP_PATH
+	procTCP4Path := getEnv("NETWATCH_PROC_TCP4_PATH",
+		getEnv("NETWATCH_PROC_TCP_PATH", "/proc/net/tcp"))
+	procTCP6Path := getEnv("NETWATCH_PROC_TCP6_PATH", "/proc/net/tcp6")
+
+	log.Printf(
+		"[AGENT] Starting with ID=%s, backend=%s, mode=%s, tcp4=%s, tcp6=%s",
+		agentID, apiURL, mode, procTCP4Path, procTCP6Path,
+	)
 
 	rand.Seed(time.Now().UnixNano())
 
-	// Targets for mock mode
 	dstIPs := []string{
 		"10.0.0.20",
 		"10.0.0.21",
@@ -48,12 +53,12 @@ func main() {
 	}
 
 	dstPorts := []int{
-		22,   // SSH
-		80,   // HTTP
-		443,  // HTTPS
-		8080, // alternative HTTP
-		3306, // MySQL
-		5432, // PostgreSQL
+		22,
+		80,
+		443,
+		8080,
+		3306,
+		5432,
 	}
 
 	ticker := time.NewTicker(2 * time.Second)
@@ -65,17 +70,35 @@ func main() {
 
 		switch mode {
 		case "proc":
-			events, err = captureFromProc(agentID, procTCPPath)
+			var events4, events6 []NetEvent
+
+			events4, err = captureFromProc4(agentID, procTCP4Path)
 			if err != nil {
-				log.Printf("[AGENT] captureFromProc error: %v", err)
-				continue
+				log.Printf("[AGENT] captureFromProc4 error: %v", err)
 			}
+
+			events6, err = captureFromProc6(agentID, procTCP6Path)
+			if err != nil {
+				if !os.IsNotExist(err) {
+					log.Printf("[AGENT] captureFromProc6 error: %v", err)
+				}
+			}
+
+			events = append(events4, events6...)
+
 			if len(events) == 0 {
-				log.Printf("[AGENT] no TCP entries in %s", procTCPPath)
+				log.Printf("[AGENT] no TCP entries in %s or %s", procTCP4Path, procTCP6Path)
 				continue
 			}
 		default:
 			events = []NetEvent{generateMockEvent(agentID, dstIPs, dstPorts)}
+		}
+
+		sshCount := 0
+		for _, ev := range events {
+			if ev.SrcPort == 22 || ev.DstPort == 22 {
+				sshCount++
+			}
 		}
 
 		payload, err := json.Marshal(events)
@@ -91,11 +114,12 @@ func main() {
 		}
 		_ = resp.Body.Close()
 
-		log.Printf("[AGENT] sent %d event(s), status=%d", len(events), resp.StatusCode)
+		log.Printf("[AGENT] sent %d event(s), ssh_port_events=%d, status=%d",
+			len(events), sshCount, resp.StatusCode)
 	}
 }
 
-// ---- Mock mode ----------------------------------------------------
+// ---------------- Mock mode ----------------
 
 func generateMockEvent(agentID string, dstIPs []string, dstPorts []int) NetEvent {
 	dstIP := dstIPs[rand.Intn(len(dstIPs))]
@@ -118,9 +142,9 @@ func generateMockEvent(agentID string, dstIPs []string, dstPorts []int) NetEvent
 	}
 }
 
-// ---- Proc mode (/proc/net/tcp) ------------------------------------
+// ---------------- Proc mode (IPv4) ----------------
 
-func captureFromProc(agentID string, procPath string) ([]NetEvent, error) {
+func captureFromProc4(agentID string, procPath string) ([]NetEvent, error) {
 	f, err := os.Open(procPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open %s: %w", procPath, err)
@@ -165,16 +189,15 @@ func captureFromProc(agentID string, procPath string) ([]NetEvent, error) {
 		remAddr := fields[2]
 		state := fields[3]
 
-		// Ignore fully closed entries
 		if state == "07" {
 			continue
 		}
 
-		srcIP, srcPort, err := parseHexIPPort(localAddr)
+		srcIP, srcPort, err := parseHexIPPort4(localAddr)
 		if err != nil {
 			continue
 		}
-		dstIP, dstPort, err := parseHexIPPort(remAddr)
+		dstIP, dstPort, err := parseHexIPPort4(remAddr)
 		if err != nil {
 			continue
 		}
@@ -211,8 +234,7 @@ func captureFromProc(agentID string, procPath string) ([]NetEvent, error) {
 	return events, nil
 }
 
-// parseHexIPPort converts "/proc/net/tcp" hex address to IP:port.
-func parseHexIPPort(s string) (string, int, error) {
+func parseHexIPPort4(s string) (string, int, error) {
 	parts := strings.Split(s, ":")
 	if len(parts) != 2 {
 		return "", 0, fmt.Errorf("invalid addr: %s", s)
@@ -222,16 +244,15 @@ func parseHexIPPort(s string) (string, int, error) {
 	portHex := parts[1]
 
 	if len(ipHex) != 8 {
-		return "", 0, fmt.Errorf("invalid ip hex: %s", ipHex)
+		return "", 0, fmt.Errorf("invalid ipv4 hex: %s", ipHex)
 	}
 
 	ipBytes := make([]byte, 4)
 	for i := 0; i < 4; i++ {
 		b, err := strconv.ParseUint(ipHex[2*i:2*i+2], 16, 8)
 		if err != nil {
-			return "", 0, fmt.Errorf("invalid ip byte in %s: %w", ipHex, err)
+			return "", 0, fmt.Errorf("invalid ipv4 byte in %s: %w", ipHex, err)
 		}
-		// /proc/net/tcp stores IP in little-endian
 		ipBytes[3-i] = byte(b)
 	}
 
@@ -245,7 +266,122 @@ func parseHexIPPort(s string) (string, int, error) {
 	return ip, int(port64), nil
 }
 
-// ---- Utils --------------------------------------------------------
+// ---------------- Proc mode (IPv6) ----------------
+
+func captureFromProc6(agentID string, procPath string) ([]NetEvent, error) {
+	f, err := os.Open(procPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open %s: %w", procPath, err)
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	events := make([]NetEvent, 0)
+
+	tcpStates := map[string]string{
+		"01": "ESTABLISHED",
+		"02": "SYN_SENT",
+		"03": "SYN_RECV",
+		"04": "FIN_WAIT1",
+		"05": "FIN_WAIT2",
+		"06": "TIME_WAIT",
+		"07": "CLOSE",
+		"08": "CLOSE_WAIT",
+		"09": "LAST_ACK",
+		"0A": "LISTEN",
+		"0B": "CLOSING",
+	}
+
+	firstLine := true
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		if firstLine {
+			firstLine = false
+			continue
+		}
+
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+
+		localAddr := fields[1]
+		remAddr := fields[2]
+		state := fields[3]
+
+		if state == "07" {
+			continue
+		}
+
+		srcIP, srcPort, err := parseHexIPPort6(localAddr)
+		if err != nil {
+			continue
+		}
+		dstIP, dstPort, err := parseHexIPPort6(remAddr)
+		if err != nil {
+			continue
+		}
+
+		stateText, ok := tcpStates[state]
+		if !ok {
+			stateText = "UNKNOWN"
+		}
+
+		ev := NetEvent{
+			AgentID:   agentID,
+			EventType: "flow",
+			Timestamp: time.Now().UTC(),
+			SrcIP:     srcIP,
+			DstIP:     dstIP,
+			SrcPort:   srcPort,
+			DstPort:   dstPort,
+			Proto:     "tcp6",
+			Bytes:     0,
+			Extra: map[string]interface{}{
+				"flow_id":       uuid.New().String(),
+				"note":          "tcp entry from /proc/net/tcp6",
+				"tcp_state":     stateText,
+				"tcp_state_hex": state,
+			},
+		}
+		events = append(events, ev)
+	}
+
+	if err := scanner.Err(); err != nil {
+		return events, fmt.Errorf("scanner error: %w", err)
+	}
+
+	return events, nil
+}
+
+func parseHexIPPort6(s string) (string, int, error) {
+	parts := strings.Split(s, ":")
+	if len(parts) != 2 {
+		return "", 0, fmt.Errorf("invalid addr: %s", s)
+	}
+
+	ipHex := parts[0]
+	portHex := parts[1]
+
+	if len(ipHex) != 32 {
+		return "", 0, fmt.Errorf("invalid ipv6 hex: %s", ipHex)
+	}
+
+	ip := "ipv6:" + ipHex
+
+	port64, err := strconv.ParseUint(portHex, 16, 16)
+	if err != nil {
+		return "", 0, fmt.Errorf("invalid port in %s: %w", s, err)
+	}
+
+	return ip, int(port64), nil
+}
+
+// ---------------- Utils ----------------
 
 func getEnv(key, def string) string {
 	if v, ok := os.LookupEnv(key); ok {
