@@ -4,53 +4,162 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"math/rand"
 	"net/http"
 	"strings"
+	"syscall"
 	"time"
 
 	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/model"
 )
 
-type Client struct {
-	baseURL string
-	httpc   *http.Client
+type Sender struct {
+	baseURL  string
+	client   *http.Client
+	maxBatch int
+	retries  int
 }
 
-func New(baseURL string, timeout time.Duration) *Client {
-	baseURL = strings.TrimRight(baseURL, "/")
+func New(baseURL string, timeout time.Duration, maxBatch int) *Sender {
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
-	return &Client{
-		baseURL: baseURL,
-		httpc: &http.Client{
-			Timeout: timeout,
-		},
+	if maxBatch <= 0 {
+		maxBatch = 300
+	}
+
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+
+	return &Sender{
+		baseURL:  baseURL,
+		client:   &http.Client{Timeout: timeout},
+		maxBatch: maxBatch,
+		retries:  3,
 	}
 }
 
-func (c *Client) SendEvents(ctx context.Context, events []model.NetEvent) (int, error) {
+func (s *Sender) SendEvents(ctx context.Context, events []model.NetEvent) (int, error) {
+	if s.baseURL == "" {
+		return 0, fmt.Errorf("sender baseURL is empty")
+	}
 	if len(events) == 0 {
 		return 0, nil
 	}
 
-	body, err := json.Marshal(events)
-	if err != nil {
-		return 0, fmt.Errorf("marshal events: %w", err)
+	endpoint := s.baseURL + "/ingest/events"
+	lastStatus := 0
+
+	for i := 0; i < len(events); i += s.maxBatch {
+		j := i + s.maxBatch
+		if j > len(events) {
+			j = len(events)
+		}
+
+		payload, err := json.Marshal(events[i:j])
+		if err != nil {
+			return lastStatus, fmt.Errorf("marshal events: %w", err)
+		}
+
+		status, err := s.postWithRetry(ctx, endpoint, payload)
+		lastStatus = status
+		if err != nil {
+			return lastStatus, err
+		}
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/ingest/events", bytes.NewReader(body))
+	return lastStatus, nil
+}
+
+func (s *Sender) postWithRetry(ctx context.Context, url string, payload []byte) (int, error) {
+	var lastErr error
+	lastStatus := 0
+
+	for attempt := 0; attempt <= s.retries; attempt++ {
+		if attempt > 0 {
+			if err := sleepBackoff(ctx, attempt); err != nil {
+				return lastStatus, err
+			}
+		}
+
+		status, err := s.postOnce(ctx, url, payload)
+		lastStatus = status
+
+		if err == nil {
+			return status, nil
+		}
+
+		lastErr = err
+		if !isRetryable(err, status) {
+			return status, err
+		}
+	}
+
+	return lastStatus, lastErr
+}
+
+func (s *Sender) postOnce(ctx context.Context, url string, payload []byte) (int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
 		return 0, fmt.Errorf("new request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpc.Do(req)
+	resp, err := s.client.Do(req)
 	if err != nil {
 		return 0, fmt.Errorf("post ingest: %w", err)
 	}
 	defer resp.Body.Close()
 
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return resp.StatusCode, fmt.Errorf("ingest returned status=%d", resp.StatusCode)
+	}
+
 	return resp.StatusCode, nil
+}
+
+func isRetryable(err error, status int) bool {
+	if status == 0 {
+		return isRetryableNetErr(err)
+	}
+	if status == 429 || status >= 500 {
+		return true
+	}
+	return false
+}
+
+func isRetryableNetErr(err error) bool {
+	return errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, syscall.ETIMEDOUT) ||
+		errors.Is(err, syscall.ECONNREFUSED)
+}
+
+func sleepBackoff(ctx context.Context, attempt int) error {
+	// 200ms, 400ms, 800ms... + jitter (max ~200ms)
+	base := 200 * time.Millisecond
+	d := base * time.Duration(1<<min(attempt, 4))
+	jitter := time.Duration(rand.Intn(200)) * time.Millisecond
+	wait := d + jitter
+
+	t := time.NewTimer(wait)
+	defer t.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
