@@ -87,12 +87,6 @@ func applyDefaults(o *Options) {
 	if o.DenySrcPorts == nil {
 		o.DenySrcPorts = map[int]bool{}
 	}
-	// Defaults tuned to reduce noise in real hosts.
-	if !o.SkipLinkLocal {
-		// keep as provided
-	} else {
-		o.SkipLinkLocal = true
-	}
 }
 
 func (c *Capturer) Capture() ([]model.NetEvent, error) {
@@ -164,7 +158,6 @@ func (c *Capturer) captureProc4(ts time.Time) ([]model.NetEvent, error) {
 			continue
 		}
 
-		// Drop obvious noise entries (rem=0.0.0.0:0).
 		if dstPort == 0 || dstIP == "0.0.0.0" {
 			continue
 		}
@@ -313,12 +306,10 @@ func (c *Capturer) shouldDrop(srcIP, dstIP string, srcPort, dstPort int) bool {
 	if c.opts.SkipLoopback && (sip.IsLoopback() || dip.IsLoopback()) {
 		return true
 	}
-
 	if c.opts.SkipLinkLocal && (sip.IsLinkLocalUnicast() || dip.IsLinkLocalUnicast()) {
 		return true
 	}
-
-	if c.opts.SkipPrivateToPrivate && isPrivate(sip) && isPrivate(dip) {
+	if c.opts.SkipPrivateToPrivate && sip.IsPrivate() && dip.IsPrivate() {
 		return true
 	}
 
@@ -329,11 +320,6 @@ func (c *Capturer) shouldDrop(srcIP, dstIP string, srcPort, dstPort int) bool {
 	}
 
 	return false
-}
-
-func isPrivate(ip net.IP) bool {
-	// Go's IsPrivate works for IPv4 RFC1918 and IPv6 ULA.
-	return ip.IsPrivate()
 }
 
 func (c *Capturer) stateTTL(stateHex string) time.Duration {
@@ -377,7 +363,6 @@ func (c *Capturer) cleanup(now time.Time) {
 		return
 	}
 
-	// Keep cache bounded.
 	cutoff := now.Add(-2 * c.opts.EstablishedTTL)
 	for k, v := range c.cache {
 		if v.lastSent.Before(cutoff) {
@@ -449,8 +434,7 @@ func parseHexIPPort6(s string) (string, int, error) {
 		return "", 0, err
 	}
 
-	ip := net.IP(ipBytes).String()
-	return ip, int(port64), nil
+	return net.IP(ipBytes).String(), int(port64), nil
 }
 
 func min(a, b int) int {
