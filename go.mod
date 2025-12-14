@@ -1,4 +1,4 @@
-module github.com/seuuser/netwatch-agent
+module gitlab.com/nathanmblima/dynasmon-netwatch/agent
 
 go 1.22
 
