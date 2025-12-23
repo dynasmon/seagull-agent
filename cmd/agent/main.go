@@ -50,10 +50,11 @@ func main() {
 
 	var procCapturer *capture.Capturer
 	if contains(sources, "proc") {
+		skipPrivate := parseBool(getEnv("NETWATCH_SKIP_PRIVATE_TO_PRIVATE", "false"), false)
 		opts := capture.Options{
 			SkipLoopback:         true,
 			SkipLinkLocal:        true,
-			SkipPrivateToPrivate: true,
+			SkipPrivateToPrivate: skipPrivate,
 			IncludeIPv6:          true,
 			MaxBatchSize:         300,
 		}

@@ -115,6 +115,9 @@ func (c *Capturer) Capture() ([]model.NetEvent, error) {
 	return out, nil
 }
 
+// Semântica padronizada (host-centric):
+//   src_* = remoto (cliente/atacante)
+//   dst_* = local (máquina monitorada/porta alvo)
 func (c *Capturer) captureProc4(ts time.Time) ([]model.NetEvent, error) {
 	f, err := os.Open(c.tcp4Path)
 	if err != nil {
@@ -149,20 +152,22 @@ func (c *Capturer) captureProc4(ts time.Time) ([]model.NetEvent, error) {
 			continue
 		}
 
-		srcIP, srcPort, err := parseHexIPPort4(localAddr)
+		localIP, localPort, err := parseHexIPPort4(localAddr)
 		if err != nil {
 			continue
 		}
-		dstIP, dstPort, err := parseHexIPPort4(remAddr)
+		remoteIP, remotePort, err := parseHexIPPort4(remAddr)
 		if err != nil {
 			continue
 		}
 
-		if dstPort == 0 || dstIP == "0.0.0.0" {
+		// Remoto inválido/zero (ex.: sockets sem par remoto)
+		if remotePort == 0 || remoteIP == "0.0.0.0" {
 			continue
 		}
 
-		if c.shouldDrop(srcIP, dstIP, srcPort, dstPort) {
+		// shouldDrop espera (src=remoto, dst=local) após a padronização
+		if c.shouldDrop(remoteIP, localIP, remotePort, localPort) {
 			continue
 		}
 
@@ -170,8 +175,16 @@ func (c *Capturer) captureProc4(ts time.Time) ([]model.NetEvent, error) {
 			"flow_id":       uuid.NewString(),
 			"tcp_state_hex": stateHex,
 			"ip_version":    4,
+
+			// Campos explícitos para debug/dashboards
+			"local_ip":    localIP,
+			"local_port":  localPort,
+			"remote_ip":   remoteIP,
+			"remote_port": remotePort,
 		}
 
+		// Observação: o layout de /proc/net/tcp pode variar entre kernels;
+		// mantemos o parsing "best-effort" sem falhar o loop.
 		if len(fields) > 9 {
 			if uid, e := strconv.Atoi(fields[7]); e == nil {
 				extra["uid"] = uid
@@ -185,13 +198,16 @@ func (c *Capturer) captureProc4(ts time.Time) ([]model.NetEvent, error) {
 			AgentID:   c.agentID,
 			EventType: "flow",
 			Timestamp: ts,
-			SrcIP:     srcIP,
-			DstIP:     dstIP,
-			SrcPort:   srcPort,
-			DstPort:   dstPort,
-			Proto:     "tcp",
-			Bytes:     0,
-			Extra:     extra,
+
+			// remoto -> local (atacante -> alvo)
+			SrcIP:   remoteIP,
+			SrcPort: remotePort,
+			DstIP:   localIP,
+			DstPort: localPort,
+
+			Proto: "tcp",
+			Bytes: 0,
+			Extra: extra,
 		})
 	}
 
@@ -236,20 +252,20 @@ func (c *Capturer) captureProc6(ts time.Time) ([]model.NetEvent, error) {
 			continue
 		}
 
-		srcIP, srcPort, err := parseHexIPPort6(localAddr)
+		localIP, localPort, err := parseHexIPPort6(localAddr)
 		if err != nil {
 			continue
 		}
-		dstIP, dstPort, err := parseHexIPPort6(remAddr)
+		remoteIP, remotePort, err := parseHexIPPort6(remAddr)
 		if err != nil {
 			continue
 		}
 
-		if dstPort == 0 || dstIP == "::" {
+		if remotePort == 0 || remoteIP == "::" {
 			continue
 		}
 
-		if c.shouldDrop(srcIP, dstIP, srcPort, dstPort) {
+		if c.shouldDrop(remoteIP, localIP, remotePort, localPort) {
 			continue
 		}
 
@@ -257,6 +273,11 @@ func (c *Capturer) captureProc6(ts time.Time) ([]model.NetEvent, error) {
 			"flow_id":       uuid.NewString(),
 			"tcp_state_hex": stateHex,
 			"ip_version":    6,
+
+			"local_ip":    localIP,
+			"local_port":  localPort,
+			"remote_ip":   remoteIP,
+			"remote_port": remotePort,
 		}
 
 		if len(fields) > 9 {
@@ -272,13 +293,15 @@ func (c *Capturer) captureProc6(ts time.Time) ([]model.NetEvent, error) {
 			AgentID:   c.agentID,
 			EventType: "flow",
 			Timestamp: ts,
-			SrcIP:     srcIP,
-			DstIP:     dstIP,
-			SrcPort:   srcPort,
-			DstPort:   dstPort,
-			Proto:     "tcp6",
-			Bytes:     0,
-			Extra:     extra,
+
+			SrcIP:   remoteIP,
+			SrcPort: remotePort,
+			DstIP:   localIP,
+			DstPort: localPort,
+
+			Proto: "tcp6",
+			Bytes: 0,
+			Extra: extra,
 		})
 	}
 
@@ -390,6 +413,7 @@ func parseHexIPPort4(s string) (string, int, error) {
 		if err != nil {
 			return "", 0, err
 		}
+		// IPv4 em /proc/net/tcp vem little-endian
 		ipBytes[3-i] = byte(b)
 	}
 
@@ -414,6 +438,7 @@ func parseHexIPPort6(s string) (string, int, error) {
 		return "", 0, fmt.Errorf("invalid ipv6 hex: %s", ipHex)
 	}
 
+	// IPv6 em /proc/net/tcp6 vem em palavras de 32 bits little-endian
 	var b strings.Builder
 	b.Grow(32)
 	for i := 0; i < 4; i++ {
