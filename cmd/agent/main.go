@@ -528,7 +528,18 @@ func loadConfig() Config {
 	scanDedup := parseDuration(getEnv("NETWATCH_SCAN_DEDUP_TTL", "2s"), 2*time.Second)
 	scanMaxBatch := parseInt(getEnv("NETWATCH_SCAN_MAX_BATCH", "5000"), 5000)
 
-	scanMode := getEnv("NETWATCH_SCAN_MODE", "summary")
+	var procCapturer *capture.Capturer
+	if contains(sources, "proc") {
+		skipPrivate := parseBool(getEnv("NETWATCH_SKIP_PRIVATE_TO_PRIVATE", "false"), false)
+		opts := capture.Options{
+			SkipLoopback:         true,
+			SkipLinkLocal:        true,
+			SkipPrivateToPrivate: skipPrivate,
+			IncludeIPv6:          true,
+			MaxBatchSize:         300,
+		}
+		procCapturer = capture.New(agentID, procTCP4Path, procTCP6Path, opts)
+	}
 
 	levelStr := getEnv("NETWATCH_LOG_LEVEL", "info")
 	logLevel := parseLogLevel(levelStr)
