@@ -21,7 +21,7 @@ type PcapScanOptions struct {
 	Promisc     bool
 	ReadTimeout time.Duration
 
-	DedupTTL    time.Duration
+	DedupTTL     time.Duration
 	MaxBatchSize int
 
 	SkipLoopback  bool
@@ -30,6 +30,8 @@ type PcapScanOptions struct {
 	DenyCIDRs    []*net.IPNet
 	DenyDstPorts map[int]bool
 	DenySrcPorts map[int]bool
+
+	ServicePorts map[int]bool
 }
 
 type PcapScanCapturer struct {
@@ -56,12 +58,12 @@ func NewPcapScanCapturer(agentID string, opts PcapScanOptions) (*PcapScanCapture
 	}
 
 	return &PcapScanCapturer{
-		agentID:      agentID,
-		opts:         opts,
-		localIPs:     localIPs,
-		buf:          make([]model.NetEvent, 0, 2048),
-		cache:        make(map[string]time.Time, 8192),
-		lastCleanup:  time.Now(),
+		agentID:     agentID,
+		opts:        opts,
+		localIPs:    localIPs,
+		buf:         make([]model.NetEvent, 0, 2048),
+		cache:       make(map[string]time.Time, 8192),
+		lastCleanup: time.Now(),
 	}, nil
 }
 
@@ -84,8 +86,9 @@ func applyPcapDefaults(o *PcapScanOptions) {
 	if o.DenySrcPorts == nil {
 		o.DenySrcPorts = map[int]bool{}
 	}
-	// Keep promisc off by default to reduce noise
-	// (scans to the host will still be visible).
+	if o.ServicePorts == nil {
+		o.ServicePorts = map[int]bool{22: true}
+	}
 }
 
 func (c *PcapScanCapturer) Start(ctx context.Context) error {
@@ -138,8 +141,15 @@ func (c *PcapScanCapturer) Drain() []model.NetEvent {
 func (c *PcapScanCapturer) push(ev model.NetEvent) {
 	now := time.Now().UTC()
 
-	key := fmt.Sprintf("%s|%s|%s|%d|%d|%s",
-		ev.Proto, ev.SrcIP, ev.DstIP, ev.SrcPort, ev.DstPort, ev.Extra["scan_type"],
+	scanType := ""
+	if ev.Extra != nil {
+		if v, ok := ev.Extra["scan_type"].(string); ok {
+			scanType = v
+		}
+	}
+
+	key := fmt.Sprintf("%s|%s|%s|%s|%d|%d|%s",
+		ev.EventType, ev.Proto, ev.SrcIP, ev.DstIP, ev.SrcPort, ev.DstPort, scanType,
 	)
 
 	c.mu.Lock()
@@ -190,8 +200,10 @@ func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *mod
 		if arp.Operation != layers.ARPRequest {
 			return nil
 		}
+
 		src := net.IP(arp.SourceProtAddress).String()
 		dst := net.IP(arp.DstProtAddress).String()
+
 		if !c.localIPs[dst] {
 			return nil
 		}
@@ -208,16 +220,15 @@ func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *mod
 			Proto:     "arp",
 			Bytes:     len(pkt.Data()),
 			Extra: map[string]interface{}{
-				"scan_type":   "arp_request",
-				"iface":       iface,
-				"ip_version":  0,
+				"scan_type":  "arp_request",
+				"iface":      iface,
+				"ip_version": 0,
 			},
 		}
 	} else {
 		return nil
 	}
 
-	// Only consider packets targeting the monitored host IPs
 	if !c.localIPs[dstIP] {
 		return nil
 	}
@@ -227,19 +238,38 @@ func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *mod
 
 	if tcpL := pkt.Layer(layers.LayerTypeTCP); tcpL != nil {
 		tcp := tcpL.(*layers.TCP)
+
 		scanType := classifyTCP(tcp)
 		if scanType == "" {
 			return nil
 		}
+
 		srcPort := int(tcp.SrcPort)
 		dstPort := int(tcp.DstPort)
+
 		if c.shouldDrop(srcIP, dstIP, srcPort, dstPort) {
 			return nil
 		}
 
+		eventType := "scan_probe"
+		// SYN to service ports is treated as service probing to avoid scan false positives.
+		if scanType == "tcp_syn" && c.opts.ServicePorts[dstPort] {
+			eventType = "service_probe"
+		}
+
+		extra := map[string]interface{}{
+			"scan_type":  scanType,
+			"iface":      iface,
+			"ip_version": ipVersion,
+			"tcp_flags":  tcpFlagsString(tcp),
+		}
+		if eventType == "service_probe" {
+			extra["service_port"] = dstPort
+		}
+
 		return &model.NetEvent{
 			AgentID:   c.agentID,
-			EventType: "scan_probe",
+			EventType: eventType,
 			Timestamp: ts,
 			SrcIP:     srcIP,
 			DstIP:     dstIP,
@@ -247,12 +277,7 @@ func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *mod
 			DstPort:   dstPort,
 			Proto:     "tcp",
 			Bytes:     len(pkt.Data()),
-			Extra: map[string]interface{}{
-				"scan_type":   scanType,
-				"iface":       iface,
-				"ip_version":  ipVersion,
-				"tcp_flags":   tcpFlagsString(tcp),
-			},
+			Extra:     extra,
 		}
 	}
 
@@ -260,6 +285,7 @@ func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *mod
 		udp := udpL.(*layers.UDP)
 		srcPort := int(udp.SrcPort)
 		dstPort := int(udp.DstPort)
+
 		if c.shouldDrop(srcIP, dstIP, srcPort, dstPort) {
 			return nil
 		}
@@ -275,9 +301,9 @@ func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *mod
 			Proto:     "udp",
 			Bytes:     len(pkt.Data()),
 			Extra: map[string]interface{}{
-				"scan_type":   "udp_probe",
-				"iface":       iface,
-				"ip_version":  ipVersion,
+				"scan_type":  "udp_probe",
+				"iface":      iface,
+				"ip_version": ipVersion,
 			},
 		}
 	}
@@ -296,11 +322,11 @@ func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *mod
 			Proto:     "icmp",
 			Bytes:     len(pkt.Data()),
 			Extra: map[string]interface{}{
-				"scan_type":   "icmp_echo",
-				"iface":       iface,
-				"ip_version":  ipVersion,
-				"icmp_type":   int(icmp.TypeCode.Type()),
-				"icmp_code":   int(icmp.TypeCode.Code()),
+				"scan_type":  "icmp_echo",
+				"iface":      iface,
+				"ip_version": ipVersion,
+				"icmp_type":  int(icmp.TypeCode.Type()),
+				"icmp_code":  int(icmp.TypeCode.Code()),
 			},
 		}
 	}
@@ -319,11 +345,11 @@ func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *mod
 			Proto:     "icmp6",
 			Bytes:     len(pkt.Data()),
 			Extra: map[string]interface{}{
-				"scan_type":   "icmp6_echo",
-				"iface":       iface,
-				"ip_version":  ipVersion,
-				"icmp_type":   int(icmp.TypeCode.Type()),
-				"icmp_code":   int(icmp.TypeCode.Code()),
+				"scan_type":  "icmp6_echo",
+				"iface":      iface,
+				"ip_version": ipVersion,
+				"icmp_type":  int(icmp.TypeCode.Type()),
+				"icmp_code":  int(icmp.TypeCode.Code()),
 			},
 		}
 	}
@@ -357,12 +383,10 @@ func (c *PcapScanCapturer) shouldDrop(srcIP, dstIP string, srcPort, dstPort int)
 			return true
 		}
 	}
-
 	return false
 }
 
 func classifyTCP(t *layers.TCP) string {
-	// Focus on probe-like patterns to reduce noise
 	if t.SYN && !t.ACK {
 		return "tcp_syn"
 	}
@@ -402,28 +426,4 @@ func tcpFlagsString(t *layers.TCP) string {
 		flags = append(flags, "URG")
 	}
 	return strings.Join(flags, "|")
-}
-
-func collectLocalIPs() (map[string]bool, error) {
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string]bool, 64)
-	for _, a := range addrs {
-		var ip net.IP
-		switch v := a.(type) {
-		case *net.IPNet:
-			ip = v.IP
-		case *net.IPAddr:
-			ip = v.IP
-		default:
-			continue
-		}
-		if ip == nil {
-			continue
-		}
-		out[ip.String()] = true
-	}
-	return out, nil
 }
