@@ -31,7 +31,10 @@ type PcapScanOptions struct {
 	DenyDstPorts map[int]bool
 	DenySrcPorts map[int]bool
 
-	ServicePorts map[int]bool
+	IncludeARP    bool
+	IncludeICMP   bool
+	IncludeICMPv6 bool
+	IncludeTCPAck bool
 }
 
 type PcapScanCapturer struct {
@@ -63,7 +66,7 @@ func NewPcapScanCapturer(agentID string, opts PcapScanOptions) (*PcapScanCapture
 		localIPs:    localIPs,
 		buf:         make([]model.NetEvent, 0, 2048),
 		cache:       make(map[string]time.Time, 8192),
-		lastCleanup: time.Now(),
+		lastCleanup: time.Now().UTC(),
 	}, nil
 }
 
@@ -86,9 +89,14 @@ func applyPcapDefaults(o *PcapScanOptions) {
 	if o.DenySrcPorts == nil {
 		o.DenySrcPorts = map[int]bool{}
 	}
-	if o.ServicePorts == nil {
-		o.ServicePorts = map[int]bool{22: true}
+
+	// Defaults focused on low-noise scan detection
+	if !o.IncludeICMP && !o.IncludeICMPv6 {
+		o.IncludeICMP = true
+		o.IncludeICMPv6 = true
 	}
+	// ARP is very noisy in real networks; keep it opt-in.
+	// ACK-only is also noisy; keep it opt-in.
 }
 
 func (c *PcapScanCapturer) Start(ctx context.Context) error {
@@ -103,8 +111,9 @@ func (c *PcapScanCapturer) Start(ctx context.Context) error {
 	}
 	defer handle.Close()
 
-	if err := handle.SetBPFFilter("tcp or udp or icmp or icmp6 or arp"); err != nil {
-		return fmt.Errorf("pcap bpf set: %w", err)
+	bpf := c.buildBPF()
+	if err := handle.SetBPFFilter(bpf); err != nil {
+		return fmt.Errorf("pcap bpf set (%s): %w", bpf, err)
 	}
 
 	src := gopacket.NewPacketSource(handle, handle.LinkType())
@@ -125,6 +134,20 @@ func (c *PcapScanCapturer) Start(ctx context.Context) error {
 	}
 }
 
+func (c *PcapScanCapturer) buildBPF() string {
+	parts := []string{"tcp", "udp"}
+	if c.opts.IncludeICMP {
+		parts = append(parts, "icmp")
+	}
+	if c.opts.IncludeICMPv6 {
+		parts = append(parts, "icmp6")
+	}
+	if c.opts.IncludeARP {
+		parts = append(parts, "arp")
+	}
+	return strings.Join(parts, " or ")
+}
+
 func (c *PcapScanCapturer) Drain() []model.NetEvent {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -143,13 +166,13 @@ func (c *PcapScanCapturer) push(ev model.NetEvent) {
 
 	scanType := ""
 	if ev.Extra != nil {
-		if v, ok := ev.Extra["scan_type"].(string); ok {
-			scanType = v
+		if st, ok := ev.Extra["scan_type"].(string); ok {
+			scanType = st
 		}
 	}
 
-	key := fmt.Sprintf("%s|%s|%s|%s|%d|%d|%s",
-		ev.EventType, ev.Proto, ev.SrcIP, ev.DstIP, ev.SrcPort, ev.DstPort, scanType,
+	key := fmt.Sprintf("%s|%s|%s|%d|%d|%s",
+		ev.Proto, ev.SrcIP, ev.DstIP, ev.SrcPort, ev.DstPort, scanType,
 	)
 
 	c.mu.Lock()
@@ -195,40 +218,44 @@ func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *mod
 		l := ip6.(*layers.IPv6)
 		srcIP, dstIP = l.SrcIP.String(), l.DstIP.String()
 		ipVersion = 6
-	} else if arpL := pkt.Layer(layers.LayerTypeARP); arpL != nil {
-		arp := arpL.(*layers.ARP)
-		if arp.Operation != layers.ARPRequest {
-			return nil
-		}
+	} else if c.opts.IncludeARP {
+		if arpL := pkt.Layer(layers.LayerTypeARP); arpL != nil {
+			arp := arpL.(*layers.ARP)
+			if arp.Operation != layers.ARPRequest {
+				return nil
+			}
 
-		src := net.IP(arp.SourceProtAddress).String()
-		dst := net.IP(arp.DstProtAddress).String()
+			src := net.IP(arp.SourceProtAddress).String()
+			dst := net.IP(arp.DstProtAddress).String()
 
-		if !c.localIPs[dst] {
-			return nil
-		}
-		if c.shouldDrop(src, dst, 0, 0) {
-			return nil
-		}
+			if !c.localIPs[dst] {
+				return nil
+			}
+			if c.shouldDrop(src, dst, 0, 0) {
+				return nil
+			}
 
-		return &model.NetEvent{
-			AgentID:   c.agentID,
-			EventType: "scan_probe",
-			Timestamp: ts,
-			SrcIP:     src,
-			DstIP:     dst,
-			Proto:     "arp",
-			Bytes:     len(pkt.Data()),
-			Extra: map[string]interface{}{
-				"scan_type":  "arp_request",
-				"iface":      iface,
-				"ip_version": 0,
-			},
+			return &model.NetEvent{
+				AgentID:   c.agentID,
+				EventType: "scan_probe",
+				Timestamp: ts,
+				SrcIP:     src,
+				DstIP:     dst,
+				Proto:     "arp",
+				Bytes:     len(pkt.Data()),
+				Extra: map[string]interface{}{
+					"scan_type":  "arp_request",
+					"iface":      iface,
+					"ip_version": 0,
+				},
+			}
 		}
+		return nil
 	} else {
 		return nil
 	}
 
+	// Only inbound-to-host signals (dst is one of our local IPs)
 	if !c.localIPs[dstIP] {
 		return nil
 	}
@@ -239,11 +266,6 @@ func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *mod
 	if tcpL := pkt.Layer(layers.LayerTypeTCP); tcpL != nil {
 		tcp := tcpL.(*layers.TCP)
 
-		scanType := classifyTCP(tcp)
-		if scanType == "" {
-			return nil
-		}
-
 		srcPort := int(tcp.SrcPort)
 		dstPort := int(tcp.DstPort)
 
@@ -251,25 +273,14 @@ func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *mod
 			return nil
 		}
 
-		eventType := "scan_probe"
-		// SYN to service ports is treated as service probing to avoid scan false positives.
-		if scanType == "tcp_syn" && c.opts.ServicePorts[dstPort] {
-			eventType = "service_probe"
-		}
-
-		extra := map[string]interface{}{
-			"scan_type":  scanType,
-			"iface":      iface,
-			"ip_version": ipVersion,
-			"tcp_flags":  tcpFlagsString(tcp),
-		}
-		if eventType == "service_probe" {
-			extra["service_port"] = dstPort
+		scanType := classifyTCP(tcp, c.opts.IncludeTCPAck)
+		if scanType == "" {
+			return nil
 		}
 
 		return &model.NetEvent{
 			AgentID:   c.agentID,
-			EventType: eventType,
+			EventType: "scan_probe",
 			Timestamp: ts,
 			SrcIP:     srcIP,
 			DstIP:     dstIP,
@@ -277,12 +288,18 @@ func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *mod
 			DstPort:   dstPort,
 			Proto:     "tcp",
 			Bytes:     len(pkt.Data()),
-			Extra:     extra,
+			Extra: map[string]interface{}{
+				"scan_type":  scanType,
+				"iface":      iface,
+				"ip_version": ipVersion,
+				"tcp_flags":  tcpFlagsString(tcp),
+			},
 		}
 	}
 
 	if udpL := pkt.Layer(layers.LayerTypeUDP); udpL != nil {
 		udp := udpL.(*layers.UDP)
+
 		srcPort := int(udp.SrcPort)
 		dstPort := int(udp.DstPort)
 
@@ -308,49 +325,55 @@ func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *mod
 		}
 	}
 
-	if icmp4L := pkt.Layer(layers.LayerTypeICMPv4); icmp4L != nil {
-		icmp := icmp4L.(*layers.ICMPv4)
-		if icmp.TypeCode.Type() != layers.ICMPv4TypeEchoRequest {
-			return nil
-		}
-		return &model.NetEvent{
-			AgentID:   c.agentID,
-			EventType: "scan_probe",
-			Timestamp: ts,
-			SrcIP:     srcIP,
-			DstIP:     dstIP,
-			Proto:     "icmp",
-			Bytes:     len(pkt.Data()),
-			Extra: map[string]interface{}{
-				"scan_type":  "icmp_echo",
-				"iface":      iface,
-				"ip_version": ipVersion,
-				"icmp_type":  int(icmp.TypeCode.Type()),
-				"icmp_code":  int(icmp.TypeCode.Code()),
-			},
+	if c.opts.IncludeICMP {
+		if icmp4L := pkt.Layer(layers.LayerTypeICMPv4); icmp4L != nil {
+			icmp := icmp4L.(*layers.ICMPv4)
+			if icmp.TypeCode.Type() != layers.ICMPv4TypeEchoRequest {
+				return nil
+			}
+
+			return &model.NetEvent{
+				AgentID:   c.agentID,
+				EventType: "scan_probe",
+				Timestamp: ts,
+				SrcIP:     srcIP,
+				DstIP:     dstIP,
+				Proto:     "icmp",
+				Bytes:     len(pkt.Data()),
+				Extra: map[string]interface{}{
+					"scan_type":  "icmp_echo",
+					"iface":      iface,
+					"ip_version": ipVersion,
+					"icmp_type":  int(icmp.TypeCode.Type()),
+					"icmp_code":  int(icmp.TypeCode.Code()),
+				},
+			}
 		}
 	}
 
-	if icmp6L := pkt.Layer(layers.LayerTypeICMPv6); icmp6L != nil {
-		icmp := icmp6L.(*layers.ICMPv6)
-		if icmp.TypeCode.Type() != layers.ICMPv6TypeEchoRequest {
-			return nil
-		}
-		return &model.NetEvent{
-			AgentID:   c.agentID,
-			EventType: "scan_probe",
-			Timestamp: ts,
-			SrcIP:     srcIP,
-			DstIP:     dstIP,
-			Proto:     "icmp6",
-			Bytes:     len(pkt.Data()),
-			Extra: map[string]interface{}{
-				"scan_type":  "icmp6_echo",
-				"iface":      iface,
-				"ip_version": ipVersion,
-				"icmp_type":  int(icmp.TypeCode.Type()),
-				"icmp_code":  int(icmp.TypeCode.Code()),
-			},
+	if c.opts.IncludeICMPv6 {
+		if icmp6L := pkt.Layer(layers.LayerTypeICMPv6); icmp6L != nil {
+			icmp := icmp6L.(*layers.ICMPv6)
+			if icmp.TypeCode.Type() != layers.ICMPv6TypeEchoRequest {
+				return nil
+			}
+
+			return &model.NetEvent{
+				AgentID:   c.agentID,
+				EventType: "scan_probe",
+				Timestamp: ts,
+				SrcIP:     srcIP,
+				DstIP:     dstIP,
+				Proto:     "icmp6",
+				Bytes:     len(pkt.Data()),
+				Extra: map[string]interface{}{
+					"scan_type":  "icmp6_echo",
+					"iface":      iface,
+					"ip_version": ipVersion,
+					"icmp_type":  int(icmp.TypeCode.Type()),
+					"icmp_code":  int(icmp.TypeCode.Code()),
+				},
+			}
 		}
 	}
 
@@ -358,10 +381,10 @@ func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *mod
 }
 
 func (c *PcapScanCapturer) shouldDrop(srcIP, dstIP string, srcPort, dstPort int) bool {
-	if c.opts.DenySrcPorts[srcPort] {
+	if srcPort > 0 && c.opts.DenySrcPorts[srcPort] {
 		return true
 	}
-	if c.opts.DenyDstPorts[dstPort] {
+	if dstPort > 0 && c.opts.DenyDstPorts[dstPort] {
 		return true
 	}
 
@@ -383,10 +406,11 @@ func (c *PcapScanCapturer) shouldDrop(srcIP, dstIP string, srcPort, dstPort int)
 			return true
 		}
 	}
+
 	return false
 }
 
-func classifyTCP(t *layers.TCP) string {
+func classifyTCP(t *layers.TCP, includeAck bool) string {
 	if t.SYN && !t.ACK {
 		return "tcp_syn"
 	}
@@ -399,7 +423,7 @@ func classifyTCP(t *layers.TCP) string {
 	if t.FIN && t.PSH && t.URG {
 		return "tcp_xmas"
 	}
-	if t.ACK && !t.SYN && !t.FIN && !t.RST {
+	if includeAck && t.ACK && !t.SYN && !t.FIN && !t.RST && !t.PSH && !t.URG {
 		return "tcp_ack"
 	}
 	return ""
