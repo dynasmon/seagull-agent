@@ -15,7 +15,9 @@ import (
 	"syscall"
 	"time"
 
-	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/capture"
+	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/proc"
+	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/scan"
+	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/ssh"
 	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/model"
 	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/sender"
 )
@@ -108,11 +110,11 @@ type SummaryState struct {
 	LastHTTPStatus int
 	LastError      string
 
-	LastSummaryAt             time.Time
-	LastSummaryEventsSent     int
-	LastSummaryScanTotal      int
-	LastSummaryScanEffective  int
-	LastHeartbeatAt           time.Time
+	LastSummaryAt            time.Time
+	LastSummaryEventsSent    int
+	LastSummaryScanTotal     int
+	LastSummaryScanEffective int
+	LastHeartbeatAt          time.Time
 }
 
 type Agent struct {
@@ -120,9 +122,9 @@ type Agent struct {
 
 	sender *sender.Sender
 
-	procCapturer *capture.Capturer
-	authCapturer *capture.AuthLogCapturer
-	scanCapturer *capture.PcapScanCapturer
+	procCapturer *proc.Capturer
+	authCapturer *ssh.AuthLogCapturer
+	scanCapturer *scan.PcapScanCapturer
 
 	state SummaryState
 }
@@ -161,17 +163,17 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc) (*Ag
 		cfg:    cfg,
 		sender: sender.New(cfg.APIURL, cfg.HTTPTimeout, cfg.SenderMaxBatch),
 		state: SummaryState{
-			StartedAt:                 time.Now().UTC(),
-			LastSummaryAt:             time.Now().UTC(),
-			LastHeartbeatAt:           time.Now().UTC(),
-			LastSummaryEventsSent:     0,
-			LastSummaryScanTotal:      0,
-			LastSummaryScanEffective:  0,
+			StartedAt:            time.Now().UTC(),
+			LastSummaryAt:        time.Now().UTC(),
+			LastHeartbeatAt:      time.Now().UTC(),
+			LastSummaryEventsSent:    0,
+			LastSummaryScanTotal:     0,
+			LastSummaryScanEffective: 0,
 		},
 	}
 
 	if contains(cfg.Sources, "proc") {
-		opts := capture.Options{
+		opts := proc.Options{
 			DedupTTL:             cfg.DedupTTL,
 			EstablishedTTL:       cfg.EstablishedTTL,
 			SkipLoopback:         cfg.SkipLoopback,
@@ -183,11 +185,11 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc) (*Ag
 			DenyDstPorts:         cfg.DenyDstPorts,
 			DenySrcPorts:         cfg.DenySrcPorts,
 		}
-		a.procCapturer = capture.New(cfg.AgentID, cfg.ProcTCP4Path, cfg.ProcTCP6Path, opts)
+		a.procCapturer = proc.New(cfg.AgentID, cfg.ProcTCP4Path, cfg.ProcTCP6Path, opts)
 	}
 
 	if contains(cfg.Sources, "authlog") {
-		a.authCapturer = capture.NewAuthLogCapturer(cfg.AgentID, capture.AuthLogOptions{
+		a.authCapturer = ssh.NewAuthLogCapturer(cfg.AgentID, ssh.AuthLogOptions{
 			Path:            cfg.AuthLogPath,
 			MaxBatchSize:    200,
 			DedupTTL:        30 * time.Second,
@@ -196,7 +198,7 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc) (*Ag
 	}
 
 	if contains(cfg.Sources, "scan") {
-		sc, err := capture.NewPcapScanCapturer(cfg.AgentID, capture.PcapScanOptions{
+		sc, err := scan.NewPcapScanCapturer(cfg.AgentID, scan.PcapScanOptions{
 			Interface:     cfg.ScanIface,
 			DedupTTL:      cfg.ScanDedupTTL,
 			MaxBatchSize:  cfg.ScanMaxBatch,
@@ -232,7 +234,6 @@ func (a *Agent) loop(rootCtx context.Context) {
 	summaryTicker := time.NewTicker(a.cfg.LogSummaryEvery)
 	defer summaryTicker.Stop()
 
-	// First cycle
 	a.runAndLog(rootCtx)
 
 	for {
@@ -279,7 +280,6 @@ func (a *Agent) runOnce(rootCtx context.Context) *CycleResult {
 	events := make([]model.NetEvent, 0, 1024)
 	scanRaw := make([]model.NetEvent, 0, 1024)
 
-	// Authlog
 	if a.authCapturer != nil {
 		evs, err := a.authCapturer.Capture(time.Now().UTC())
 		if err != nil {
@@ -292,7 +292,6 @@ func (a *Agent) runOnce(rootCtx context.Context) *CycleResult {
 		}
 	}
 
-	// Proc
 	if a.procCapturer != nil {
 		evs, err := a.procCapturer.Capture()
 		if err != nil {
@@ -305,7 +304,6 @@ func (a *Agent) runOnce(rootCtx context.Context) *CycleResult {
 		}
 	}
 
-	// Scan
 	if a.scanCapturer != nil {
 		evs := a.scanCapturer.Drain()
 		if len(evs) > 0 {
@@ -323,12 +321,10 @@ func (a *Agent) runOnce(rootCtx context.Context) *CycleResult {
 	scanStats := computeScanStats(scanRaw)
 	mode := normalizeScanMode(a.cfg.ScanMode)
 
-	// Only treat scan probes as "effective scan" if it is not service noise
 	if scanStats.Class == "service_noise" {
 		scanStats.Effective = 0
 	}
 
-	// Build outgoing events
 	if mode == "raw" || mode == "both" {
 		events = append(events, scanRaw...)
 	}
@@ -336,7 +332,6 @@ func (a *Agent) runOnce(rootCtx context.Context) *CycleResult {
 		events = append(events, buildScanSummaries(a.cfg.AgentID, scanRaw, a.cfg.Interval)...)
 	}
 
-	// Nothing to send (but we still return stats)
 	if len(events) == 0 {
 		return &CycleResult{
 			Sent:          0,
@@ -403,7 +398,6 @@ func (a *Agent) shouldLogCycle(res *CycleResult) bool {
 		return true
 	}
 
-	// Log scan only when it's meaningful (reduces SSH brute being treated as scan)
 	if res.ScanClass == "scan" || res.ScanClass == "suspicious" {
 		return true
 	}
@@ -513,12 +507,12 @@ func (a *Agent) flushSummary() {
 
 		"summary_period_sec": int(period.Seconds()),
 
-		"sent_delta":                 sentDelta,
-		"scan_probes_delta":          scanDelta,
+		"sent_delta":                  sentDelta,
+		"scan_probes_delta":           scanDelta,
 		"scan_probes_effective_delta": scanEffDelta,
 
-		"sent_per_sec":                 round2(sentPerSec),
-		"scan_probes_per_sec":          round2(scanPerSec),
+		"sent_per_sec":                  round2(sentPerSec),
+		"scan_probes_per_sec":           round2(scanPerSec),
 		"scan_probes_effective_per_sec": round2(scanEffPerSec),
 
 		"avg_sent_per_sec": round2(avgSentPerSec),
@@ -719,17 +713,14 @@ func classifyScan(total, uniquePorts, sshHits int) string {
 
 	sshRatio := float64(sshHits) / float64(max(1, total))
 
-	// Broad coverage + volume => scan
 	if uniquePorts >= 20 && total >= 60 {
 		return "scan"
 	}
 
-	// Many hits to 1-2 ports (especially SSH) => service noise (e.g. brute)
 	if uniquePorts <= 2 && total >= 20 && sshRatio >= 0.80 {
 		return "service_noise"
 	}
 
-	// Moderate diversity + high volume => suspicious
 	if uniquePorts >= 8 && total >= 80 {
 		return "suspicious"
 	}
