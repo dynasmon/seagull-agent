@@ -1,4 +1,5 @@
-package capture
+package ssh
+
 
 import (
 	"bufio"

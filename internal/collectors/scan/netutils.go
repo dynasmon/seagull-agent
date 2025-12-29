@@ -1,4 +1,4 @@
-package capture
+package scan
 
 import "net"
 

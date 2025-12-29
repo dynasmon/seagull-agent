@@ -1,4 +1,4 @@
-package capture
+package proc
 
 import (
 	"bufio"
@@ -115,9 +115,9 @@ func (c *Capturer) Capture() ([]model.NetEvent, error) {
 	return out, nil
 }
 
-// Semântica padronizada (host-centric):
-//   src_* = remoto (cliente/atacante)
-//   dst_* = local (máquina monitorada/porta alvo)
+// Standardized (host-centric) semantics:
+//   src_* = remote (client/attacker)
+//   dst_* = local (monitored host/target port)
 func (c *Capturer) captureProc4(ts time.Time) ([]model.NetEvent, error) {
 	f, err := os.Open(c.tcp4Path)
 	if err != nil {
@@ -161,12 +161,12 @@ func (c *Capturer) captureProc4(ts time.Time) ([]model.NetEvent, error) {
 			continue
 		}
 
-		// Remoto inválido/zero (ex.: sockets sem par remoto)
+		// Invalid/zero remote endpoint (e.g., sockets without a remote peer).
 		if remotePort == 0 || remoteIP == "0.0.0.0" {
 			continue
 		}
 
-		// shouldDrop espera (src=remoto, dst=local) após a padronização
+		// shouldDrop expects (src=remote, dst=local) after normalization.
 		if c.shouldDrop(remoteIP, localIP, remotePort, localPort) {
 			continue
 		}
@@ -176,15 +176,14 @@ func (c *Capturer) captureProc4(ts time.Time) ([]model.NetEvent, error) {
 			"tcp_state_hex": stateHex,
 			"ip_version":    4,
 
-			// Campos explícitos para debug/dashboards
+			// Explicit fields for debugging/dashboards.
 			"local_ip":    localIP,
 			"local_port":  localPort,
 			"remote_ip":   remoteIP,
 			"remote_port": remotePort,
 		}
 
-		// Observação: o layout de /proc/net/tcp pode variar entre kernels;
-		// mantemos o parsing "best-effort" sem falhar o loop.
+		// /proc/net/tcp layout can vary across kernels; keep parsing best-effort.
 		if len(fields) > 9 {
 			if uid, e := strconv.Atoi(fields[7]); e == nil {
 				extra["uid"] = uid
@@ -199,7 +198,7 @@ func (c *Capturer) captureProc4(ts time.Time) ([]model.NetEvent, error) {
 			EventType: "flow",
 			Timestamp: ts,
 
-			// remoto -> local (atacante -> alvo)
+			// Remote -> local (attacker -> target).
 			SrcIP:   remoteIP,
 			SrcPort: remotePort,
 			DstIP:   localIP,
@@ -413,7 +412,7 @@ func parseHexIPPort4(s string) (string, int, error) {
 		if err != nil {
 			return "", 0, err
 		}
-		// IPv4 em /proc/net/tcp vem little-endian
+		// IPv4 in /proc/net/tcp is little-endian.
 		ipBytes[3-i] = byte(b)
 	}
 
@@ -438,7 +437,7 @@ func parseHexIPPort6(s string) (string, int, error) {
 		return "", 0, fmt.Errorf("invalid ipv6 hex: %s", ipHex)
 	}
 
-	// IPv6 em /proc/net/tcp6 vem em palavras de 32 bits little-endian
+	// /proc/net/tcp6 uses 32-bit words in little-endian order.
 	var b strings.Builder
 	b.Grow(32)
 	for i := 0; i < 4; i++ {
