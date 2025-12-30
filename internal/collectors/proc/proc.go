@@ -25,6 +25,10 @@ type Options struct {
 	SkipLinkLocal        bool
 	SkipPrivateToPrivate bool
 
+	// Drops flows that are very likely outbound: remote well-known port -> local ephemeral port.
+	DropLikelyOutbound bool
+	EphemeralPortMin   int
+
 	DenyCIDRs    []*net.IPNet
 	DenyDstPorts map[int]bool
 	DenySrcPorts map[int]bool
@@ -68,6 +72,9 @@ func applyDefaults(o *Options) {
 	}
 	if o.MaxBatchSize <= 0 {
 		o.MaxBatchSize = 500
+	}
+	if o.EphemeralPortMin <= 0 {
+		o.EphemeralPortMin = 49152
 	}
 	if o.AllowStates == nil {
 		o.AllowStates = map[string]bool{
@@ -161,12 +168,12 @@ func (c *Capturer) captureProc4(ts time.Time) ([]model.NetEvent, error) {
 			continue
 		}
 
-		// Invalid/zero remote endpoint (e.g., sockets without a remote peer).
+		// Invalid/zero remote endpoint.
 		if remotePort == 0 || remoteIP == "0.0.0.0" {
 			continue
 		}
 
-		// shouldDrop expects (src=remote, dst=local) after normalization.
+		// shouldDrop expects (src=remote, dst=local).
 		if c.shouldDrop(remoteIP, localIP, remotePort, localPort) {
 			continue
 		}
@@ -176,14 +183,13 @@ func (c *Capturer) captureProc4(ts time.Time) ([]model.NetEvent, error) {
 			"tcp_state_hex": stateHex,
 			"ip_version":    4,
 
-			// Explicit fields for debugging/dashboards.
 			"local_ip":    localIP,
 			"local_port":  localPort,
 			"remote_ip":   remoteIP,
 			"remote_port": remotePort,
 		}
 
-		// /proc/net/tcp layout can vary across kernels; keep parsing best-effort.
+		// Best-effort parsing for optional fields.
 		if len(fields) > 9 {
 			if uid, e := strconv.Atoi(fields[7]); e == nil {
 				extra["uid"] = uid
@@ -198,7 +204,6 @@ func (c *Capturer) captureProc4(ts time.Time) ([]model.NetEvent, error) {
 			EventType: "flow",
 			Timestamp: ts,
 
-			// Remote -> local (attacker -> target).
 			SrcIP:   remoteIP,
 			SrcPort: remotePort,
 			DstIP:   localIP,
@@ -312,6 +317,17 @@ func (c *Capturer) captureProc6(ts time.Time) ([]model.NetEvent, error) {
 }
 
 func (c *Capturer) shouldDrop(srcIP, dstIP string, srcPort, dstPort int) bool {
+	// Drop flows that are very likely outbound (remote well-known port -> local ephemeral port).
+	if c.opts.DropLikelyOutbound {
+		ephMin := c.opts.EphemeralPortMin
+		if ephMin <= 0 {
+			ephMin = 49152
+		}
+		if dstPort >= ephMin && srcPort > 0 && srcPort < ephMin {
+			return true
+		}
+	}
+
 	if c.opts.DenySrcPorts[srcPort] {
 		return true
 	}
