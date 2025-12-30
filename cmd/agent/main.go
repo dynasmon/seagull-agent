@@ -49,6 +49,9 @@ type Config struct {
 	SkipLinkLocal        bool
 	SkipPrivateToPrivate bool
 
+	ProcDropLikelyOutbound bool
+	EphemeralPortMin       int
+
 	DedupTTL       time.Duration
 	EstablishedTTL time.Duration
 
@@ -159,16 +162,18 @@ func main() {
 }
 
 func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc) (*Agent, error) {
+	now := time.Now().UTC()
+
 	a := &Agent{
 		cfg:    cfg,
 		sender: sender.New(cfg.APIURL, cfg.HTTPTimeout, cfg.SenderMaxBatch),
 		state: SummaryState{
-			StartedAt:            time.Now().UTC(),
-			LastSummaryAt:        time.Now().UTC(),
-			LastHeartbeatAt:      time.Now().UTC(),
-			LastSummaryEventsSent:    0,
-			LastSummaryScanTotal:     0,
-			LastSummaryScanEffective: 0,
+			StartedAt:                 now,
+			LastSummaryAt:             now,
+			LastHeartbeatAt:           now,
+			LastSummaryEventsSent:     0,
+			LastSummaryScanTotal:      0,
+			LastSummaryScanEffective:  0,
 		},
 	}
 
@@ -184,6 +189,9 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc) (*Ag
 			DenyCIDRs:            cfg.DenyCIDRs,
 			DenyDstPorts:         cfg.DenyDstPorts,
 			DenySrcPorts:         cfg.DenySrcPorts,
+
+			DropLikelyOutbound: cfg.ProcDropLikelyOutbound,
+			EphemeralPortMin:   cfg.EphemeralPortMin,
 		}
 		a.procCapturer = proc.New(cfg.AgentID, cfg.ProcTCP4Path, cfg.ProcTCP6Path, opts)
 	}
@@ -567,6 +575,9 @@ func loadConfig() Config {
 	skipLinkLocal := parseBool(getEnv("NETWATCH_SKIP_LINK_LOCAL", "true"), true)
 	skipPrivate := parseBool(getEnv("NETWATCH_SKIP_PRIVATE_TO_PRIVATE", "false"), false)
 
+	procDropOutbound := parseBool(getEnv("NETWATCH_PROC_DROP_LIKELY_OUTBOUND", "true"), true)
+	ephemeralMin := parseInt(getEnv("NETWATCH_EPHEMERAL_PORT_MIN", "49152"), 49152)
+
 	dedupTTL := parseDuration(getEnv("NETWATCH_DEDUP_TTL", "30s"), 30*time.Second)
 	establishedTTL := parseDuration(getEnv("NETWATCH_ESTABLISHED_TTL", "10m"), 10*time.Minute)
 
@@ -604,6 +615,9 @@ func loadConfig() Config {
 		SkipLoopback:         skipLoopback,
 		SkipLinkLocal:        skipLinkLocal,
 		SkipPrivateToPrivate: skipPrivate,
+
+		ProcDropLikelyOutbound: procDropOutbound,
+		EphemeralPortMin:       ephemeralMin,
 
 		DedupTTL:       dedupTTL,
 		EstablishedTTL: establishedTTL,
@@ -660,8 +674,8 @@ type ScanStats struct {
 	Score          int
 }
 
-func computeScanStats(scan []model.NetEvent) ScanStats {
-	if len(scan) == 0 {
+func computeScanStats(scanEvents []model.NetEvent) ScanStats {
+	if len(scanEvents) == 0 {
 		return ScanStats{Class: "none"}
 	}
 
@@ -670,7 +684,7 @@ func computeScanStats(scan []model.NetEvent) ScanStats {
 	sshHits := 0
 	total := 0
 
-	for _, ev := range scan {
+	for _, ev := range scanEvents {
 		if ev.EventType != "scan_probe" {
 			continue
 		}
@@ -760,14 +774,14 @@ type scanAgg struct {
 	scanTypes map[string]bool
 }
 
-func buildScanSummaries(agentID string, scan []model.NetEvent, window time.Duration) []model.NetEvent {
-	if len(scan) == 0 {
+func buildScanSummaries(agentID string, scanEvents []model.NetEvent, window time.Duration) []model.NetEvent {
+	if len(scanEvents) == 0 {
 		return nil
 	}
 
 	m := map[scanKey]*scanAgg{}
 
-	for _, ev := range scan {
+	for _, ev := range scanEvents {
 		if ev.EventType != "scan_probe" {
 			continue
 		}
