@@ -41,6 +41,7 @@ type Config struct {
 
 	AuthLogPath         string
 	AuthIncludeAccepted bool
+	AuthDedupTTL        time.Duration
 
 	ProcTCP4Path string
 	ProcTCP6Path string
@@ -168,12 +169,12 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc) (*Ag
 		cfg:    cfg,
 		sender: sender.New(cfg.APIURL, cfg.HTTPTimeout, cfg.SenderMaxBatch),
 		state: SummaryState{
-			StartedAt:                 now,
-			LastSummaryAt:             now,
-			LastHeartbeatAt:           now,
-			LastSummaryEventsSent:     0,
-			LastSummaryScanTotal:      0,
-			LastSummaryScanEffective:  0,
+			StartedAt:                now,
+			LastSummaryAt:            now,
+			LastHeartbeatAt:          now,
+			LastSummaryEventsSent:    0,
+			LastSummaryScanTotal:     0,
+			LastSummaryScanEffective: 0,
 		},
 	}
 
@@ -200,7 +201,7 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc) (*Ag
 		a.authCapturer = ssh.NewAuthLogCapturer(cfg.AgentID, ssh.AuthLogOptions{
 			Path:            cfg.AuthLogPath,
 			MaxBatchSize:    200,
-			DedupTTL:        30 * time.Second,
+			DedupTTL:        cfg.AuthDedupTTL,
 			IncludeAccepted: cfg.AuthIncludeAccepted,
 		})
 	}
@@ -567,6 +568,7 @@ func loadConfig() Config {
 
 	logPath := getEnv("NETWATCH_AUTHLOG_PATH", "/var/log/auth.log")
 	includeAccepted := parseBool(getEnv("NETWATCH_AUTHLOG_INCLUDE_ACCEPTED", "false"), false)
+	authDedupTTL := parseDuration(getEnv("NETWATCH_AUTHLOG_DEDUP_TTL", "30s"), 30*time.Second)
 
 	procTCP4Path := getEnv("NETWATCH_PROC_TCP4_PATH", "/proc/net/tcp")
 	procTCP6Path := getEnv("NETWATCH_PROC_TCP6_PATH", "/proc/net/tcp6")
@@ -608,6 +610,7 @@ func loadConfig() Config {
 
 		AuthLogPath:         logPath,
 		AuthIncludeAccepted: includeAccepted,
+		AuthDedupTTL:        authDedupTTL,
 
 		ProcTCP4Path: procTCP4Path,
 		ProcTCP6Path: procTCP6Path,
