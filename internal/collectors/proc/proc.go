@@ -80,9 +80,10 @@ func applyDefaults(o *Options) {
 		o.AllowStates = map[string]bool{
 			"01": true, // ESTABLISHED
 			"02": true, // SYN_SENT
-			"03": true, // SYN_RECV
+			"03": true, // SYN_RECV (inbound attempts)
 			"04": true, // FIN_WAIT1
 			"05": true, // FIN_WAIT2
+			"06": true, // TIME_WAIT (burst-friendly: short-lived connections)
 			"08": true, // CLOSE_WAIT
 			"09": true, // LAST_ACK
 			"0B": true, // CLOSING
