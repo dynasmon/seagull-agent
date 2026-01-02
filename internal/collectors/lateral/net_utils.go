@@ -1,11 +1,9 @@
-package scan
+package lateral
 
-import (
-	"net"
-)
+import "net"
 
 func collectLocalIPs() (map[string]bool, error) {
-	m := map[string]bool{}
+	m := make(map[string]bool, 64)
 
 	ifaces, err := net.Interfaces()
 	if err != nil {
@@ -17,18 +15,18 @@ func collectLocalIPs() (map[string]bool, error) {
 		if err != nil {
 			continue
 		}
-		for _, a := range addrs {
+		for _, addr := range addrs {
 			var ip net.IP
-			switch v := a.(type) {
+			switch a := addr.(type) {
 			case *net.IPNet:
-				ip = v.IP
+				ip = a.IP
 			case *net.IPAddr:
-				ip = v.IP
+				ip = a.IP
 			}
 			if ip == nil {
 				continue
 			}
-			ip = ip.To16()
+			ip = ip.To4()
 			if ip == nil {
 				continue
 			}

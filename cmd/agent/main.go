@@ -65,6 +65,7 @@ type Config struct {
 
 	ScanMode string // raw|summary|both
 
+	LateralIface              string
 	LateralPorts              map[int]bool
 	LateralIncludeEstablished bool
 	LateralDedupTTL           time.Duration
@@ -134,12 +135,12 @@ type Agent struct {
 
 	sender *sender.Sender
 
-	procCapturer    *proc.Capturer
-	authCapturer    *ssh.AuthLogCapturer
-	scanCapturer    *scan.PcapScanCapturer
-	lateralCapturer *lateral.ProcLateralCapturer
-
-	state SummaryState
+	procCapturer         *proc.Capturer
+	authCapturer         *ssh.AuthLogCapturer
+	scanCapturer         *scan.PcapScanCapturer
+	lateralPcapCapturer  *lateral.PcapLateralCapturer
+	lateralProcCapturer  *lateral.ProcLateralCapturer
+	state                SummaryState
 }
 
 func main() {
@@ -242,31 +243,59 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc) (*Ag
 	}
 
 	if contains(cfg.Sources, "lateral") {
-		procOpts := proc.Options{
-			DedupTTL:             cfg.LateralDedupTTL,
-			EstablishedTTL:       cfg.EstablishedTTL,
-			SkipLoopback:         cfg.SkipLoopback,
-			SkipLinkLocal:        cfg.SkipLinkLocal,
-			SkipPrivateToPrivate: cfg.SkipPrivateToPrivate,
-			IncludeIPv6:          true,
-			MaxBatchSize:         max(300, cfg.LateralMaxBatch*4),
-			DenyCIDRs:            cfg.DenyCIDRs,
-
-			DropLikelyOutbound: cfg.ProcDropLikelyOutbound,
-			EphemeralPortMin:   cfg.EphemeralPortMin,
+		// 1) PCAP lateral: captures inbound SYN attempts to admin ports even when ports are closed.
+		lc, err := lateral.NewPcapLateralCapturer(cfg.AgentID, lateral.PcapLateralOptions{
+			Interface:     cfg.LateralIface,
+			Ports:         cfg.LateralPorts,
+			DedupTTL:      cfg.LateralDedupTTL,
+			MaxBatchSize:  cfg.LateralMaxBatch,
+			SkipLoopback:  cfg.SkipLoopback,
+			SkipLinkLocal: cfg.SkipLinkLocal,
+			DenyCIDRs:     cfg.DenyCIDRs,
+		})
+		if err != nil {
+			return nil, err
 		}
+		a.lateralPcapCapturer = lc
 
-		a.lateralCapturer = lateral.NewProcLateralCapturer(
-			cfg.AgentID,
-			cfg.ProcTCP4Path,
-			cfg.ProcTCP6Path,
-			procOpts,
-			lateral.Options{
-				Ports:              cfg.LateralPorts,
-				IncludeEstablished: cfg.LateralIncludeEstablished,
-				MaxBatchSize:       cfg.LateralMaxBatch,
-			},
-		)
+		go func() {
+			if err := a.lateralPcapCapturer.Start(rootCtx); err != nil {
+				logJSON(LevelError, "lateral_pcap_capture_stopped", map[string]interface{}{
+					"agent_id": cfg.AgentID,
+					"error":    err.Error(),
+				})
+				stop()
+			}
+		}()
+
+		// 2) Optional: proc-based lateral for established connections (only if enabled).
+		if cfg.LateralIncludeEstablished {
+			procOpts := proc.Options{
+				DedupTTL:             cfg.LateralDedupTTL,
+				EstablishedTTL:       cfg.EstablishedTTL,
+				SkipLoopback:         cfg.SkipLoopback,
+				SkipLinkLocal:        cfg.SkipLinkLocal,
+				SkipPrivateToPrivate: cfg.SkipPrivateToPrivate,
+				IncludeIPv6:          true,
+				MaxBatchSize:         max(300, cfg.LateralMaxBatch*4),
+				DenyCIDRs:            cfg.DenyCIDRs,
+
+				DropLikelyOutbound: cfg.ProcDropLikelyOutbound,
+				EphemeralPortMin:   cfg.EphemeralPortMin,
+			}
+
+			a.lateralProcCapturer = lateral.NewProcLateralCapturer(
+				cfg.AgentID,
+				cfg.ProcTCP4Path,
+				cfg.ProcTCP6Path,
+				procOpts,
+				lateral.Options{
+					Ports:              cfg.LateralPorts,
+					IncludeEstablished: cfg.LateralIncludeEstablished,
+					MaxBatchSize:       cfg.LateralMaxBatch,
+				},
+			)
+		}
 	}
 
 	return a, nil
@@ -350,15 +379,24 @@ func (a *Agent) runOnce(rootCtx context.Context) *CycleResult {
 	}
 
 	lateralEvents := 0
-	if a.lateralCapturer != nil {
-		evs, err := a.lateralCapturer.Capture()
+
+	if a.lateralPcapCapturer != nil {
+		evs := a.lateralPcapCapturer.Drain()
+		if len(evs) > 0 {
+			lateralEvents += len(evs)
+			events = append(events, evs...)
+		}
+	}
+
+	if a.lateralProcCapturer != nil {
+		evs, err := a.lateralProcCapturer.Capture()
 		if err != nil {
-			logJSON(LevelWarn, "lateral_capture_error", map[string]interface{}{
+			logJSON(LevelWarn, "lateral_proc_capture_error", map[string]interface{}{
 				"agent_id": a.cfg.AgentID,
 				"error":    err.Error(),
 			})
 		} else if len(evs) > 0 {
-			lateralEvents = len(evs)
+			lateralEvents += len(evs)
 			events = append(events, evs...)
 		}
 	}
@@ -658,6 +696,7 @@ func loadConfig() Config {
 	scanMaxBatch := parseInt(getEnv("NETWATCH_SCAN_MAX_BATCH", "5000"), 5000)
 	scanMode := getEnv("NETWATCH_SCAN_MODE", "summary")
 
+	lateralIface := getEnv("NETWATCH_LATERAL_PCAP_IFACE", scanIface)
 	lateralPorts := parseIntSet(getEnv("NETWATCH_LATERAL_PORTS", "445,3389,5985,5986,135,139"))
 	lateralIncludeEstablished := parseBool(getEnv("NETWATCH_LATERAL_INCLUDE_ESTABLISHED", "false"), false)
 	lateralDedupTTL := parseDuration(getEnv("NETWATCH_LATERAL_DEDUP_TTL", "5s"), 5*time.Second)
@@ -703,6 +742,7 @@ func loadConfig() Config {
 
 		ScanMode: scanMode,
 
+		LateralIface:              lateralIface,
 		LateralPorts:              lateralPorts,
 		LateralIncludeEstablished: lateralIncludeEstablished,
 		LateralDedupTTL:           lateralDedupTTL,
