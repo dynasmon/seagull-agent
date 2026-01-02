@@ -31,6 +31,10 @@ type PcapScanOptions struct {
 	DenyDstPorts map[int]bool
 	DenySrcPorts map[int]bool
 
+	// Reduces UDP reply noise (NTP/DNS/etc). If true, drops inbound UDP where dst port is ephemeral.
+	DropUDPEphemeral bool
+	EphemeralPortMin int
+
 	IncludeARP    bool
 	IncludeICMP   bool
 	IncludeICMPv6 bool
@@ -88,6 +92,15 @@ func applyPcapDefaults(o *PcapScanOptions) {
 	}
 	if o.DenySrcPorts == nil {
 		o.DenySrcPorts = map[int]bool{}
+	}
+
+	if o.EphemeralPortMin <= 0 {
+		o.EphemeralPortMin = 49152
+	}
+
+	// Default to dropping UDP replies to ephemeral ports (big noise reducer in VMs and desktops).
+	if !o.DropUDPEphemeral {
+		o.DropUDPEphemeral = true
 	}
 
 	// Defaults focused on low-noise scan detection
@@ -302,6 +315,11 @@ func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *mod
 
 		srcPort := int(udp.SrcPort)
 		dstPort := int(udp.DstPort)
+
+		// Drop common UDP reply noise (host-initiated traffic responses) to ephemeral ports.
+		if c.opts.DropUDPEphemeral && dstPort >= c.opts.EphemeralPortMin {
+			return nil
+		}
 
 		if c.shouldDrop(srcIP, dstIP, srcPort, dstPort) {
 			return nil
