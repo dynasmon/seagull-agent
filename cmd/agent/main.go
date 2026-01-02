@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/lateral"
 	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/proc"
 	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/scan"
 	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/ssh"
@@ -41,6 +42,7 @@ type Config struct {
 
 	AuthLogPath         string
 	AuthIncludeAccepted bool
+	AuthDedupTTL        time.Duration
 
 	ProcTCP4Path string
 	ProcTCP6Path string
@@ -55,15 +57,18 @@ type Config struct {
 	DedupTTL       time.Duration
 	EstablishedTTL time.Duration
 
-	DenyCIDRs    []*net.IPNet
-	DenyDstPorts map[int]bool
-	DenySrcPorts map[int]bool
+	DenyCIDRs []*net.IPNet
 
 	ScanIface    string
 	ScanDedupTTL time.Duration
 	ScanMaxBatch int
 
 	ScanMode string // raw|summary|both
+
+	LateralPorts              map[int]bool
+	LateralIncludeEstablished bool
+	LateralDedupTTL           time.Duration
+	LateralMaxBatch           int
 
 	LogLevel          LogLevel
 	LogSummaryEvery   time.Duration
@@ -79,6 +84,7 @@ type CycleResult struct {
 	SendAttempted bool
 
 	SSHAuthEvents int
+	LateralEvents int
 
 	ScanProbesTotal     int
 	ScanProbesEffective int
@@ -99,13 +105,15 @@ type SummaryState struct {
 	EventsSentTotal int
 
 	SSHAuthEventsTotal int
+	LateralEventsTotal int
 
 	ScanProbesTotal     int
 	ScanProbesEffective int
 
-	MaxSentCycle  int
-	MaxScanCycle  int
-	MaxPortsCycle int
+	MaxSentCycle    int
+	MaxScanCycle    int
+	MaxPortsCycle   int
+	MaxLateralCycle int
 
 	SendAttemptsTotal int
 	SendErrorsTotal   int
@@ -117,6 +125,7 @@ type SummaryState struct {
 	LastSummaryEventsSent    int
 	LastSummaryScanTotal     int
 	LastSummaryScanEffective int
+	LastSummaryLateralTotal  int
 	LastHeartbeatAt          time.Time
 }
 
@@ -125,9 +134,10 @@ type Agent struct {
 
 	sender *sender.Sender
 
-	procCapturer *proc.Capturer
-	authCapturer *ssh.AuthLogCapturer
-	scanCapturer *scan.PcapScanCapturer
+	procCapturer    *proc.Capturer
+	authCapturer    *ssh.AuthLogCapturer
+	scanCapturer    *scan.PcapScanCapturer
+	lateralCapturer *lateral.ProcLateralCapturer
 
 	state SummaryState
 }
@@ -168,12 +178,13 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc) (*Ag
 		cfg:    cfg,
 		sender: sender.New(cfg.APIURL, cfg.HTTPTimeout, cfg.SenderMaxBatch),
 		state: SummaryState{
-			StartedAt:                 now,
-			LastSummaryAt:             now,
-			LastHeartbeatAt:           now,
-			LastSummaryEventsSent:     0,
-			LastSummaryScanTotal:      0,
-			LastSummaryScanEffective:  0,
+			StartedAt:                now,
+			LastSummaryAt:            now,
+			LastHeartbeatAt:          now,
+			LastSummaryEventsSent:    0,
+			LastSummaryScanTotal:     0,
+			LastSummaryScanEffective: 0,
+			LastSummaryLateralTotal:  0,
 		},
 	}
 
@@ -187,8 +198,6 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc) (*Ag
 			IncludeIPv6:          true,
 			MaxBatchSize:         300,
 			DenyCIDRs:            cfg.DenyCIDRs,
-			DenyDstPorts:         cfg.DenyDstPorts,
-			DenySrcPorts:         cfg.DenySrcPorts,
 
 			DropLikelyOutbound: cfg.ProcDropLikelyOutbound,
 			EphemeralPortMin:   cfg.EphemeralPortMin,
@@ -200,21 +209,21 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc) (*Ag
 		a.authCapturer = ssh.NewAuthLogCapturer(cfg.AgentID, ssh.AuthLogOptions{
 			Path:            cfg.AuthLogPath,
 			MaxBatchSize:    200,
-			DedupTTL:        30 * time.Second,
+			DedupTTL:        cfg.AuthDedupTTL,
 			IncludeAccepted: cfg.AuthIncludeAccepted,
 		})
 	}
 
 	if contains(cfg.Sources, "scan") {
 		sc, err := scan.NewPcapScanCapturer(cfg.AgentID, scan.PcapScanOptions{
-			Interface:     cfg.ScanIface,
-			DedupTTL:      cfg.ScanDedupTTL,
-			MaxBatchSize:  cfg.ScanMaxBatch,
-			SkipLoopback:  cfg.SkipLoopback,
-			SkipLinkLocal: cfg.SkipLinkLocal,
-			DenyCIDRs:     cfg.DenyCIDRs,
-			DenyDstPorts:  cfg.DenyDstPorts,
-			DenySrcPorts:  cfg.DenySrcPorts,
+			Interface:        cfg.ScanIface,
+			DedupTTL:         cfg.ScanDedupTTL,
+			MaxBatchSize:     cfg.ScanMaxBatch,
+			SkipLoopback:     cfg.SkipLoopback,
+			SkipLinkLocal:    cfg.SkipLinkLocal,
+			DenyCIDRs:        cfg.DenyCIDRs,
+			EphemeralPortMin: cfg.EphemeralPortMin,
+			// DropUDPEphemeral stays default-true in the capturer defaults.
 		})
 		if err != nil {
 			return nil, err
@@ -230,6 +239,34 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc) (*Ag
 				stop()
 			}
 		}()
+	}
+
+	if contains(cfg.Sources, "lateral") {
+		procOpts := proc.Options{
+			DedupTTL:             cfg.LateralDedupTTL,
+			EstablishedTTL:       cfg.EstablishedTTL,
+			SkipLoopback:         cfg.SkipLoopback,
+			SkipLinkLocal:        cfg.SkipLinkLocal,
+			SkipPrivateToPrivate: cfg.SkipPrivateToPrivate,
+			IncludeIPv6:          true,
+			MaxBatchSize:         max(300, cfg.LateralMaxBatch*4),
+			DenyCIDRs:            cfg.DenyCIDRs,
+
+			DropLikelyOutbound: cfg.ProcDropLikelyOutbound,
+			EphemeralPortMin:   cfg.EphemeralPortMin,
+		}
+
+		a.lateralCapturer = lateral.NewProcLateralCapturer(
+			cfg.AgentID,
+			cfg.ProcTCP4Path,
+			cfg.ProcTCP6Path,
+			procOpts,
+			lateral.Options{
+				Ports:              cfg.LateralPorts,
+				IncludeEstablished: cfg.LateralIncludeEstablished,
+				MaxBatchSize:       cfg.LateralMaxBatch,
+			},
+		)
 	}
 
 	return a, nil
@@ -312,6 +349,20 @@ func (a *Agent) runOnce(rootCtx context.Context) *CycleResult {
 		}
 	}
 
+	lateralEvents := 0
+	if a.lateralCapturer != nil {
+		evs, err := a.lateralCapturer.Capture()
+		if err != nil {
+			logJSON(LevelWarn, "lateral_capture_error", map[string]interface{}{
+				"agent_id": a.cfg.AgentID,
+				"error":    err.Error(),
+			})
+		} else if len(evs) > 0 {
+			lateralEvents = len(evs)
+			events = append(events, evs...)
+		}
+	}
+
 	if a.scanCapturer != nil {
 		evs := a.scanCapturer.Drain()
 		if len(evs) > 0 {
@@ -349,6 +400,7 @@ func (a *Agent) runOnce(rootCtx context.Context) *CycleResult {
 			SendAttempted: false,
 
 			SSHAuthEvents: sshAuthEvents,
+			LateralEvents: lateralEvents,
 
 			ScanProbesTotal:     scanStats.Total,
 			ScanProbesEffective: scanStats.Effective,
@@ -357,7 +409,8 @@ func (a *Agent) runOnce(rootCtx context.Context) *CycleResult {
 			ScanSSHPortHits:     scanStats.SSHPortHits,
 			ScanClass:           scanStats.Class,
 			ScanScore:           scanStats.Score,
-			Mode:                mode,
+
+			Mode: mode,
 		}
 	}
 
@@ -372,6 +425,7 @@ func (a *Agent) runOnce(rootCtx context.Context) *CycleResult {
 		SendAttempted: true,
 
 		SSHAuthEvents: sshAuthEvents,
+		LateralEvents: lateralEvents,
 
 		ScanProbesTotal:     scanStats.Total,
 		ScanProbesEffective: scanStats.Effective,
@@ -405,7 +459,9 @@ func (a *Agent) shouldLogCycle(res *CycleResult) bool {
 	if res.SSHAuthEvents > 0 {
 		return true
 	}
-
+	if res.LateralEvents > 0 {
+		return true
+	}
 	if res.ScanClass == "scan" || res.ScanClass == "suspicious" {
 		return true
 	}
@@ -421,6 +477,7 @@ func (a *Agent) logCycle(level LogLevel, res *CycleResult) {
 		"send_attempted":  res.SendAttempted,
 		"duration_ms":     res.DurationMS,
 		"ssh_auth_events": res.SSHAuthEvents,
+		"lateral_events":  res.LateralEvents,
 
 		"scan_probes_total":     res.ScanProbesTotal,
 		"scan_probes_effective": res.ScanProbesEffective,
@@ -442,6 +499,7 @@ func (a *Agent) applyToSummary(res *CycleResult) {
 
 	a.state.EventsSentTotal += res.Sent
 	a.state.SSHAuthEventsTotal += res.SSHAuthEvents
+	a.state.LateralEventsTotal += res.LateralEvents
 
 	a.state.ScanProbesTotal += res.ScanProbesTotal
 	a.state.ScanProbesEffective += res.ScanProbesEffective
@@ -454,6 +512,9 @@ func (a *Agent) applyToSummary(res *CycleResult) {
 	}
 	if res.ScanDstPorts > a.state.MaxPortsCycle {
 		a.state.MaxPortsCycle = res.ScanDstPorts
+	}
+	if res.LateralEvents > a.state.MaxLateralCycle {
+		a.state.MaxLateralCycle = res.LateralEvents
 	}
 
 	if res.SendAttempted {
@@ -485,14 +546,17 @@ func (a *Agent) flushSummary() {
 	sentDelta := a.state.EventsSentTotal - a.state.LastSummaryEventsSent
 	scanDelta := a.state.ScanProbesTotal - a.state.LastSummaryScanTotal
 	scanEffDelta := a.state.ScanProbesEffective - a.state.LastSummaryScanEffective
+	lateralDelta := a.state.LateralEventsTotal - a.state.LastSummaryLateralTotal
 
 	sentPerSec := 0.0
 	scanPerSec := 0.0
 	scanEffPerSec := 0.0
+	lateralPerSec := 0.0
 	if period.Seconds() > 0 {
 		sentPerSec = float64(sentDelta) / period.Seconds()
 		scanPerSec = float64(scanDelta) / period.Seconds()
 		scanEffPerSec = float64(scanEffDelta) / period.Seconds()
+		lateralPerSec = float64(lateralDelta) / period.Seconds()
 	}
 
 	avgSentPerSec := 0.0
@@ -509,6 +573,7 @@ func (a *Agent) flushSummary() {
 		"events_sent_total": a.state.EventsSentTotal,
 
 		"ssh_auth_events_total": a.state.SSHAuthEventsTotal,
+		"lateral_events_total":  a.state.LateralEventsTotal,
 
 		"scan_probes_total":     a.state.ScanProbesTotal,
 		"scan_probes_effective": a.state.ScanProbesEffective,
@@ -518,16 +583,19 @@ func (a *Agent) flushSummary() {
 		"sent_delta":                  sentDelta,
 		"scan_probes_delta":           scanDelta,
 		"scan_probes_effective_delta": scanEffDelta,
+		"lateral_delta":               lateralDelta,
 
 		"sent_per_sec":                  round2(sentPerSec),
 		"scan_probes_per_sec":           round2(scanPerSec),
 		"scan_probes_effective_per_sec": round2(scanEffPerSec),
+		"lateral_per_sec":               round2(lateralPerSec),
 
 		"avg_sent_per_sec": round2(avgSentPerSec),
 
-		"max_sent_cycle":  a.state.MaxSentCycle,
-		"max_scan_cycle":  a.state.MaxScanCycle,
-		"max_ports_cycle": a.state.MaxPortsCycle,
+		"max_sent_cycle":    a.state.MaxSentCycle,
+		"max_scan_cycle":    a.state.MaxScanCycle,
+		"max_ports_cycle":   a.state.MaxPortsCycle,
+		"max_lateral_cycle": a.state.MaxLateralCycle,
 
 		"send_attempts_total": a.state.SendAttemptsTotal,
 		"send_errors_total":   a.state.SendErrorsTotal,
@@ -539,6 +607,7 @@ func (a *Agent) flushSummary() {
 	a.state.LastSummaryEventsSent = a.state.EventsSentTotal
 	a.state.LastSummaryScanTotal = a.state.ScanProbesTotal
 	a.state.LastSummaryScanEffective = a.state.ScanProbesEffective
+	a.state.LastSummaryLateralTotal = a.state.LateralEventsTotal
 }
 
 func (a *Agent) maybeHeartbeat() {
@@ -567,6 +636,7 @@ func loadConfig() Config {
 
 	logPath := getEnv("NETWATCH_AUTHLOG_PATH", "/var/log/auth.log")
 	includeAccepted := parseBool(getEnv("NETWATCH_AUTHLOG_INCLUDE_ACCEPTED", "false"), false)
+	authDedupTTL := parseDuration(getEnv("NETWATCH_AUTHLOG_DEDUP_TTL", "30s"), 30*time.Second)
 
 	procTCP4Path := getEnv("NETWATCH_PROC_TCP4_PATH", "/proc/net/tcp")
 	procTCP6Path := getEnv("NETWATCH_PROC_TCP6_PATH", "/proc/net/tcp6")
@@ -582,14 +652,16 @@ func loadConfig() Config {
 	establishedTTL := parseDuration(getEnv("NETWATCH_ESTABLISHED_TTL", "10m"), 10*time.Minute)
 
 	denyCIDRs := parseCIDRs(getEnv("NETWATCH_DENY_CIDRS", ""))
-	denyDstPorts := parseIntSet(getEnv("NETWATCH_DENY_DST_PORTS", ""))
-	denySrcPorts := parseIntSet(getEnv("NETWATCH_DENY_SRC_PORTS", ""))
 
 	scanIface := getEnv("NETWATCH_PCAP_IFACE", "any")
 	scanDedup := parseDuration(getEnv("NETWATCH_SCAN_DEDUP_TTL", "2s"), 2*time.Second)
 	scanMaxBatch := parseInt(getEnv("NETWATCH_SCAN_MAX_BATCH", "5000"), 5000)
-
 	scanMode := getEnv("NETWATCH_SCAN_MODE", "summary")
+
+	lateralPorts := parseIntSet(getEnv("NETWATCH_LATERAL_PORTS", "445,3389,5985,5986,135,139"))
+	lateralIncludeEstablished := parseBool(getEnv("NETWATCH_LATERAL_INCLUDE_ESTABLISHED", "false"), false)
+	lateralDedupTTL := parseDuration(getEnv("NETWATCH_LATERAL_DEDUP_TTL", "5s"), 5*time.Second)
+	lateralMaxBatch := parseInt(getEnv("NETWATCH_LATERAL_MAX_BATCH", "500"), 500)
 
 	levelStr := getEnv("NETWATCH_LOG_LEVEL", "info")
 	logLevel := parseLogLevel(levelStr)
@@ -608,6 +680,7 @@ func loadConfig() Config {
 
 		AuthLogPath:         logPath,
 		AuthIncludeAccepted: includeAccepted,
+		AuthDedupTTL:        authDedupTTL,
 
 		ProcTCP4Path: procTCP4Path,
 		ProcTCP6Path: procTCP6Path,
@@ -622,15 +695,18 @@ func loadConfig() Config {
 		DedupTTL:       dedupTTL,
 		EstablishedTTL: establishedTTL,
 
-		DenyCIDRs:    denyCIDRs,
-		DenyDstPorts: denyDstPorts,
-		DenySrcPorts: denySrcPorts,
+		DenyCIDRs: denyCIDRs,
 
 		ScanIface:    scanIface,
 		ScanDedupTTL: scanDedup,
 		ScanMaxBatch: scanMaxBatch,
 
 		ScanMode: scanMode,
+
+		LateralPorts:              lateralPorts,
+		LateralIncludeEstablished: lateralIncludeEstablished,
+		LateralDedupTTL:           lateralDedupTTL,
+		LateralMaxBatch:           lateralMaxBatch,
 
 		LogLevel:          logLevel,
 		LogSummaryEvery:   logSummaryEvery,
@@ -816,6 +892,11 @@ func buildScanSummaries(agentID string, scanEvents []model.NetEvent, window time
 	out := make([]model.NetEvent, 0, len(m))
 	now := time.Now().UTC()
 
+	windowSec := int(window.Seconds())
+	if windowSec <= 0 {
+		windowSec = 1
+	}
+
 	for _, a := range m {
 		uniquePorts := len(a.dstPorts)
 		class := classifyScan(a.total, uniquePorts, a.sshHits)
@@ -835,7 +916,7 @@ func buildScanSummaries(agentID string, scanEvents []model.NetEvent, window time
 			Proto:     a.proto,
 			Bytes:     0,
 			Extra: map[string]interface{}{
-				"window_seconds":    int(window.Seconds()),
+				"window_seconds":    windowSec,
 				"total_probes":      a.total,
 				"unique_dst_ports":  uniquePorts,
 				"ssh_port_hits":     a.sshHits,
