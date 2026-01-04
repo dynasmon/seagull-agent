@@ -15,7 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/lateral"
+	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/ddos"
 	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/proc"
 	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/scan"
 	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/ssh"
@@ -57,7 +57,9 @@ type Config struct {
 	DedupTTL       time.Duration
 	EstablishedTTL time.Duration
 
-	DenyCIDRs []*net.IPNet
+	DenyCIDRs    []*net.IPNet
+	DenyDstPorts map[int]bool
+	DenySrcPorts map[int]bool
 
 	ScanIface    string
 	ScanDedupTTL time.Duration
@@ -65,11 +67,34 @@ type Config struct {
 
 	ScanMode string // raw|summary|both
 
-	LateralIface              string
-	LateralPorts              map[int]bool
-	LateralIncludeEstablished bool
-	LateralDedupTTL           time.Duration
-	LateralMaxBatch           int
+	DDoSIface                   string
+	DDoSWindow                  time.Duration
+	DDoSEvalEvery               time.Duration
+	DDoSCooldown                time.Duration
+	DDoSSustainWindows          int
+	DDoSBaselineWarmupWindows   int
+	DDoSBaselineAlpha           float64
+	DDoSBaselineFactor          float64
+	DDoSMinPPS                  float64
+	DDoSMinBPS                  float64
+	DDoSMinConfidence           int
+	DDoSMinSynRatio             float64
+	DDoSMinSrcIPs               int
+	DDoSMinSrcEntropyNorm       float64
+	DDoSEnableL7                bool
+	DDoSMinHTTPRPS              float64
+	DDoSMinTLSHSRPS             float64
+	DDoSMinL7Ratio              float64
+	DDoSEnableEntropy           bool
+	DDoSMinSrcEntropyNormSignal float64
+	DDoSMinPortEntropyNorm      float64
+	DDoSPortEntropyTopN         int
+	DDoSCardinalityMode         string
+	DDoSHLLPrecision            int
+	DDoSBloomBits               int
+	DDoSMaxUniqueSrc            int
+	DDoSTopSrc                  int
+	DDoSMaxBatch                int
 
 	LogLevel          LogLevel
 	LogSummaryEvery   time.Duration
@@ -85,7 +110,6 @@ type CycleResult struct {
 	SendAttempted bool
 
 	SSHAuthEvents int
-	LateralEvents int
 
 	ScanProbesTotal     int
 	ScanProbesEffective int
@@ -106,15 +130,13 @@ type SummaryState struct {
 	EventsSentTotal int
 
 	SSHAuthEventsTotal int
-	LateralEventsTotal int
 
 	ScanProbesTotal     int
 	ScanProbesEffective int
 
-	MaxSentCycle    int
-	MaxScanCycle    int
-	MaxPortsCycle   int
-	MaxLateralCycle int
+	MaxSentCycle  int
+	MaxScanCycle  int
+	MaxPortsCycle int
 
 	SendAttemptsTotal int
 	SendErrorsTotal   int
@@ -126,7 +148,6 @@ type SummaryState struct {
 	LastSummaryEventsSent    int
 	LastSummaryScanTotal     int
 	LastSummaryScanEffective int
-	LastSummaryLateralTotal  int
 	LastHeartbeatAt          time.Time
 }
 
@@ -135,12 +156,12 @@ type Agent struct {
 
 	sender *sender.Sender
 
-	procCapturer         *proc.Capturer
-	authCapturer         *ssh.AuthLogCapturer
-	scanCapturer         *scan.PcapScanCapturer
-	lateralPcapCapturer  *lateral.PcapLateralCapturer
-	lateralProcCapturer  *lateral.ProcLateralCapturer
-	state                SummaryState
+	procCapturer *proc.Capturer
+	authCapturer *ssh.AuthLogCapturer
+	scanCapturer *scan.PcapScanCapturer
+	ddosCapturer *ddos.PcapDDoSCapturer
+
+	state SummaryState
 }
 
 func main() {
@@ -185,7 +206,6 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc) (*Ag
 			LastSummaryEventsSent:    0,
 			LastSummaryScanTotal:     0,
 			LastSummaryScanEffective: 0,
-			LastSummaryLateralTotal:  0,
 		},
 	}
 
@@ -199,6 +219,8 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc) (*Ag
 			IncludeIPv6:          true,
 			MaxBatchSize:         300,
 			DenyCIDRs:            cfg.DenyCIDRs,
+			DenyDstPorts:         cfg.DenyDstPorts,
+			DenySrcPorts:         cfg.DenySrcPorts,
 
 			DropLikelyOutbound: cfg.ProcDropLikelyOutbound,
 			EphemeralPortMin:   cfg.EphemeralPortMin,
@@ -223,8 +245,9 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc) (*Ag
 			SkipLoopback:     cfg.SkipLoopback,
 			SkipLinkLocal:    cfg.SkipLinkLocal,
 			DenyCIDRs:        cfg.DenyCIDRs,
+			DenyDstPorts:     cfg.DenyDstPorts,
+			DenySrcPorts:     cfg.DenySrcPorts,
 			EphemeralPortMin: cfg.EphemeralPortMin,
-			// DropUDPEphemeral stays default-true in the capturer defaults.
 		})
 		if err != nil {
 			return nil, err
@@ -242,60 +265,67 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc) (*Ag
 		}()
 	}
 
-	if contains(cfg.Sources, "lateral") {
-		// 1) PCAP lateral: captures inbound SYN attempts to admin ports even when ports are closed.
-		lc, err := lateral.NewPcapLateralCapturer(cfg.AgentID, lateral.PcapLateralOptions{
-			Interface:     cfg.LateralIface,
-			Ports:         cfg.LateralPorts,
-			DedupTTL:      cfg.LateralDedupTTL,
-			MaxBatchSize:  cfg.LateralMaxBatch,
+	if contains(cfg.Sources, "ddos") {
+		dc, err := ddos.NewPcapDDoSCapturer(cfg.AgentID, ddos.PcapDDoSOptions{
+			Interface: cfg.DDoSIface,
+
+			Window:         cfg.DDoSWindow,
+			EvalEvery:      cfg.DDoSEvalEvery,
+			Cooldown:       cfg.DDoSCooldown,
+			SustainWindows: cfg.DDoSSustainWindows,
+
+			BaselineWarmupWindows: cfg.DDoSBaselineWarmupWindows,
+			BaselineAlpha:         cfg.DDoSBaselineAlpha,
+			BaselineFactor:        cfg.DDoSBaselineFactor,
+
+			MinPPS:        cfg.DDoSMinPPS,
+			MinBPS:        cfg.DDoSMinBPS,
+			MinConfidence: cfg.DDoSMinConfidence,
+
+			MinSynRatio: cfg.DDoSMinSynRatio,
+
+			DDoSMinSrcIPs:         cfg.DDoSMinSrcIPs,
+			DDoSMinSrcEntropyNorm: cfg.DDoSMinSrcEntropyNorm,
+
+			EnableL7:    cfg.DDoSEnableL7,
+			MinHTTPRPS:  cfg.DDoSMinHTTPRPS,
+			MinTLSHSRPS: cfg.DDoSMinTLSHSRPS,
+			MinL7Ratio:  cfg.DDoSMinL7Ratio,
+
+			EnableEntropy:      cfg.DDoSEnableEntropy,
+			MinSrcEntropyNorm:  cfg.DDoSMinSrcEntropyNormSignal,
+			MinPortEntropyNorm: cfg.DDoSMinPortEntropyNorm,
+			PortEntropyTopN:    cfg.DDoSPortEntropyTopN,
+
+			CardinalityMode: cfg.DDoSCardinalityMode,
+			HLLPrecision:    cfg.DDoSHLLPrecision,
+			BloomBits:       cfg.DDoSBloomBits,
+			MaxUniqueSrc:    cfg.DDoSMaxUniqueSrc,
+			TopSrc:          cfg.DDoSTopSrc,
+
+			MaxBatchSize: cfg.DDoSMaxBatch,
+
 			SkipLoopback:  cfg.SkipLoopback,
 			SkipLinkLocal: cfg.SkipLinkLocal,
-			DenyCIDRs:     cfg.DenyCIDRs,
+
+			DenyCIDRs:    cfg.DenyCIDRs,
+			DenyDstPorts: cfg.DenyDstPorts,
+			DenySrcPorts: cfg.DenySrcPorts,
 		})
 		if err != nil {
 			return nil, err
 		}
-		a.lateralPcapCapturer = lc
+		a.ddosCapturer = dc
 
 		go func() {
-			if err := a.lateralPcapCapturer.Start(rootCtx); err != nil {
-				logJSON(LevelError, "lateral_pcap_capture_stopped", map[string]interface{}{
+			if err := a.ddosCapturer.Start(rootCtx); err != nil {
+				logJSON(LevelError, "ddos_capture_stopped", map[string]interface{}{
 					"agent_id": cfg.AgentID,
 					"error":    err.Error(),
 				})
 				stop()
 			}
 		}()
-
-		// 2) Optional: proc-based lateral for established connections (only if enabled).
-		if cfg.LateralIncludeEstablished {
-			procOpts := proc.Options{
-				DedupTTL:             cfg.LateralDedupTTL,
-				EstablishedTTL:       cfg.EstablishedTTL,
-				SkipLoopback:         cfg.SkipLoopback,
-				SkipLinkLocal:        cfg.SkipLinkLocal,
-				SkipPrivateToPrivate: cfg.SkipPrivateToPrivate,
-				IncludeIPv6:          true,
-				MaxBatchSize:         max(300, cfg.LateralMaxBatch*4),
-				DenyCIDRs:            cfg.DenyCIDRs,
-
-				DropLikelyOutbound: cfg.ProcDropLikelyOutbound,
-				EphemeralPortMin:   cfg.EphemeralPortMin,
-			}
-
-			a.lateralProcCapturer = lateral.NewProcLateralCapturer(
-				cfg.AgentID,
-				cfg.ProcTCP4Path,
-				cfg.ProcTCP6Path,
-				procOpts,
-				lateral.Options{
-					Ports:              cfg.LateralPorts,
-					IncludeEstablished: cfg.LateralIncludeEstablished,
-					MaxBatchSize:       cfg.LateralMaxBatch,
-				},
-			)
-		}
 	}
 
 	return a, nil
@@ -353,6 +383,7 @@ func (a *Agent) runOnce(rootCtx context.Context) *CycleResult {
 
 	events := make([]model.NetEvent, 0, 1024)
 	scanRaw := make([]model.NetEvent, 0, 1024)
+	ddosEvs := make([]model.NetEvent, 0, 64)
 
 	if a.authCapturer != nil {
 		evs, err := a.authCapturer.Capture(time.Now().UTC())
@@ -378,33 +409,17 @@ func (a *Agent) runOnce(rootCtx context.Context) *CycleResult {
 		}
 	}
 
-	lateralEvents := 0
-
-	if a.lateralPcapCapturer != nil {
-		evs := a.lateralPcapCapturer.Drain()
-		if len(evs) > 0 {
-			lateralEvents += len(evs)
-			events = append(events, evs...)
-		}
-	}
-
-	if a.lateralProcCapturer != nil {
-		evs, err := a.lateralProcCapturer.Capture()
-		if err != nil {
-			logJSON(LevelWarn, "lateral_proc_capture_error", map[string]interface{}{
-				"agent_id": a.cfg.AgentID,
-				"error":    err.Error(),
-			})
-		} else if len(evs) > 0 {
-			lateralEvents += len(evs)
-			events = append(events, evs...)
-		}
-	}
-
 	if a.scanCapturer != nil {
 		evs := a.scanCapturer.Drain()
 		if len(evs) > 0 {
 			scanRaw = append(scanRaw, evs...)
+		}
+	}
+
+	if a.ddosCapturer != nil {
+		evs := a.ddosCapturer.Drain()
+		if len(evs) > 0 {
+			ddosEvs = append(ddosEvs, evs...)
 		}
 	}
 
@@ -429,6 +444,10 @@ func (a *Agent) runOnce(rootCtx context.Context) *CycleResult {
 		events = append(events, buildScanSummaries(a.cfg.AgentID, scanRaw, a.cfg.Interval)...)
 	}
 
+	if len(ddosEvs) > 0 {
+		events = append(events, ddosEvs...)
+	}
+
 	if len(events) == 0 {
 		return &CycleResult{
 			Sent:          0,
@@ -438,7 +457,6 @@ func (a *Agent) runOnce(rootCtx context.Context) *CycleResult {
 			SendAttempted: false,
 
 			SSHAuthEvents: sshAuthEvents,
-			LateralEvents: lateralEvents,
 
 			ScanProbesTotal:     scanStats.Total,
 			ScanProbesEffective: scanStats.Effective,
@@ -463,7 +481,6 @@ func (a *Agent) runOnce(rootCtx context.Context) *CycleResult {
 		SendAttempted: true,
 
 		SSHAuthEvents: sshAuthEvents,
-		LateralEvents: lateralEvents,
 
 		ScanProbesTotal:     scanStats.Total,
 		ScanProbesEffective: scanStats.Effective,
@@ -497,9 +514,6 @@ func (a *Agent) shouldLogCycle(res *CycleResult) bool {
 	if res.SSHAuthEvents > 0 {
 		return true
 	}
-	if res.LateralEvents > 0 {
-		return true
-	}
 	if res.ScanClass == "scan" || res.ScanClass == "suspicious" {
 		return true
 	}
@@ -515,7 +529,6 @@ func (a *Agent) logCycle(level LogLevel, res *CycleResult) {
 		"send_attempted":  res.SendAttempted,
 		"duration_ms":     res.DurationMS,
 		"ssh_auth_events": res.SSHAuthEvents,
-		"lateral_events":  res.LateralEvents,
 
 		"scan_probes_total":     res.ScanProbesTotal,
 		"scan_probes_effective": res.ScanProbesEffective,
@@ -537,7 +550,6 @@ func (a *Agent) applyToSummary(res *CycleResult) {
 
 	a.state.EventsSentTotal += res.Sent
 	a.state.SSHAuthEventsTotal += res.SSHAuthEvents
-	a.state.LateralEventsTotal += res.LateralEvents
 
 	a.state.ScanProbesTotal += res.ScanProbesTotal
 	a.state.ScanProbesEffective += res.ScanProbesEffective
@@ -550,9 +562,6 @@ func (a *Agent) applyToSummary(res *CycleResult) {
 	}
 	if res.ScanDstPorts > a.state.MaxPortsCycle {
 		a.state.MaxPortsCycle = res.ScanDstPorts
-	}
-	if res.LateralEvents > a.state.MaxLateralCycle {
-		a.state.MaxLateralCycle = res.LateralEvents
 	}
 
 	if res.SendAttempted {
@@ -584,17 +593,14 @@ func (a *Agent) flushSummary() {
 	sentDelta := a.state.EventsSentTotal - a.state.LastSummaryEventsSent
 	scanDelta := a.state.ScanProbesTotal - a.state.LastSummaryScanTotal
 	scanEffDelta := a.state.ScanProbesEffective - a.state.LastSummaryScanEffective
-	lateralDelta := a.state.LateralEventsTotal - a.state.LastSummaryLateralTotal
 
 	sentPerSec := 0.0
 	scanPerSec := 0.0
 	scanEffPerSec := 0.0
-	lateralPerSec := 0.0
 	if period.Seconds() > 0 {
 		sentPerSec = float64(sentDelta) / period.Seconds()
 		scanPerSec = float64(scanDelta) / period.Seconds()
 		scanEffPerSec = float64(scanEffDelta) / period.Seconds()
-		lateralPerSec = float64(lateralDelta) / period.Seconds()
 	}
 
 	avgSentPerSec := 0.0
@@ -611,7 +617,6 @@ func (a *Agent) flushSummary() {
 		"events_sent_total": a.state.EventsSentTotal,
 
 		"ssh_auth_events_total": a.state.SSHAuthEventsTotal,
-		"lateral_events_total":  a.state.LateralEventsTotal,
 
 		"scan_probes_total":     a.state.ScanProbesTotal,
 		"scan_probes_effective": a.state.ScanProbesEffective,
@@ -621,19 +626,16 @@ func (a *Agent) flushSummary() {
 		"sent_delta":                  sentDelta,
 		"scan_probes_delta":           scanDelta,
 		"scan_probes_effective_delta": scanEffDelta,
-		"lateral_delta":               lateralDelta,
 
 		"sent_per_sec":                  round2(sentPerSec),
 		"scan_probes_per_sec":           round2(scanPerSec),
 		"scan_probes_effective_per_sec": round2(scanEffPerSec),
-		"lateral_per_sec":               round2(lateralPerSec),
 
 		"avg_sent_per_sec": round2(avgSentPerSec),
 
-		"max_sent_cycle":    a.state.MaxSentCycle,
-		"max_scan_cycle":    a.state.MaxScanCycle,
-		"max_ports_cycle":   a.state.MaxPortsCycle,
-		"max_lateral_cycle": a.state.MaxLateralCycle,
+		"max_sent_cycle":  a.state.MaxSentCycle,
+		"max_scan_cycle":  a.state.MaxScanCycle,
+		"max_ports_cycle": a.state.MaxPortsCycle,
 
 		"send_attempts_total": a.state.SendAttemptsTotal,
 		"send_errors_total":   a.state.SendErrorsTotal,
@@ -645,7 +647,6 @@ func (a *Agent) flushSummary() {
 	a.state.LastSummaryEventsSent = a.state.EventsSentTotal
 	a.state.LastSummaryScanTotal = a.state.ScanProbesTotal
 	a.state.LastSummaryScanEffective = a.state.ScanProbesEffective
-	a.state.LastSummaryLateralTotal = a.state.LateralEventsTotal
 }
 
 func (a *Agent) maybeHeartbeat() {
@@ -666,7 +667,7 @@ func (a *Agent) maybeHeartbeat() {
 func loadConfig() Config {
 	agentID := getEnv("NETWATCH_AGENT_ID", "agent-unknown")
 	apiURL := getEnv("NETWATCH_API_URL", "http://localhost:8000")
-	sources := splitCSVLower(getEnv("NETWATCH_SOURCES", "authlog,proc"))
+	sources := splitCSVLower(getEnv("NETWATCH_SOURCES", "authlog,proc,scan,ddos"))
 
 	interval := parseDuration(getEnv("NETWATCH_POLL_INTERVAL", "1s"), 1*time.Second)
 	httpTimeout := parseDuration(getEnv("NETWATCH_HTTP_TIMEOUT", "10s"), 10*time.Second)
@@ -690,17 +691,45 @@ func loadConfig() Config {
 	establishedTTL := parseDuration(getEnv("NETWATCH_ESTABLISHED_TTL", "10m"), 10*time.Minute)
 
 	denyCIDRs := parseCIDRs(getEnv("NETWATCH_DENY_CIDRS", ""))
+	denyDstPorts := parseIntSet(getEnv("NETWATCH_DENY_DST_PORTS", ""))
+	denySrcPorts := parseIntSet(getEnv("NETWATCH_DENY_SRC_PORTS", ""))
 
 	scanIface := getEnv("NETWATCH_PCAP_IFACE", "any")
 	scanDedup := parseDuration(getEnv("NETWATCH_SCAN_DEDUP_TTL", "2s"), 2*time.Second)
 	scanMaxBatch := parseInt(getEnv("NETWATCH_SCAN_MAX_BATCH", "5000"), 5000)
 	scanMode := getEnv("NETWATCH_SCAN_MODE", "summary")
 
-	lateralIface := getEnv("NETWATCH_LATERAL_PCAP_IFACE", scanIface)
-	lateralPorts := parseIntSet(getEnv("NETWATCH_LATERAL_PORTS", "445,3389,5985,5986,135,139"))
-	lateralIncludeEstablished := parseBool(getEnv("NETWATCH_LATERAL_INCLUDE_ESTABLISHED", "false"), false)
-	lateralDedupTTL := parseDuration(getEnv("NETWATCH_LATERAL_DEDUP_TTL", "5s"), 5*time.Second)
-	lateralMaxBatch := parseInt(getEnv("NETWATCH_LATERAL_MAX_BATCH", "500"), 500)
+	ddosIface := getEnv("NETWATCH_DDOS_PCAP_IFACE", scanIface)
+	ddosWindow := parseDuration(getEnv("NETWATCH_DDOS_WINDOW", "1s"), 1*time.Second)
+	ddosEvalEvery := parseDuration(getEnv("NETWATCH_DDOS_EVAL_EVERY", "1s"), 1*time.Second)
+	ddosCooldown := parseDuration(getEnv("NETWATCH_DDOS_COOLDOWN", "30s"), 30*time.Second)
+	ddosSustain := parseInt(getEnv("NETWATCH_DDOS_SUSTAIN_WINDOWS", "3"), 3)
+	ddosWarmup := parseInt(getEnv("NETWATCH_DDOS_BASELINE_WARMUP_WINDOWS", "20"), 20)
+	ddosAlpha := parseFloat(getEnv("NETWATCH_DDOS_BASELINE_ALPHA", "0.08"), 0.08)
+	ddosFactor := parseFloat(getEnv("NETWATCH_DDOS_BASELINE_FACTOR", "4.0"), 4.0)
+	ddosMinPPS := parseFloat(getEnv("NETWATCH_DDOS_MIN_PPS", "3000"), 3000)
+	ddosMinBPS := parseFloat(getEnv("NETWATCH_DDOS_MIN_BPS", "500000"), 500000)
+	ddosMinConf := parseInt(getEnv("NETWATCH_DDOS_MIN_CONFIDENCE", "70"), 70)
+	ddosMinSynRatio := parseFloat(getEnv("NETWATCH_DDOS_MIN_SYN_RATIO", "0.70"), 0.70)
+	ddosMinSrcIPs := parseInt(getEnv("NETWATCH_DDOS_MIN_SRC_IPS", "30"), 30)
+	ddosMinSrcEntropy := parseFloat(getEnv("NETWATCH_DDOS_MIN_SRC_ENTROPY_NORM", "0.70"), 0.70)
+
+	ddosEnableL7 := parseBool(getEnv("NETWATCH_DDOS_ENABLE_L7", "true"), true)
+	ddosMinHTTPRPS := parseFloat(getEnv("NETWATCH_DDOS_MIN_HTTP_RPS", "200"), 200)
+	ddosMinTLS := parseFloat(getEnv("NETWATCH_DDOS_MIN_TLS_HS_RPS", "200"), 200)
+	ddosMinL7Ratio := parseFloat(getEnv("NETWATCH_DDOS_MIN_L7_RATIO", "0.15"), 0.15)
+
+	ddosEnableEntropy := parseBool(getEnv("NETWATCH_DDOS_ENABLE_ENTROPY", "true"), true)
+	ddosMinSrcEntropySig := parseFloat(getEnv("NETWATCH_DDOS_MIN_SRC_ENTROPY_NORM_SIGNAL", "0.75"), 0.75)
+	ddosMinPortEntropy := parseFloat(getEnv("NETWATCH_DDOS_MIN_PORT_ENTROPY_NORM", "0.35"), 0.35)
+	ddosPortTopN := parseInt(getEnv("NETWATCH_DDOS_PORT_ENTROPY_TOPN", "16"), 16)
+
+	ddosCardMode := strings.ToLower(strings.TrimSpace(getEnv("NETWATCH_DDOS_CARDINALITY_MODE", "hll")))
+	ddosHLLP := parseInt(getEnv("NETWATCH_DDOS_HLL_PRECISION", "14"), 14)
+	ddosBloomBits := parseInt(getEnv("NETWATCH_DDOS_BLOOM_BITS", "1048576"), 1048576)
+	ddosMaxUnique := parseInt(getEnv("NETWATCH_DDOS_MAX_UNIQUE_SRC", "500000"), 500000)
+	ddosTopSrc := parseInt(getEnv("NETWATCH_DDOS_TOP_SRC", "20"), 20)
+	ddosMaxBatch := parseInt(getEnv("NETWATCH_DDOS_MAX_BATCH", "200"), 200)
 
 	levelStr := getEnv("NETWATCH_LOG_LEVEL", "info")
 	logLevel := parseLogLevel(levelStr)
@@ -734,7 +763,9 @@ func loadConfig() Config {
 		DedupTTL:       dedupTTL,
 		EstablishedTTL: establishedTTL,
 
-		DenyCIDRs: denyCIDRs,
+		DenyCIDRs:    denyCIDRs,
+		DenyDstPorts: denyDstPorts,
+		DenySrcPorts: denySrcPorts,
 
 		ScanIface:    scanIface,
 		ScanDedupTTL: scanDedup,
@@ -742,11 +773,34 @@ func loadConfig() Config {
 
 		ScanMode: scanMode,
 
-		LateralIface:              lateralIface,
-		LateralPorts:              lateralPorts,
-		LateralIncludeEstablished: lateralIncludeEstablished,
-		LateralDedupTTL:           lateralDedupTTL,
-		LateralMaxBatch:           lateralMaxBatch,
+		DDoSIface:                   ddosIface,
+		DDoSWindow:                  ddosWindow,
+		DDoSEvalEvery:               ddosEvalEvery,
+		DDoSCooldown:                ddosCooldown,
+		DDoSSustainWindows:          ddosSustain,
+		DDoSBaselineWarmupWindows:   ddosWarmup,
+		DDoSBaselineAlpha:           ddosAlpha,
+		DDoSBaselineFactor:          ddosFactor,
+		DDoSMinPPS:                  ddosMinPPS,
+		DDoSMinBPS:                  ddosMinBPS,
+		DDoSMinConfidence:           ddosMinConf,
+		DDoSMinSynRatio:             ddosMinSynRatio,
+		DDoSMinSrcIPs:               ddosMinSrcIPs,
+		DDoSMinSrcEntropyNorm:       ddosMinSrcEntropy,
+		DDoSEnableL7:                ddosEnableL7,
+		DDoSMinHTTPRPS:              ddosMinHTTPRPS,
+		DDoSMinTLSHSRPS:             ddosMinTLS,
+		DDoSMinL7Ratio:              ddosMinL7Ratio,
+		DDoSEnableEntropy:           ddosEnableEntropy,
+		DDoSMinSrcEntropyNormSignal: ddosMinSrcEntropySig,
+		DDoSMinPortEntropyNorm:      ddosMinPortEntropy,
+		DDoSPortEntropyTopN:         ddosPortTopN,
+		DDoSCardinalityMode:         ddosCardMode,
+		DDoSHLLPrecision:            ddosHLLP,
+		DDoSBloomBits:               ddosBloomBits,
+		DDoSMaxUniqueSrc:            ddosMaxUnique,
+		DDoSTopSrc:                  ddosTopSrc,
+		DDoSMaxBatch:                ddosMaxBatch,
 
 		LogLevel:          logLevel,
 		LogSummaryEvery:   logSummaryEvery,
@@ -1058,6 +1112,14 @@ func parseDuration(s string, def time.Duration) time.Duration {
 
 func parseInt(s string, def int) int {
 	v, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil || v <= 0 {
+		return def
+	}
+	return v
+}
+
+func parseFloat(s string, def float64) float64 {
+	v, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
 	if err != nil || v <= 0 {
 		return def
 	}
