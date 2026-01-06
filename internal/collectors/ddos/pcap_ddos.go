@@ -32,6 +32,8 @@ type PcapDDoSOptions struct {
 
 	MinPPS        float64
 	MinBPS        float64
+	MinPackets    int
+	MinRequests   int
 	MinConfidence int
 
 	MinSynRatio float64
@@ -56,6 +58,9 @@ type PcapDDoSOptions struct {
 	TopSrc          int
 
 	MaxBatchSize int
+
+	DropLikelyOutbound bool
+	EphemeralPortMin   int
 
 	SkipLoopback  bool
 	SkipLinkLocal bool
@@ -177,6 +182,12 @@ func applyDDoSDefaults(o *PcapDDoSOptions) {
 	if o.MinBPS <= 0 {
 		o.MinBPS = 500_000
 	}
+	if o.MinPackets < 0 {
+		o.MinPackets = 0
+	}
+	if o.MinRequests < 0 {
+		o.MinRequests = 0
+	}
 	if o.MinConfidence <= 0 {
 		o.MinConfidence = 75
 	}
@@ -224,6 +235,9 @@ func applyDDoSDefaults(o *PcapDDoSOptions) {
 	}
 	if o.MaxBatchSize <= 0 {
 		o.MaxBatchSize = 200
+	}
+	if o.EphemeralPortMin <= 0 {
+		o.EphemeralPortMin = 49152
 	}
 	if o.DenyDstPorts == nil {
 		o.DenyDstPorts = map[int]bool{}
@@ -347,6 +361,10 @@ func (c *PcapDDoSCapturer) onPacket(pkt gopacket.Packet) {
 			return
 		}
 
+		if c.opts.DropLikelyOutbound && c.opts.EphemeralPortMin > 0 && dport >= c.opts.EphemeralPortMin {
+			return
+		}
+
 		k := aggKey{dst: dstS, proto: "tcp", dport: dport}
 		a := c.getAgg(k, now)
 		a.pkts++
@@ -377,6 +395,10 @@ func (c *PcapDDoSCapturer) onPacket(pkt gopacket.Packet) {
 		dport := int(udp.DstPort)
 
 		if c.opts.DenyDstPorts[dport] || c.opts.DenySrcPorts[sport] {
+			return
+		}
+
+		if c.opts.DropLikelyOutbound && c.opts.EphemeralPortMin > 0 && dport >= c.opts.EphemeralPortMin {
 			return
 		}
 
@@ -501,8 +523,13 @@ func (c *PcapDDoSCapturer) rotateIfNeeded(now time.Time) {
 			l7Ratio = float64(a.httpReqPkts+a.tlsHelloPkts) / float64(a.tcpPayloadPkts)
 		}
 
-		l7Over := c.opts.EnableL7 && l7Ratio >= c.opts.MinL7Ratio && (httpRPS >= c.opts.MinHTTPRPS || tlsRPS >= c.opts.MinTLSHSRPS)
-		absOver := (pps >= c.opts.MinPPS) || (bps >= c.opts.MinBPS) || l7Over
+		reqCount := a.httpReqPkts + a.tlsHelloPkts
+		packetsOK := (c.opts.MinPackets <= 0) || (a.pkts >= c.opts.MinPackets)
+		requestsOK := (c.opts.MinRequests <= 0) || (reqCount >= c.opts.MinRequests)
+
+		volOver := packetsOK && ((pps >= c.opts.MinPPS) || (bps >= c.opts.MinBPS))
+		l7Over := c.opts.EnableL7 && packetsOK && requestsOK && l7Ratio >= c.opts.MinL7Ratio && (httpRPS >= c.opts.MinHTTPRPS || tlsRPS >= c.opts.MinTLSHSRPS)
+		absOver := volOver || l7Over
 
 		baselineReady := a.warmupOK >= c.opts.BaselineWarmupWindows && a.baselinePPS > 0 && a.baselineBPS > 0
 		relOver := baselineReady && (pps >= a.baselinePPS*c.opts.BaselineFactor || bps >= a.baselineBPS*c.opts.BaselineFactor)
@@ -566,6 +593,7 @@ func (c *PcapDDoSCapturer) rotateIfNeeded(now time.Time) {
 					"confidence":          conf,
 					"window_seconds":      int(c.opts.Window.Seconds()),
 					"packets":             a.pkts,
+					"requests":            reqCount,
 					"pps":                 round2(pps),
 					"bps":                 round2(bps),
 					"unique_src_ips":      uniqueSrc,

@@ -77,6 +77,8 @@ type Config struct {
 	DDoSBaselineFactor          float64
 	DDoSMinPPS                  float64
 	DDoSMinBPS                  float64
+	DDoSMinPackets              int
+	DDoSMinRequests             int
 	DDoSMinConfidence           int
 	DDoSMinSynRatio             float64
 	DDoSMinSrcIPs               int
@@ -280,6 +282,8 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc) (*Ag
 
 			MinPPS:        cfg.DDoSMinPPS,
 			MinBPS:        cfg.DDoSMinBPS,
+			MinPackets:    cfg.DDoSMinPackets,
+			MinRequests:   cfg.DDoSMinRequests,
 			MinConfidence: cfg.DDoSMinConfidence,
 
 			MinSynRatio: cfg.DDoSMinSynRatio,
@@ -304,6 +308,9 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc) (*Ag
 			TopSrc:          cfg.DDoSTopSrc,
 
 			MaxBatchSize: cfg.DDoSMaxBatch,
+
+			DropLikelyOutbound: cfg.ProcDropLikelyOutbound,
+			EphemeralPortMin:   cfg.EphemeralPortMin,
 
 			SkipLoopback:  cfg.SkipLoopback,
 			SkipLinkLocal: cfg.SkipLinkLocal,
@@ -709,6 +716,8 @@ func loadConfig() Config {
 	ddosFactor := parseFloat(getEnv("NETWATCH_DDOS_BASELINE_FACTOR", "4.0"), 4.0)
 	ddosMinPPS := parseFloat(getEnv("NETWATCH_DDOS_MIN_PPS", "3000"), 3000)
 	ddosMinBPS := parseFloat(getEnv("NETWATCH_DDOS_MIN_BPS", "500000"), 500000)
+	ddosMinPackets := parseInt(getEnv("NETWATCH_DDOS_MIN_PACKETS", "0"), 0)
+	ddosMinRequests := parseInt(getEnv("NETWATCH_DDOS_MIN_REQUESTS", "0"), 0)
 	ddosMinConf := parseInt(getEnv("NETWATCH_DDOS_MIN_CONFIDENCE", "70"), 70)
 	ddosMinSynRatio := parseFloat(getEnv("NETWATCH_DDOS_MIN_SYN_RATIO", "0.70"), 0.70)
 	ddosMinSrcIPs := parseInt(getEnv("NETWATCH_DDOS_MIN_SRC_IPS", "30"), 30)
@@ -783,6 +792,8 @@ func loadConfig() Config {
 		DDoSBaselineFactor:          ddosFactor,
 		DDoSMinPPS:                  ddosMinPPS,
 		DDoSMinBPS:                  ddosMinBPS,
+		DDoSMinPackets:              ddosMinPackets,
+		DDoSMinRequests:             ddosMinRequests,
 		DDoSMinConfidence:           ddosMinConf,
 		DDoSMinSynRatio:             ddosMinSynRatio,
 		DDoSMinSrcIPs:               ddosMinSrcIPs,
