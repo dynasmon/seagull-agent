@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,9 +18,11 @@ import (
 	"time"
 
 	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/ddos"
+	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/lateral"
 	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/proc"
 	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/scan"
 	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/ssh"
+	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/controlplane"
 	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/model"
 	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/sender"
 )
@@ -40,6 +44,13 @@ type Config struct {
 	HTTPTimeout    time.Duration
 	SenderMaxBatch int
 
+	AgentToken     string
+	AgentTokenFile string
+
+	ControlHeartbeatEvery time.Duration
+	ControlConfigEvery    time.Duration
+	ControlEnrollTimeout  time.Duration
+
 	AuthLogPath         string
 	AuthIncludeAccepted bool
 	AuthDedupTTL        time.Duration
@@ -60,6 +71,13 @@ type Config struct {
 	DenyCIDRs    []*net.IPNet
 	DenyDstPorts map[int]bool
 	DenySrcPorts map[int]bool
+
+	LateralMode               string // pcap|proc|both
+	LateralIface              string
+	LateralPorts              map[int]bool
+	LateralIncludeEstablished bool
+	LateralDedupTTL           time.Duration
+	LateralMaxBatch           int
 
 	ScanIface    string
 	ScanDedupTTL time.Duration
@@ -157,9 +175,12 @@ type Agent struct {
 	cfg Config
 
 	sender *sender.Sender
+	cp     *controlplane.Client
 
 	procCapturer *proc.Capturer
 	authCapturer *ssh.AuthLogCapturer
+	lateralProc  *lateral.ProcLateralCapturer
+	lateralPcap  *lateral.PcapLateralCapturer
 	scanCapturer *scan.PcapScanCapturer
 	ddosCapturer *ddos.PcapDDoSCapturer
 
@@ -187,10 +208,47 @@ func main() {
 		cancel()
 	}
 
+	// Control Plane: token bootstrap (env -> file -> enroll).
+	{
+		hostname, _ := os.Hostname()
+		cp := controlplane.New(cfg.APIURL, cfg.HTTPTimeout)
+
+		token := strings.TrimSpace(cfg.AgentToken)
+		if token == "" {
+			token = strings.TrimSpace(readTextFile(cfg.AgentTokenFile))
+		}
+
+		if token == "" {
+			ctx, cancel := context.WithTimeout(rootCtx, cfg.ControlEnrollTimeout)
+			resp, err := cp.Enroll(ctx, controlplane.EnrollRequest{
+				AgentID:  cfg.AgentID,
+				Hostname: hostname,
+				OS:       runtime.GOOS,
+				Version:  "0.1.0",
+			})
+			cancel()
+			if err != nil {
+				logJSON(LevelWarn, "agent_enroll_failed", map[string]interface{}{
+					"agent_id": cfg.AgentID,
+					"error":    err.Error(),
+				})
+			} else {
+				token = resp.AgentToken
+			}
+		}
+
+		if token != "" {
+			cfg.AgentToken = token
+			_ = writeTextFile(cfg.AgentTokenFile, token)
+		}
+	}
+
 	a, err := newAgent(cfg, rootCtx, stop)
 	if err != nil {
 		log.Fatalf("[AGENT] init error: %v", err)
 	}
+
+	a.startControlPlane(rootCtx)
 
 	a.loop(rootCtx)
 }
@@ -201,6 +259,7 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc) (*Ag
 	a := &Agent{
 		cfg:    cfg,
 		sender: sender.New(cfg.APIURL, cfg.HTTPTimeout, cfg.SenderMaxBatch),
+		cp:     controlplane.New(cfg.APIURL, cfg.HTTPTimeout),
 		state: SummaryState{
 			StartedAt:                now,
 			LastSummaryAt:            now,
@@ -209,6 +268,11 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc) (*Ag
 			LastSummaryScanTotal:     0,
 			LastSummaryScanEffective: 0,
 		},
+	}
+
+	if strings.TrimSpace(cfg.AgentToken) != "" {
+		a.sender.SetAuthToken(cfg.AgentToken)
+		a.cp.SetToken(cfg.AgentToken)
 	}
 
 	if contains(cfg.Sources, "proc") {
@@ -237,6 +301,70 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc) (*Ag
 			DedupTTL:        cfg.AuthDedupTTL,
 			IncludeAccepted: cfg.AuthIncludeAccepted,
 		})
+	}
+
+	if contains(cfg.Sources, "lateral") {
+		mode := strings.ToLower(strings.TrimSpace(cfg.LateralMode))
+		if mode == "" {
+			mode = "pcap"
+		}
+		if mode != "pcap" && mode != "proc" && mode != "both" {
+			mode = "pcap"
+		}
+
+		if mode == "proc" || mode == "both" {
+			procOpts := proc.Options{
+				DedupTTL:             cfg.LateralDedupTTL,
+				EstablishedTTL:       cfg.EstablishedTTL,
+				SkipLoopback:         cfg.SkipLoopback,
+				SkipLinkLocal:        cfg.SkipLinkLocal,
+				SkipPrivateToPrivate: cfg.SkipPrivateToPrivate,
+				IncludeIPv6:          true,
+				MaxBatchSize:         0,
+				DenyCIDRs:            cfg.DenyCIDRs,
+				DenyDstPorts:         cfg.DenyDstPorts,
+				DenySrcPorts:         cfg.DenySrcPorts,
+				DropLikelyOutbound:   cfg.ProcDropLikelyOutbound,
+				EphemeralPortMin:     cfg.EphemeralPortMin,
+			}
+			a.lateralProc = lateral.NewProcLateralCapturer(
+				cfg.AgentID,
+				cfg.ProcTCP4Path,
+				cfg.ProcTCP6Path,
+				procOpts,
+				lateral.Options{
+					Ports:              cfg.LateralPorts,
+					IncludeEstablished: cfg.LateralIncludeEstablished,
+					MaxBatchSize:       cfg.LateralMaxBatch,
+				},
+			)
+		}
+
+		if mode == "pcap" || mode == "both" {
+			lc, err := lateral.NewPcapLateralCapturer(cfg.AgentID, lateral.PcapLateralOptions{
+				Interface:     cfg.LateralIface,
+				DedupTTL:      cfg.LateralDedupTTL,
+				MaxBatchSize:  cfg.LateralMaxBatch,
+				SkipLoopback:  cfg.SkipLoopback,
+				SkipLinkLocal: cfg.SkipLinkLocal,
+				DenyCIDRs:     cfg.DenyCIDRs,
+				Ports:         cfg.LateralPorts,
+			})
+			if err != nil {
+				return nil, err
+			}
+			a.lateralPcap = lc
+
+			go func() {
+				if err := a.lateralPcap.Start(rootCtx); err != nil {
+					logJSON(LevelError, "lateral_capture_stopped", map[string]interface{}{
+						"agent_id": cfg.AgentID,
+						"error":    err.Error(),
+					})
+					stop()
+				}
+			}()
+		}
 	}
 
 	if contains(cfg.Sources, "scan") {
@@ -365,6 +493,78 @@ func (a *Agent) loop(rootCtx context.Context) {
 	}
 }
 
+func (a *Agent) startControlPlane(rootCtx context.Context) {
+	if a.cp == nil || strings.TrimSpace(a.cfg.AgentToken) == "" {
+		return
+	}
+
+	// Heartbeat loop
+	go func() {
+		t := time.NewTicker(a.cfg.ControlHeartbeatEvery)
+		defer t.Stop()
+
+		for {
+			select {
+			case <-rootCtx.Done():
+				return
+			case <-t.C:
+				ctx, cancel := context.WithTimeout(rootCtx, a.cfg.HTTPTimeout)
+				err := a.cp.Heartbeat(ctx, controlplane.HeartbeatRequest{
+					Status:        "ok",
+					UptimeSeconds: int64(time.Since(a.state.StartedAt).Seconds()),
+					Modules: map[string]interface{}{
+						"sources": a.cfg.Sources,
+					},
+					Metrics: map[string]interface{}{
+						"events_sent_total":   a.state.EventsSentTotal,
+						"send_errors_total":   a.state.SendErrorsTotal,
+						"last_http_status":    a.state.LastHTTPStatus,
+						"last_error":          a.state.LastError,
+						"send_attempts_total": a.state.SendAttemptsTotal,
+					},
+				})
+				cancel()
+				if err != nil {
+					logJSON(LevelWarn, "controlplane_heartbeat_error", map[string]interface{}{
+						"agent_id": a.cfg.AgentID,
+						"error":    err.Error(),
+					})
+				}
+			}
+		}
+	}()
+
+	// Config pull loop (best-effort). For now, the agent logs config changes.
+	go func() {
+		t := time.NewTicker(a.cfg.ControlConfigEvery)
+		defer t.Stop()
+
+		for {
+			select {
+			case <-rootCtx.Done():
+				return
+			case <-t.C:
+				ctx, cancel := context.WithTimeout(rootCtx, a.cfg.HTTPTimeout)
+				cfg, err := a.cp.GetConfig(ctx)
+				cancel()
+				if err != nil {
+					logJSON(LevelWarn, "controlplane_config_error", map[string]interface{}{
+						"agent_id": a.cfg.AgentID,
+						"error":    err.Error(),
+					})
+					continue
+				}
+				if len(cfg) > 0 {
+					logJSON(LevelInfo, "controlplane_config_received", map[string]interface{}{
+						"agent_id": a.cfg.AgentID,
+						"config":   cfg,
+					})
+				}
+			}
+		}
+	}()
+}
+
 func (a *Agent) runAndLog(rootCtx context.Context) {
 	res := a.runOnce(rootCtx)
 	if res == nil {
@@ -412,6 +612,25 @@ func (a *Agent) runOnce(rootCtx context.Context) *CycleResult {
 				"error":    err.Error(),
 			})
 		} else if len(evs) > 0 {
+			events = append(events, evs...)
+		}
+	}
+
+	if a.lateralProc != nil {
+		evs, err := a.lateralProc.Capture()
+		if err != nil {
+			logJSON(LevelWarn, "lateral_proc_capture_error", map[string]interface{}{
+				"agent_id": a.cfg.AgentID,
+				"error":    err.Error(),
+			})
+		} else if len(evs) > 0 {
+			events = append(events, evs...)
+		}
+	}
+
+	if a.lateralPcap != nil {
+		evs := a.lateralPcap.Drain()
+		if len(evs) > 0 {
 			events = append(events, evs...)
 		}
 	}
@@ -680,6 +899,13 @@ func loadConfig() Config {
 	httpTimeout := parseDuration(getEnv("NETWATCH_HTTP_TIMEOUT", "10s"), 10*time.Second)
 	senderMaxBatch := parseInt(getEnv("NETWATCH_SENDER_MAX_BATCH", "300"), 300)
 
+	agentToken := strings.TrimSpace(getEnv("NETWATCH_AGENT_TOKEN", ""))
+	agentTokenFile := getEnv("NETWATCH_AGENT_TOKEN_FILE", "/var/lib/netwatch/agent.token")
+
+	controlHeartbeatEvery := parseDuration(getEnv("NETWATCH_CONTROL_HEARTBEAT_EVERY", "30s"), 30*time.Second)
+	controlConfigEvery := parseDuration(getEnv("NETWATCH_CONTROL_CONFIG_EVERY", "5m"), 5*time.Minute)
+	controlEnrollTimeout := parseDuration(getEnv("NETWATCH_CONTROL_ENROLL_TIMEOUT", "10s"), 10*time.Second)
+
 	logPath := getEnv("NETWATCH_AUTHLOG_PATH", "/var/log/auth.log")
 	includeAccepted := parseBool(getEnv("NETWATCH_AUTHLOG_INCLUDE_ACCEPTED", "false"), false)
 	authDedupTTL := parseDuration(getEnv("NETWATCH_AUTHLOG_DEDUP_TTL", "30s"), 30*time.Second)
@@ -700,6 +926,13 @@ func loadConfig() Config {
 	denyCIDRs := parseCIDRs(getEnv("NETWATCH_DENY_CIDRS", ""))
 	denyDstPorts := parseIntSet(getEnv("NETWATCH_DENY_DST_PORTS", ""))
 	denySrcPorts := parseIntSet(getEnv("NETWATCH_DENY_SRC_PORTS", ""))
+
+	lateralMode := strings.ToLower(strings.TrimSpace(getEnv("NETWATCH_LATERAL_MODE", "pcap")))
+	lateralIface := getEnv("NETWATCH_LATERAL_PCAP_IFACE", getEnv("NETWATCH_PCAP_IFACE", "any"))
+	lateralPorts := parseIntSet(getEnv("NETWATCH_LATERAL_PORTS", "22,445,3389,5985,5986,135,139"))
+	lateralIncludeEstablished := parseBool(getEnv("NETWATCH_LATERAL_INCLUDE_ESTABLISHED", "true"), true)
+	lateralDedup := parseDuration(getEnv("NETWATCH_LATERAL_DEDUP_TTL", "5s"), 5*time.Second)
+	lateralMaxBatch := parseInt(getEnv("NETWATCH_LATERAL_MAX_BATCH", "500"), 500)
 
 	scanIface := getEnv("NETWATCH_PCAP_IFACE", "any")
 	scanDedup := parseDuration(getEnv("NETWATCH_SCAN_DEDUP_TTL", "2s"), 2*time.Second)
@@ -755,6 +988,13 @@ func loadConfig() Config {
 		HTTPTimeout:    httpTimeout,
 		SenderMaxBatch: senderMaxBatch,
 
+		AgentToken:     agentToken,
+		AgentTokenFile: agentTokenFile,
+
+		ControlHeartbeatEvery: controlHeartbeatEvery,
+		ControlConfigEvery:    controlConfigEvery,
+		ControlEnrollTimeout:  controlEnrollTimeout,
+
 		AuthLogPath:         logPath,
 		AuthIncludeAccepted: includeAccepted,
 		AuthDedupTTL:        authDedupTTL,
@@ -775,6 +1015,13 @@ func loadConfig() Config {
 		DenyCIDRs:    denyCIDRs,
 		DenyDstPorts: denyDstPorts,
 		DenySrcPorts: denySrcPorts,
+
+		LateralMode:               lateralMode,
+		LateralIface:              lateralIface,
+		LateralPorts:              lateralPorts,
+		LateralIncludeEstablished: lateralIncludeEstablished,
+		LateralDedupTTL:           lateralDedup,
+		LateralMaxBatch:           lateralMaxBatch,
 
 		ScanIface:    scanIface,
 		ScanDedupTTL: scanDedup,
@@ -1178,6 +1425,41 @@ func parseIntSet(csv string) map[int]bool {
 		}
 	}
 	return out
+}
+
+func readTextFile(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+func writeTextFile(path string, content string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+
+	tmp := path + ".tmp"
+	data := strings.TrimSpace(content)
+	if data != "" {
+		data += "\n"
+	}
+
+	if err := os.WriteFile(tmp, []byte(data), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 func round2(v float64) float64 {
