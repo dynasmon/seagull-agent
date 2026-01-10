@@ -8,9 +8,9 @@ import (
 )
 
 type Options struct {
-	Ports               map[int]bool
-	IncludeEstablished  bool
-	MaxBatchSize        int
+	Ports              map[int]bool
+	IncludeEstablished bool
+	MaxBatchSize       int
 }
 
 type ProcLateralCapturer struct {

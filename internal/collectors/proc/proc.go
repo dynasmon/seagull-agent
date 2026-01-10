@@ -124,8 +124,9 @@ func (c *Capturer) Capture() ([]model.NetEvent, error) {
 }
 
 // Standardized (host-centric) semantics:
-//   src_* = remote (client/attacker)
-//   dst_* = local (monitored host/target port)
+//
+//	src_* = remote (client/attacker)
+//	dst_* = local (monitored host/target port)
 func (c *Capturer) captureProc4(ts time.Time) ([]model.NetEvent, error) {
 	f, err := os.Open(c.tcp4Path)
 	if err != nil {

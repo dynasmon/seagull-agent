@@ -1,6 +1,5 @@
 package ssh
 
-
 import (
 	"bufio"
 	"fmt"

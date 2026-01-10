@@ -115,12 +115,6 @@ func (s *Sender) postOnce(ctx context.Context, url string, payload []byte) (int,
 	if s.authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+s.authToken)
 	}
-	if s.authToken != "" {
-		req.Header.Set("Authorization", "Bearer "+s.authToken)
-	}
-	if s.authToken != "" {
-		req.Header.Set("Authorization", "Bearer "+s.authToken)
-	}
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -135,6 +129,37 @@ func (s *Sender) postOnce(ctx context.Context, url string, payload []byte) (int,
 	}
 
 	return resp.StatusCode, nil
+}
+
+func (s *Sender) SendInventorySnapshot(ctx context.Context, snap model.InventorySnapshot) (int, error) {
+	if s.baseURL == "" {
+		return 0, fmt.Errorf("sender baseURL is empty")
+	}
+	if s.authToken == "" {
+		return 0, fmt.Errorf("sender auth token is empty")
+	}
+
+	// Ensure required fields match backend schema expectations.
+	if snap.SchemaVersion <= 0 {
+		snap.SchemaVersion = 1
+	}
+	if snap.OS == nil {
+		snap.OS = map[string]interface{}{}
+	}
+	if snap.Packages == nil {
+		snap.Packages = []model.PackageEntry{}
+	}
+	if snap.Extra == nil {
+		snap.Extra = map[string]interface{}{}
+	}
+
+	payload, err := json.Marshal(snap)
+	if err != nil {
+		return 0, fmt.Errorf("marshal inventory snapshot: %w", err)
+	}
+
+	endpoint := s.baseURL + "/inventory"
+	return s.postWithRetry(ctx, endpoint, payload)
 }
 
 func isRetryable(err error, status int) bool {
