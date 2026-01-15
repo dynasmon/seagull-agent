@@ -17,6 +17,12 @@ import (
 	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/model"
 )
 
+var (
+	reFailed   = regexp.MustCompile(`Failed password for (invalid user )?(\S+) from (\S+) port (\d+)`)
+	reInvalid  = regexp.MustCompile(`Invalid user (\S+) from (\S+) port (\d+)`)
+	reAccepted = regexp.MustCompile(`Accepted \S+ for (\S+) from (\S+) port (\d+)`)
+)
+
 type AuthLogOptions struct {
 	Path            string
 	MaxBatchSize    int
@@ -37,6 +43,7 @@ type logDedupEntry struct {
 type AuthLogCapturer struct {
 	agentID string
 	opts    AuthLogOptions
+	hostIP  string
 
 	offset    int64
 	lastInode uint64
@@ -57,6 +64,7 @@ func NewAuthLogCapturer(agentID string, opts AuthLogOptions) *AuthLogCapturer {
 	return &AuthLogCapturer{
 		agentID: agentID,
 		opts:    opts,
+		hostIP:  detectPrimaryIP(),
 		cache:   make(map[dedupKey]logDedupEntry, 2048),
 	}
 }
@@ -70,104 +78,69 @@ func (c *AuthLogCapturer) Capture(now time.Time) ([]model.NetEvent, error) {
 
 	fi, err := f.Stat()
 	if err != nil {
-		return nil, fmt.Errorf("stat authlog %s: %w", c.opts.Path, err)
+		return nil, fmt.Errorf("stat authlog: %w", err)
 	}
 
 	inode := inodeOf(fi)
-	if c.lastInode != 0 && inode != 0 && inode != c.lastInode {
+	if c.lastInode != 0 && inode != c.lastInode {
+		// log rotated
 		c.offset = 0
 	}
 	c.lastInode = inode
 
-	if fi.Size() < c.offset {
-		c.offset = 0
+	if c.offset > 0 {
+		if _, err := f.Seek(c.offset, io.SeekStart); err != nil {
+			c.offset = 0
+			_, _ = f.Seek(0, io.SeekStart)
+		}
 	}
 
-	if _, err := f.Seek(c.offset, io.SeekStart); err != nil {
-		return nil, fmt.Errorf("seek authlog: %w", err)
-	}
+	reader := bufio.NewReader(f)
 
-	out := make([]model.NetEvent, 0, 64)
+	var out []model.NetEvent
+	out = make([]model.NetEvent, 0, c.opts.MaxBatchSize)
 
-	scanner := bufio.NewScanner(f)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 256*1024)
+	for len(out) < c.opts.MaxBatchSize {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return out, fmt.Errorf("read authlog: %w", err)
+		}
 
-	for scanner.Scan() {
-		ev, key, ok := c.parseLine(now, scanner.Text())
+		c.offset += int64(len(line))
+
+		ev, key, ok := c.parseLine(now, line)
 		if !ok {
 			continue
 		}
-		if c.isDuplicate(now, key) {
+
+		if c.isDeduped(now, key) {
 			continue
 		}
 
 		out = append(out, ev)
-		if len(out) >= c.opts.MaxBatchSize {
-			break
-		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		return out, fmt.Errorf("scan authlog: %w", err)
-	}
+	c.pruneDedup(now)
 
-	if pos, err := f.Seek(0, io.SeekCurrent); err == nil {
-		c.offset = pos
-	}
-
-	c.cleanup(now)
 	return out, nil
 }
 
-func (c *AuthLogCapturer) isDuplicate(now time.Time, key dedupKey) bool {
-	if key.srcIP == "" || key.action == "" {
-		return false
-	}
-
-	if e, ok := c.cache[key]; ok && now.Sub(e.lastSeen) < c.opts.DedupTTL {
-		return true
-	}
-
-	c.cache[key] = logDedupEntry{lastSeen: now}
-	return false
-}
-
-func (c *AuthLogCapturer) cleanup(now time.Time) {
-	cut := now.Add(-2 * c.opts.DedupTTL)
-	for k, v := range c.cache {
-		if v.lastSeen.Before(cut) {
-			delete(c.cache, k)
-		}
-	}
-}
-
-var (
-	reSSHD       = regexp.MustCompile(`\bsshd\[(\d+)\]:\s+(.*)$`)
-	reFailedPwd  = regexp.MustCompile(`^Failed password for (invalid user )?(\S+) from (\S+) port (\d+)`)
-	reInvalid    = regexp.MustCompile(`^Invalid user (\S+) from (\S+) port (\d+)`)
-	reAccepted   = regexp.MustCompile(`^Accepted (\S+) for (\S+) from (\S+) port (\d+)`)
-	reMaxAuth    = regexp.MustCompile(`^error: maximum authentication attempts exceeded for (\S+) from (\S+) port (\d+)`)
-	reClosed     = regexp.MustCompile(`^Connection closed by (?:authenticating user )?(\S+)?\s*(\S+)\s+port\s+(\d+)`)
-	reDisconnect = regexp.MustCompile(`^Disconnected from (invalid user )?(\S+)\s+(\S+)\s+port\s+(\d+)`)
-)
-
 func (c *AuthLogCapturer) parseLine(now time.Time, line string) (model.NetEvent, dedupKey, bool) {
-	m := reSSHD.FindStringSubmatch(line)
-	if len(m) != 3 {
+	msg := strings.TrimSpace(line)
+	if msg == "" {
 		return model.NetEvent{}, dedupKey{}, false
 	}
 
-	pid := m[1]
-	msg := m[2]
-
-	if mm := reFailedPwd.FindStringSubmatch(msg); len(mm) == 5 {
+	if mm := reFailed.FindStringSubmatch(msg); len(mm) == 5 {
 		user := mm[2]
 		ip := normalizeIP(mm[3])
 		port := mm[4]
 
 		ev := c.newSSHEndpointEvent(now, ip, 22, map[string]interface{}{
-			"ssh_pid":     pid,
+			"ssh_pid":     0,
 			"action":      "failed_password",
 			"username":    user,
 			"src_port":    toInt(port),
@@ -183,7 +156,7 @@ func (c *AuthLogCapturer) parseLine(now time.Time, line string) (model.NetEvent,
 		port := mm[3]
 
 		ev := c.newSSHEndpointEvent(now, ip, 22, map[string]interface{}{
-			"ssh_pid":     pid,
+			"ssh_pid":     0,
 			"action":      "invalid_user",
 			"username":    user,
 			"src_port":    toInt(port),
@@ -193,47 +166,52 @@ func (c *AuthLogCapturer) parseLine(now time.Time, line string) (model.NetEvent,
 		return ev, dedupKey{srcIP: ip, user: user, action: "invalid_user"}, true
 	}
 
-	if mm := reMaxAuth.FindStringSubmatch(msg); len(mm) == 4 {
-		user := mm[1]
-		ip := normalizeIP(mm[2])
-		port := mm[3]
-
-		ev := c.newSSHEndpointEvent(now, ip, 22, map[string]interface{}{
-			"ssh_pid":     pid,
-			"action":      "max_auth_attempts",
-			"username":    user,
-			"src_port":    toInt(port),
-			"raw_message": msg,
-		})
-
-		return ev, dedupKey{srcIP: ip, user: user, action: "max_auth_attempts"}, true
-	}
-
 	if c.opts.IncludeAccepted {
-		if mm := reAccepted.FindStringSubmatch(msg); len(mm) == 5 {
-			method := mm[1]
-			user := mm[2]
-			ip := normalizeIP(mm[3])
-			port := mm[4]
+		if mm := reAccepted.FindStringSubmatch(msg); len(mm) == 4 {
+			user := mm[1]
+			ip := normalizeIP(mm[2])
+			port := mm[3]
 
 			ev := c.newSSHEndpointEvent(now, ip, 22, map[string]interface{}{
-				"ssh_pid":     pid,
+				"ssh_pid":     0,
 				"action":      "accepted",
-				"auth_method": method,
 				"username":    user,
 				"src_port":    toInt(port),
 				"raw_message": msg,
 			})
 
-			return ev, dedupKey{srcIP: ip, user: user, action: "accepted_" + method}, true
+			return ev, dedupKey{srcIP: ip, user: user, action: "accepted"}, true
 		}
 	}
 
-	if reClosed.MatchString(msg) || reDisconnect.MatchString(msg) {
-		return model.NetEvent{}, dedupKey{}, false
+	return model.NetEvent{}, dedupKey{}, false
+}
+
+func (c *AuthLogCapturer) isDeduped(now time.Time, key dedupKey) bool {
+	if key.srcIP == "" {
+		return false
+	}
+	if ent, ok := c.cache[key]; ok {
+		if now.Sub(ent.lastSeen) <= c.opts.DedupTTL {
+			ent.lastSeen = now
+			c.cache[key] = ent
+			return true
+		}
 	}
 
-	return model.NetEvent{}, dedupKey{}, false
+	c.cache[key] = logDedupEntry{lastSeen: now}
+	return false
+}
+
+func (c *AuthLogCapturer) pruneDedup(now time.Time) {
+	if len(c.cache) == 0 {
+		return
+	}
+	for k, v := range c.cache {
+		if now.Sub(v.lastSeen) > 2*c.opts.DedupTTL {
+			delete(c.cache, k)
+		}
+	}
 }
 
 func (c *AuthLogCapturer) newSSHEndpointEvent(now time.Time, srcIP string, dstPort int, extra map[string]interface{}) model.NetEvent {
@@ -248,6 +226,7 @@ func (c *AuthLogCapturer) newSSHEndpointEvent(now time.Time, srcIP string, dstPo
 		EventType: "ssh_auth",
 		Timestamp: now.UTC(),
 		SrcIP:     srcIP,
+		DstIP:     c.hostIP,
 		DstPort:   dstPort,
 		Proto:     "ssh",
 		Bytes:     0,
@@ -261,6 +240,63 @@ func inodeOf(fi os.FileInfo) uint64 {
 		return 0
 	}
 	return uint64(st.Ino)
+}
+
+func detectPrimaryIP() string {
+	// Best-effort: choose the primary non-loopback IPv4 address of the host.
+	// This is used as dst_ip for ssh_auth events parsed from auth.log, since the log line
+	// contains the remote source IP but not the local destination IP.
+	if c, err := net.Dial("udp", "8.8.8.8:80"); err == nil {
+		if ua, ok := c.LocalAddr().(*net.UDPAddr); ok {
+			ip := ua.IP
+			_ = c.Close()
+			if ip != nil {
+				if ip4 := ip.To4(); ip4 != nil && !ip4.IsLoopback() {
+					return ip4.String()
+				}
+			}
+		} else {
+			_ = c.Close()
+		}
+	}
+
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		if iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			var ip net.IP
+			switch v := a.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil {
+				continue
+			}
+			ip4 := ip.To4()
+			if ip4 == nil {
+				continue
+			}
+			if ip4.IsLoopback() {
+				continue
+			}
+			return ip4.String()
+		}
+	}
+	return ""
 }
 
 func normalizeIP(s string) string {
