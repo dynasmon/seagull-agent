@@ -21,6 +21,7 @@ var (
 	reFailed   = regexp.MustCompile(`Failed password for (invalid user )?(\S+) from (\S+) port (\d+)`)
 	reInvalid  = regexp.MustCompile(`Invalid user (\S+) from (\S+) port (\d+)`)
 	reAccepted = regexp.MustCompile(`Accepted \S+ for (\S+) from (\S+) port (\d+)`)
+	reSudoCmd  = regexp.MustCompile(`sudo:\s+(\S+)\s*:\s+TTY=([^;]+)\s*;\s*PWD=([^;]+)\s*;\s*USER=([^;]+)\s*;\s*COMMAND=(.+)$`)
 )
 
 type AuthLogOptions struct {
@@ -132,6 +133,39 @@ func (c *AuthLogCapturer) parseLine(now time.Time, line string) (model.NetEvent,
 	msg := strings.TrimSpace(line)
 	if msg == "" {
 		return model.NetEvent{}, dedupKey{}, false
+	}
+
+	if mm := reSudoCmd.FindStringSubmatch(msg); len(mm) == 6 {
+		user := strings.TrimSpace(mm[1])
+		tty := strings.TrimSpace(mm[2])
+		pwd := strings.TrimSpace(mm[3])
+		targetUser := strings.TrimSpace(mm[4])
+		command := strings.TrimSpace(mm[5])
+
+		ev := model.NetEvent{
+			AgentID:   c.agentID,
+			EventType: "sudo_cmd",
+			Timestamp: now.UTC(),
+			SrcIP:     c.hostIP,
+			DstIP:     c.hostIP,
+			DstPort:   0,
+			Proto:     "sudo",
+			Bytes:     0,
+			Extra: map[string]interface{}{
+				"event_id":    uuid.NewString(),
+				"source":      "auth.log",
+				"action":      "sudo",
+				"username":    user,
+				"target_user": targetUser,
+				"tty":         tty,
+				"pwd":         pwd,
+				"command":     command,
+				"raw_message": msg,
+			},
+		}
+
+		// Never dedupe sudo (commands are unique evidence)
+		return ev, dedupKey{}, true
 	}
 
 	if mm := reFailed.FindStringSubmatch(msg); len(mm) == 5 {
