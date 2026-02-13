@@ -17,10 +17,11 @@ import (
 )
 
 type Sender struct {
-	baseURL  string
-	client   *http.Client
-	maxBatch int
-	retries  int
+	baseURL   string
+	authToken string
+	client    *http.Client
+	maxBatch  int
+	retries   int
 }
 
 func New(baseURL string, timeout time.Duration, maxBatch int) *Sender {
@@ -34,11 +35,16 @@ func New(baseURL string, timeout time.Duration, maxBatch int) *Sender {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 
 	return &Sender{
-		baseURL:  baseURL,
-		client:   &http.Client{Timeout: timeout},
-		maxBatch: maxBatch,
-		retries:  3,
+		baseURL:   baseURL,
+		authToken: "",
+		client:    &http.Client{Timeout: timeout},
+		maxBatch:  maxBatch,
+		retries:   3,
 	}
+}
+
+func (s *Sender) SetAuthToken(token string) {
+	s.authToken = strings.TrimSpace(token)
 }
 
 func (s *Sender) SendEvents(ctx context.Context, events []model.NetEvent) (int, error) {
@@ -106,6 +112,9 @@ func (s *Sender) postOnce(ctx context.Context, url string, payload []byte) (int,
 		return 0, fmt.Errorf("new request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if s.authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+s.authToken)
+	}
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -120,6 +129,37 @@ func (s *Sender) postOnce(ctx context.Context, url string, payload []byte) (int,
 	}
 
 	return resp.StatusCode, nil
+}
+
+func (s *Sender) SendInventorySnapshot(ctx context.Context, snap model.InventorySnapshot) (int, error) {
+	if s.baseURL == "" {
+		return 0, fmt.Errorf("sender baseURL is empty")
+	}
+	if s.authToken == "" {
+		return 0, fmt.Errorf("sender auth token is empty")
+	}
+
+	// Ensure required fields match backend schema expectations.
+	if snap.SchemaVersion <= 0 {
+		snap.SchemaVersion = 1
+	}
+	if snap.OS == nil {
+		snap.OS = map[string]interface{}{}
+	}
+	if snap.Packages == nil {
+		snap.Packages = []model.PackageEntry{}
+	}
+	if snap.Extra == nil {
+		snap.Extra = map[string]interface{}{}
+	}
+
+	payload, err := json.Marshal(snap)
+	if err != nil {
+		return 0, fmt.Errorf("marshal inventory snapshot: %w", err)
+	}
+
+	endpoint := s.baseURL + "/inventory"
+	return s.postWithRetry(ctx, endpoint, payload)
 }
 
 func isRetryable(err error, status int) bool {
