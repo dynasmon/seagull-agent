@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -17,6 +18,20 @@ type SyscollectorConfig struct {
 	CmdTimeout     time.Duration
 	MaxOutputBytes int64
 	MaxPackages    int
+	HostRoot       string
+}
+
+type VulnScannerConfig struct {
+	Enabled        bool
+	Every          time.Duration
+	OSVURL         string
+	MinSeverity    string
+	QueryBatchSize int
+	MaxPackages    int
+	CmdTimeout     time.Duration
+	HTTPTimeout    time.Duration
+	MaxOutputBytes int64
+	HostRoot       string
 }
 
 type RuntimeConfig struct {
@@ -25,14 +40,16 @@ type RuntimeConfig struct {
 	hash     string
 	path     string
 	defaults SyscollectorConfig
+	vulnDef  VulnScannerConfig
 	changed  chan struct{}
 }
 
-func NewRuntimeConfig(path string, defaults SyscollectorConfig) *RuntimeConfig {
+func NewRuntimeConfig(path string, defaults SyscollectorConfig, vulnDefaults VulnScannerConfig) *RuntimeConfig {
 	rc := &RuntimeConfig{
 		raw:      map[string]interface{}{},
 		path:     path,
 		defaults: defaults,
+		vulnDef:  vulnDefaults,
 		changed:  make(chan struct{}, 1),
 	}
 	_ = rc.loadFromFile()
@@ -122,6 +139,76 @@ func (r *RuntimeConfig) Syscollector() SyscollectorConfig {
 	}
 	if n, ok := toInt64(sys["max_packages"]); ok && n > 0 {
 		cfg.MaxPackages = int(n)
+	}
+	if s, ok := sys["host_root"].(string); ok {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			cfg.HostRoot = s
+		}
+	}
+
+	return cfg
+}
+
+func (r *RuntimeConfig) VulnScanner() VulnScannerConfig {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	cfg := r.vulnDef
+
+	modules, _ := r.raw["modules"].(map[string]interface{})
+	if modules == nil {
+		return cfg
+	}
+	v, _ := modules["vulnscanner"].(map[string]interface{})
+	if v == nil {
+		return cfg
+	}
+
+	if b, ok := v["enabled"].(bool); ok {
+		cfg.Enabled = b
+	}
+	if s, ok := v["every"].(string); ok {
+		if d, err := time.ParseDuration(s); err == nil && d > 0 {
+			cfg.Every = d
+		}
+	}
+	if s, ok := v["osv_url"].(string); ok {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			cfg.OSVURL = s
+		}
+	}
+	if s, ok := v["min_severity"].(string); ok {
+		s = strings.ToLower(strings.TrimSpace(s))
+		if s != "" {
+			cfg.MinSeverity = s
+		}
+	}
+	if n, ok := toInt64(v["query_batch_size"]); ok && n > 0 {
+		cfg.QueryBatchSize = int(n)
+	}
+	if n, ok := toInt64(v["max_packages"]); ok && n > 0 {
+		cfg.MaxPackages = int(n)
+	}
+	if s, ok := v["cmd_timeout"].(string); ok {
+		if d, err := time.ParseDuration(s); err == nil && d > 0 {
+			cfg.CmdTimeout = d
+		}
+	}
+	if s, ok := v["http_timeout"].(string); ok {
+		if d, err := time.ParseDuration(s); err == nil && d > 0 {
+			cfg.HTTPTimeout = d
+		}
+	}
+	if n, ok := toInt64(v["max_output_bytes"]); ok && n > 0 {
+		cfg.MaxOutputBytes = n
+	}
+	if s, ok := v["host_root"].(string); ok {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			cfg.HostRoot = s
+		}
 	}
 
 	return cfg

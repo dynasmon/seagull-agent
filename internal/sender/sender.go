@@ -106,6 +106,35 @@ func (s *Sender) postWithRetry(ctx context.Context, url string, payload []byte) 
 	return lastStatus, lastErr
 }
 
+func (s *Sender) postWithRetryRead(ctx context.Context, url string, payload []byte) (int, []byte, error) {
+	var lastErr error
+	lastStatus := 0
+	var lastBody []byte
+
+	for attempt := 0; attempt <= s.retries; attempt++ {
+		if attempt > 0 {
+			if err := sleepBackoff(ctx, attempt); err != nil {
+				return lastStatus, lastBody, err
+			}
+		}
+
+		status, body, err := s.postOnceRead(ctx, url, payload)
+		lastStatus = status
+		lastBody = body
+
+		if err == nil {
+			return status, body, nil
+		}
+
+		lastErr = err
+		if !isRetryable(err, status) {
+			return status, body, err
+		}
+	}
+
+	return lastStatus, lastBody, lastErr
+}
+
 func (s *Sender) postOnce(ctx context.Context, url string, payload []byte) (int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
@@ -129,6 +158,30 @@ func (s *Sender) postOnce(ctx context.Context, url string, payload []byte) (int,
 	}
 
 	return resp.StatusCode, nil
+}
+
+func (s *Sender) postOnceRead(ctx context.Context, url string, payload []byte) (int, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return 0, nil, fmt.Errorf("new request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if s.authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+s.authToken)
+	}
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("post ingest: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MiB cap
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return resp.StatusCode, body, fmt.Errorf("ingest returned status=%d", resp.StatusCode)
+	}
+
+	return resp.StatusCode, body, nil
 }
 
 func (s *Sender) SendInventorySnapshot(ctx context.Context, snap model.InventorySnapshot) (int, error) {
@@ -160,6 +213,21 @@ func (s *Sender) SendInventorySnapshot(ctx context.Context, snap model.Inventory
 
 	endpoint := s.baseURL + "/inventory"
 	return s.postWithRetry(ctx, endpoint, payload)
+}
+
+func (s *Sender) SendVulnIngest(ctx context.Context, payload []byte) (int, []byte, error) {
+	if s.baseURL == "" {
+		return 0, nil, fmt.Errorf("sender baseURL is empty")
+	}
+	if s.authToken == "" {
+		return 0, nil, fmt.Errorf("sender auth token is empty")
+	}
+	if len(payload) == 0 {
+		return 0, nil, nil
+	}
+
+	endpoint := s.baseURL + "/vuln/ingest"
+	return s.postWithRetryRead(ctx, endpoint, payload)
 }
 
 func isRetryable(err error, status int) bool {

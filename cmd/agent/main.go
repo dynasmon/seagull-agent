@@ -57,6 +57,18 @@ type Config struct {
 	SyscollectCmdTimeout     time.Duration
 	SyscollectMaxOutputBytes int64
 	SyscollectMaxPackages    int
+	SyscollectHostRoot       string
+
+	VulnScanEvery       time.Duration
+	VulnOSVURL          string
+	VulnMinSeverity     string
+	VulnQueryBatchSize  int
+	VulnCmdTimeout      time.Duration
+	VulnHTTPTimeout     time.Duration
+	VulnMaxOutputBytes  int64
+	VulnMaxPackages     int
+	VulnHostRoot        string
+	VulnEmitSummaryEvent bool
 
 	AuthLogPath         string
 	AuthIncludeAccepted bool
@@ -194,6 +206,9 @@ type Agent struct {
 	lateralPcap  *lateral.PcapLateralCapturer
 	scanCapturer *scan.PcapScanCapturer
 	ddosCapturer *ddos.PcapDDoSCapturer
+
+	vulnMu     sync.RWMutex
+	vulnStatus VulnScannerStatus
 	
 
 	state SummaryState
@@ -267,6 +282,7 @@ func main() {
 
 	a.startControlPlane(rootCtx)
 	a.startSyscollector(rootCtx)
+	a.startVulnScanner(rootCtx)
 
 	a.loop(rootCtx)
 }
@@ -278,13 +294,29 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc) (*Ag
 		cfg:    cfg,
 		sender: sender.New(cfg.APIURL, cfg.HTTPTimeout, cfg.SenderMaxBatch),
 		cp:     controlplane.New(cfg.APIURL, cfg.HTTPTimeout),
-		runtime: NewRuntimeConfig(cfg.AgentConfigFile, SyscollectorConfig{
-			Enabled:        true,
-			Every:          cfg.SyscollectEvery,
-			CmdTimeout:     cfg.SyscollectCmdTimeout,
-			MaxOutputBytes: cfg.SyscollectMaxOutputBytes,
-			MaxPackages:    cfg.SyscollectMaxPackages,
-		}),
+		runtime: NewRuntimeConfig(
+			cfg.AgentConfigFile,
+			SyscollectorConfig{
+				Enabled:        true,
+				Every:          cfg.SyscollectEvery,
+				CmdTimeout:     cfg.SyscollectCmdTimeout,
+				MaxOutputBytes: cfg.SyscollectMaxOutputBytes,
+				MaxPackages:    cfg.SyscollectMaxPackages,
+				HostRoot:       cfg.SyscollectHostRoot,
+			},
+			VulnScannerConfig{
+				Enabled:        true,
+				Every:          cfg.VulnScanEvery,
+				OSVURL:         cfg.VulnOSVURL,
+				MinSeverity:    cfg.VulnMinSeverity,
+				QueryBatchSize: cfg.VulnQueryBatchSize,
+				CmdTimeout:     cfg.VulnCmdTimeout,
+				HTTPTimeout:    cfg.VulnHTTPTimeout,
+				MaxOutputBytes: cfg.VulnMaxOutputBytes,
+				MaxPackages:    cfg.VulnMaxPackages,
+				HostRoot:       cfg.VulnHostRoot,
+			},
+		),
 		state: SummaryState{
 			StartedAt:                now,
 			LastSummaryAt:            now,
@@ -985,6 +1017,18 @@ func loadConfig() Config {
 	syscollectCmdTimeout := parseDuration(getEnv("NETWATCH_SYSCOLLECT_CMD_TIMEOUT", "10s"), 10*time.Second)
 	syscollectMaxOutputBytes := int64(parseInt(getEnv("NETWATCH_SYSCOLLECT_MAX_OUTPUT_BYTES", "8388608"), 8388608))
 	syscollectMaxPackages := parseInt(getEnv("NETWATCH_SYSCOLLECT_MAX_PACKAGES", "50000"), 50000)
+	syscollectHostRoot := strings.TrimSpace(getEnv("NETWATCH_HOST_ROOT", ""))
+
+	vulnEvery := parseDuration(getEnv("NETWATCH_VULN_SCAN_EVERY", "12h"), 12*time.Hour)
+	vulnOSVURL := strings.TrimSpace(getEnv("NETWATCH_VULN_OSV_URL", "https://api.osv.dev"))
+	vulnMinSeverity := strings.ToLower(strings.TrimSpace(getEnv("NETWATCH_VULN_MIN_SEVERITY", "medium")))
+	vulnBatch := parseInt(getEnv("NETWATCH_VULN_QUERY_BATCH_SIZE", "200"), 200)
+	vulnCmdTimeout := parseDuration(getEnv("NETWATCH_VULN_CMD_TIMEOUT", "15s"), 15*time.Second)
+	vulnHTTPTimeout := parseDuration(getEnv("NETWATCH_VULN_HTTP_TIMEOUT", "60s"), 60*time.Second)
+	vulnMaxOutputBytes := int64(parseInt(getEnv("NETWATCH_VULN_MAX_OUTPUT_BYTES", "8388608"), 8388608))
+	vulnMaxPackages := parseInt(getEnv("NETWATCH_VULN_MAX_PACKAGES", strconv.Itoa(syscollectMaxPackages)), syscollectMaxPackages)
+	vulnHostRoot := strings.TrimSpace(getEnv("NETWATCH_VULN_HOST_ROOT", syscollectHostRoot))
+	vulnEmitSummaryEvent := parseBool(getEnv("NETWATCH_VULN_EMIT_SUMMARY_EVENT", "true"), true)
 
 	logPath := getEnv("NETWATCH_AUTHLOG_PATH", "/var/log/auth.log")
 	includeAccepted := parseBool(getEnv("NETWATCH_AUTHLOG_INCLUDE_ACCEPTED", "false"), false)
@@ -1080,6 +1124,18 @@ func loadConfig() Config {
 		SyscollectCmdTimeout:     syscollectCmdTimeout,
 		SyscollectMaxOutputBytes: syscollectMaxOutputBytes,
 		SyscollectMaxPackages:    syscollectMaxPackages,
+		SyscollectHostRoot:       syscollectHostRoot,
+
+		VulnScanEvery:        vulnEvery,
+		VulnOSVURL:           vulnOSVURL,
+		VulnMinSeverity:      vulnMinSeverity,
+		VulnQueryBatchSize:   vulnBatch,
+		VulnCmdTimeout:       vulnCmdTimeout,
+		VulnHTTPTimeout:      vulnHTTPTimeout,
+		VulnMaxOutputBytes:   vulnMaxOutputBytes,
+		VulnMaxPackages:      vulnMaxPackages,
+		VulnHostRoot:         vulnHostRoot,
+		VulnEmitSummaryEvent: vulnEmitSummaryEvent,
 
 		AuthLogPath:         logPath,
 		AuthIncludeAccepted: includeAccepted,
