@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -22,6 +23,7 @@ type Options struct {
 	CmdTimeout     time.Duration
 	MaxOutputBytes int64
 	MaxPackages    int
+	HostRoot       string
 }
 
 type Result struct {
@@ -42,6 +44,16 @@ func Collect(ctx context.Context, opts Options) (Result, error) {
 
 	now := time.Now().UTC()
 	osInfo := collectOS()
+	if hr := strings.TrimSpace(opts.HostRoot); hr != "" {
+		// Best-effort: prefer host root os-release when mounted.
+		if b, err := os.ReadFile(filepathJoinClean(hr, "/etc/os-release")); err == nil {
+			m := parseOSRelease(string(b))
+			for k, v := range m {
+				osInfo[k] = v
+			}
+			osInfo["host_root"] = hr
+		}
+	}
 
 	pkgs, manager, warns, err := collectPackages(ctx, opts)
 	if err != nil {
@@ -115,6 +127,34 @@ func parseOSRelease(s string) map[string]string {
 
 func collectPackages(ctx context.Context, opts Options) ([]model.PackageEntry, string, []string, error) {
 	var warns []string
+
+	// If a host root is mounted, try to read its package database directly.
+	// This avoids requiring host package-manager binaries inside the container.
+	if hr := strings.TrimSpace(opts.HostRoot); hr != "" {
+		// dpkg
+		if fileExists(filepathJoinClean(hr, "/var/lib/dpkg/status")) {
+			pkgs, w, err := parseDpkgStatus(filepathJoinClean(hr, "/var/lib/dpkg/status"), opts.MaxOutputBytes, opts.MaxPackages)
+			return pkgs, "dpkg", append(warns, w...), err
+		}
+		// apk
+		if fileExists(filepathJoinClean(hr, "/lib/apk/db/installed")) {
+			pkgs, w, err := parseApkInstalled(filepathJoinClean(hr, "/lib/apk/db/installed"), opts.MaxOutputBytes, opts.MaxPackages)
+			return pkgs, "apk", append(warns, w...), err
+		}
+		// pacman
+		if dirExists(filepathJoinClean(hr, "/var/lib/pacman/local")) {
+			pkgs, w, err := parsePacmanLocal(filepathJoinClean(hr, "/var/lib/pacman/local"), opts.MaxPackages)
+			return pkgs, "pacman", append(warns, w...), err
+		}
+		// rpm (requires rpm binary in the container)
+		if dirExists(filepathJoinClean(hr, "/var/lib/rpm")) {
+			if path, _ := exec.LookPath("rpm"); path != "" {
+				pkgs, w, err := runRPMWithDBPath(ctx, opts, filepathJoinClean(hr, "/var/lib/rpm"))
+				return pkgs, "rpm", append(warns, w...), err
+			}
+			warns = append(warns, "rpm_db_found_but_rpm_binary_missing")
+		}
+	}
 
 	// Prefer native manager output for accuracy.
 	if path, _ := exec.LookPath("dpkg-query"); path != "" {
@@ -358,4 +398,32 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func filepathJoinClean(root, p string) string {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return p
+	}
+	// Ensure p is absolute-like within root.
+	if strings.HasPrefix(p, "/") {
+		p = p[1:]
+	}
+	return filepath.Clean(filepath.Join(root, p))
+}
+
+func fileExists(path string) bool {
+	st, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return st.Mode().IsRegular()
+}
+
+func dirExists(path string) bool {
+	st, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return st.IsDir()
 }

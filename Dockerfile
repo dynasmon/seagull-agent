@@ -12,7 +12,9 @@ RUN go build -o /bin/netwatch-agent ./cmd/agent
 
 FROM alpine:3.20
 
-RUN apk add --no-cache libpcap
+# ca-certificates is required for HTTPS scanners (e.g., OSV).
+# rpm is optional but enables host rpm-db parsing when mounted.
+RUN apk add --no-cache libpcap ca-certificates rpm
 
 COPY --from=builder /bin/netwatch-agent /usr/local/bin/netwatch-agent
 

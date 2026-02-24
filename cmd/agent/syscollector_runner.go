@@ -75,6 +75,7 @@ func (a *Agent) runSyscollectorOnce(ctx context.Context, cfg SyscollectorConfig)
 		CmdTimeout:     cfg.CmdTimeout,
 		MaxOutputBytes: cfg.MaxOutputBytes,
 		MaxPackages:    cfg.MaxPackages,
+		HostRoot:       cfg.HostRoot,
 	})
 
 	a.sysMu.Lock()
