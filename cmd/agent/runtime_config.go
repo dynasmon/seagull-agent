@@ -32,6 +32,12 @@ type VulnScannerConfig struct {
 	HTTPTimeout    time.Duration
 	MaxOutputBytes int64
 	HostRoot       string
+
+	SBOMEnabled       bool
+	SBOMPaths         []string
+	SBOMTimeout       time.Duration
+	SBOMMaxComponents int
+	SBOMSyftPath      string
 }
 
 type RuntimeConfig struct {
@@ -211,7 +217,41 @@ func (r *RuntimeConfig) VulnScanner() VulnScannerConfig {
 		}
 	}
 
+	if b, ok := v["sbom_enabled"].(bool); ok {
+		cfg.SBOMEnabled = b
+	}
+	if s, ok := v["sbom_paths"].(string); ok {
+		cfg.SBOMPaths = splitCSV(s)
+	}
+	if s, ok := v["sbom_timeout"].(string); ok {
+		if d, err := time.ParseDuration(s); err == nil && d > 0 {
+			cfg.SBOMTimeout = d
+		}
+	}
+	if n, ok := toInt64(v["sbom_max_components"]); ok && n > 0 {
+		cfg.SBOMMaxComponents = int(n)
+	}
+	if s, ok := v["sbom_syft_path"].(string); ok {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			cfg.SBOMSyftPath = s
+		}
+	}
+
 	return cfg
+}
+
+func splitCSV(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 func (r *RuntimeConfig) loadFromFile() error {
