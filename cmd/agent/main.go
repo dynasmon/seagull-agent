@@ -140,6 +140,8 @@ type Config struct {
 	DDoSMaxUniqueSrc            int
 	DDoSTopSrc                  int
 	DDoSMaxBatch                int
+	DDoSBackpressureHighWM      int
+	DDoSBackpressureSampleEvery int
 
 	LogLevel          LogLevel
 	LogSummaryEvery   time.Duration
@@ -508,7 +510,9 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc) (*Ag
 			MaxUniqueSrc:    cfg.DDoSMaxUniqueSrc,
 			TopSrc:          cfg.DDoSTopSrc,
 
-			MaxBatchSize: cfg.DDoSMaxBatch,
+			MaxBatchSize:              cfg.DDoSMaxBatch,
+			BackpressureHighWatermark: cfg.DDoSBackpressureHighWM,
+			BackpressureSampleEvery:   cfg.DDoSBackpressureSampleEvery,
 
 			DropLikelyOutbound: cfg.ProcDropLikelyOutbound,
 			EphemeralPortMin:   cfg.EphemeralPortMin,
@@ -1111,6 +1115,8 @@ func loadConfig() Config {
 	ddosMaxUnique := parseInt(getEnv("NETWATCH_DDOS_MAX_UNIQUE_SRC", "500000"), 500000)
 	ddosTopSrc := parseInt(getEnv("NETWATCH_DDOS_TOP_SRC", "20"), 20)
 	ddosMaxBatch := parseInt(getEnv("NETWATCH_DDOS_MAX_BATCH", "200"), 200)
+	ddosBpHighWM := parseInt(getEnv("NETWATCH_DDOS_BACKPRESSURE_HIGH_WATERMARK", "160"), 160)
+	ddosBpSampleEvery := parseInt(getEnv("NETWATCH_DDOS_BACKPRESSURE_SAMPLE_EVERY", "4"), 4)
 
 	levelStr := getEnv("NETWATCH_LOG_LEVEL", "info")
 	logLevel := parseLogLevel(levelStr)
@@ -1221,6 +1227,8 @@ func loadConfig() Config {
 		DDoSMaxUniqueSrc:            ddosMaxUnique,
 		DDoSTopSrc:                  ddosTopSrc,
 		DDoSMaxBatch:                ddosMaxBatch,
+		DDoSBackpressureHighWM:      ddosBpHighWM,
+		DDoSBackpressureSampleEvery: ddosBpSampleEvery,
 
 		LogLevel:          logLevel,
 		LogSummaryEvery:   logSummaryEvery,

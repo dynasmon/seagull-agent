@@ -234,7 +234,8 @@ func isRetryable(err error, status int) bool {
 	if status == 0 {
 		return isRetryableNetErr(err)
 	}
-	if status == 429 || status >= 500 {
+	// Respect server backpressure: retrying 429 immediately amplifies overload.
+	if status >= 500 {
 		return true
 	}
 	return false

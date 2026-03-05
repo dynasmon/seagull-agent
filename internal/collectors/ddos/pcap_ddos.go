@@ -6,6 +6,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/gopacket"
@@ -58,6 +59,10 @@ type PcapDDoSOptions struct {
 	TopSrc          int
 
 	MaxBatchSize int
+	// When the output buffer reaches this size, packet processing is sampled down.
+	BackpressureHighWatermark int
+	// Process 1 out of N packets while backpressured.
+	BackpressureSampleEvery int
 
 	DropLikelyOutbound bool
 	EphemeralPortMin   int
@@ -78,9 +83,14 @@ type PcapDDoSCapturer struct {
 
 	mu  sync.Mutex
 	buf []model.NetEvent
+	// bufLen mirrors len(buf) and is read on the hot path without lock contention.
+	bufLen int64
 
 	windowStart time.Time
 	aggs        map[aggKey]*agg
+
+	backpressureSeq     uint64
+	backpressureDropped uint64
 }
 
 type aggKey struct {
@@ -236,6 +246,15 @@ func applyDDoSDefaults(o *PcapDDoSOptions) {
 	if o.MaxBatchSize <= 0 {
 		o.MaxBatchSize = 200
 	}
+	if o.BackpressureHighWatermark <= 0 {
+		o.BackpressureHighWatermark = int(float64(o.MaxBatchSize) * 0.80)
+	}
+	if o.BackpressureHighWatermark > o.MaxBatchSize {
+		o.BackpressureHighWatermark = o.MaxBatchSize
+	}
+	if o.BackpressureSampleEvery <= 0 {
+		o.BackpressureSampleEvery = 4
+	}
 	if o.EphemeralPortMin <= 0 {
 		o.EphemeralPortMin = 49152
 	}
@@ -265,6 +284,9 @@ func (c *PcapDDoSCapturer) Start(ctx context.Context) error {
 	}
 
 	src := gopacket.NewPacketSource(handle, handle.LinkType())
+	src.Lazy = true
+	src.NoCopy = true
+	packetCh := src.Packets()
 	ticker := time.NewTicker(c.opts.EvalEvery)
 	defer ticker.Stop()
 
@@ -274,9 +296,11 @@ func (c *PcapDDoSCapturer) Start(ctx context.Context) error {
 			return nil
 		case <-ticker.C:
 			c.rotateIfNeeded(time.Now().UTC())
-		default:
-			pkt, err := src.NextPacket()
-			if err != nil {
+		case pkt, ok := <-packetCh:
+			if !ok {
+				return nil
+			}
+			if pkt == nil {
 				continue
 			}
 			c.onPacket(pkt)
@@ -294,6 +318,7 @@ func (c *PcapDDoSCapturer) Drain() []model.NetEvent {
 	out := make([]model.NetEvent, len(c.buf))
 	copy(out, c.buf)
 	c.buf = c.buf[:0]
+	atomic.StoreInt64(&c.bufLen, 0)
 	return out
 }
 
@@ -301,12 +326,35 @@ func (c *PcapDDoSCapturer) push(ev model.NetEvent) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if len(c.buf) >= c.opts.MaxBatchSize {
+		atomic.AddUint64(&c.backpressureDropped, 1)
 		return
 	}
 	c.buf = append(c.buf, ev)
+	atomic.StoreInt64(&c.bufLen, int64(len(c.buf)))
+}
+
+func (c *PcapDDoSCapturer) shouldProcessPacket() bool {
+	if c.opts.BackpressureHighWatermark <= 0 {
+		return true
+	}
+	if int(atomic.LoadInt64(&c.bufLen)) < c.opts.BackpressureHighWatermark {
+		return true
+	}
+
+	n := atomic.AddUint64(&c.backpressureSeq, 1)
+	every := c.opts.BackpressureSampleEvery
+	if every <= 1 || n%uint64(every) == 0 {
+		return true
+	}
+	atomic.AddUint64(&c.backpressureDropped, 1)
+	return false
 }
 
 func (c *PcapDDoSCapturer) onPacket(pkt gopacket.Packet) {
+	if !c.shouldProcessPacket() {
+		return
+	}
+
 	var srcIP, dstIP net.IP
 
 	if ip4 := pkt.Layer(layers.LayerTypeIPv4); ip4 != nil {
@@ -460,6 +508,7 @@ func (c *PcapDDoSCapturer) rotateIfNeeded(now time.Time) {
 	if now.Sub(c.windowStart) < c.opts.Window {
 		return
 	}
+	backpressureDropped := int(atomic.SwapUint64(&c.backpressureDropped, 0))
 
 	windowSec := c.opts.Window.Seconds()
 	if windowSec <= 0 {
@@ -616,6 +665,7 @@ func (c *PcapDDoSCapturer) rotateIfNeeded(now time.Time) {
 					"baseline_ready":      baselineReady,
 					"baseline_factor":     round2(c.opts.BaselineFactor),
 					"top_src":             topSrc,
+					"collector_bp_dropped_packets": backpressureDropped,
 				},
 			}
 			c.push(ev)
