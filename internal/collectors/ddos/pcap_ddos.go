@@ -333,25 +333,29 @@ func (c *PcapDDoSCapturer) push(ev model.NetEvent) {
 	atomic.StoreInt64(&c.bufLen, int64(len(c.buf)))
 }
 
-func (c *PcapDDoSCapturer) shouldProcessPacket() bool {
+func (c *PcapDDoSCapturer) sampleWeight() int {
 	if c.opts.BackpressureHighWatermark <= 0 {
-		return true
+		return 1
 	}
 	if int(atomic.LoadInt64(&c.bufLen)) < c.opts.BackpressureHighWatermark {
-		return true
+		return 1
 	}
 
 	n := atomic.AddUint64(&c.backpressureSeq, 1)
 	every := c.opts.BackpressureSampleEvery
 	if every <= 1 || n%uint64(every) == 0 {
-		return true
+		if every <= 1 {
+			return 1
+		}
+		return every
 	}
 	atomic.AddUint64(&c.backpressureDropped, 1)
-	return false
+	return 0
 }
 
 func (c *PcapDDoSCapturer) onPacket(pkt gopacket.Packet) {
-	if !c.shouldProcessPacket() {
+	weight := c.sampleWeight()
+	if weight <= 0 {
 		return
 	}
 
@@ -415,25 +419,25 @@ func (c *PcapDDoSCapturer) onPacket(pkt gopacket.Packet) {
 
 		k := aggKey{dst: dstS, proto: "tcp", dport: dport}
 		a := c.getAgg(k, now)
-		a.pkts++
-		a.bytes += capLen
-		a.tcpPkts++
+		a.pkts += weight
+		a.bytes += capLen * weight
+		a.tcpPkts += weight
 		if tcp.SYN && !tcp.ACK {
-			a.tcpSynPkts++
+			a.tcpSynPkts += weight
 		}
 		if len(tcp.Payload) > 0 {
-			a.tcpPayloadPkts++
+			a.tcpPayloadPkts += weight
 			if c.opts.EnableL7 {
 				if isHTTPPort(dport) && isHTTPPayload(tcp.Payload) {
-					a.httpReqPkts++
+					a.httpReqPkts += weight
 				}
 				if isTLSPort(dport) && isTLSClientHello(tcp.Payload) {
-					a.tlsHelloPkts++
+					a.tlsHelloPkts += weight
 				}
 			}
 		}
 		a.srcCard.Add(srcS)
-		a.topSrc.Add(srcS, 1)
+		a.topSrc.Add(srcS, weight)
 		return
 	}
 
@@ -452,35 +456,35 @@ func (c *PcapDDoSCapturer) onPacket(pkt gopacket.Packet) {
 
 		k := aggKey{dst: dstS, proto: "udp", dport: dport}
 		a := c.getAgg(k, now)
-		a.pkts++
-		a.bytes += capLen
-		a.udpPkts++
+		a.pkts += weight
+		a.bytes += capLen * weight
+		a.udpPkts += weight
 		if isAmplificationSrcPort(sport) {
-			a.udpAmpPkts++
+			a.udpAmpPkts += weight
 		}
 		a.srcCard.Add(srcS)
-		a.topSrc.Add(srcS, 1)
+		a.topSrc.Add(srcS, weight)
 		return
 	}
 
 	if pkt.Layer(layers.LayerTypeICMPv4) != nil {
 		k := aggKey{dst: dstS, proto: "icmp", dport: 0}
 		a := c.getAgg(k, now)
-		a.pkts++
-		a.bytes += capLen
-		a.icmpPkts++
+		a.pkts += weight
+		a.bytes += capLen * weight
+		a.icmpPkts += weight
 		a.srcCard.Add(srcS)
-		a.topSrc.Add(srcS, 1)
+		a.topSrc.Add(srcS, weight)
 		return
 	}
 	if pkt.Layer(layers.LayerTypeICMPv6) != nil {
 		k := aggKey{dst: dstS, proto: "icmp6", dport: 0}
 		a := c.getAgg(k, now)
-		a.pkts++
-		a.bytes += capLen
-		a.icmpPkts++
+		a.pkts += weight
+		a.bytes += capLen * weight
+		a.icmpPkts += weight
 		a.srcCard.Add(srcS)
-		a.topSrc.Add(srcS, 1)
+		a.topSrc.Add(srcS, weight)
 		return
 	}
 }
@@ -509,6 +513,10 @@ func (c *PcapDDoSCapturer) rotateIfNeeded(now time.Time) {
 		return
 	}
 	backpressureDropped := int(atomic.SwapUint64(&c.backpressureDropped, 0))
+	sustainNeeded := c.opts.SustainWindows
+	if backpressureDropped > 0 {
+		sustainNeeded = max(1, sustainNeeded-1)
+	}
 
 	windowSec := c.opts.Window.Seconds()
 	if windowSec <= 0 {
@@ -618,7 +626,7 @@ func (c *PcapDDoSCapturer) rotateIfNeeded(now time.Time) {
 		conf := computeConfidence(trigger, baselineReady, relOver, distributed, vector, pps, bps, synRatio, httpRPS, tlsRPS, l7Ratio, ampRatio, srcEnt, pm)
 		sev := severityFrom(conf, pps, bps, distributed)
 
-		shouldEmit := trigger && a.sustain >= c.opts.SustainWindows && conf >= c.opts.MinConfidence
+		shouldEmit := trigger && a.sustain >= sustainNeeded && conf >= c.opts.MinConfidence
 		if shouldEmit {
 			if !a.lastAlertAt.IsZero() && now.Sub(a.lastAlertAt) < c.opts.Cooldown {
 				shouldEmit = false
@@ -665,6 +673,10 @@ func (c *PcapDDoSCapturer) rotateIfNeeded(now time.Time) {
 					"baseline_ready":      baselineReady,
 					"baseline_factor":     round2(c.opts.BaselineFactor),
 					"top_src":             topSrc,
+					"collector_bp_compensated":     backpressureDropped > 0,
+					"collector_bp_sample_every":    c.opts.BackpressureSampleEvery,
+					"collector_sustain_windows":    c.opts.SustainWindows,
+					"collector_sustain_effective":  sustainNeeded,
 					"collector_bp_dropped_packets": backpressureDropped,
 				},
 			}
