@@ -27,9 +27,6 @@ func (a *Agent) startVulnScanner(ctx context.Context) {
 	if a == nil || a.runtime == nil || a.sender == nil {
 		return
 	}
-	if !contains(a.cfg.Sources, "vuln") {
-		return
-	}
 
 	go func() {
 		lastTriggerToken := ""
@@ -186,6 +183,12 @@ func (a *Agent) runVulnOnce(ctx context.Context, cfg VulnScannerConfig, forceSca
 
 	// Build ingest payload.
 	scanUUID := newUUIDv4()
+	if forceScan {
+		tok := strings.TrimSpace(cfg.ScanNowToken)
+		if len(tok) >= 8 && len(tok) <= 36 {
+			scanUUID = tok
+		}
+	}
 	now := time.Now().UTC()
 	finished := now
 	started := start
