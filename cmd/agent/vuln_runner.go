@@ -18,7 +18,6 @@ type VulnScannerStatus struct {
 	LastSentAt       time.Time
 	LastError        string
 	LastPackagesHash string
-	LastSBOMHash     string
 	LastFindingCount int
 	LastStoredCount  int
 	LastScanUUID     string
@@ -33,15 +32,25 @@ func (a *Agent) startVulnScanner(ctx context.Context) {
 	}
 
 	go func() {
+		lastTriggerToken := ""
 		for {
 			cfg := a.runtime.VulnScanner()
 			a.vulnMu.RLock()
 			lastRun := a.vulnStatus.LastRunAt
 			a.vulnMu.RUnlock()
 
+			forceScanNow := false
+			triggerToken := strings.TrimSpace(cfg.ScanNowToken)
+			if triggerToken != "" && triggerToken != lastTriggerToken {
+				lastTriggerToken = triggerToken
+				forceScanNow = true
+			}
+
 			nextIn := 30 * time.Second
 			if cfg.Enabled {
-				if lastRun.IsZero() {
+				if forceScanNow {
+					nextIn = 0
+				} else if lastRun.IsZero() {
 					nextIn = 0
 				} else {
 					d := cfg.Every - time.Since(lastRun)
@@ -78,13 +87,13 @@ func (a *Agent) startVulnScanner(ctx context.Context) {
 				scanTimeout = 60 * time.Second
 			}
 			ctxRun, cancel := context.WithTimeout(ctx, scanTimeout)
-			a.runVulnOnce(ctxRun, cfg)
+			a.runVulnOnce(ctxRun, cfg, forceScanNow)
 			cancel()
 		}
 	}()
 }
 
-func (a *Agent) runVulnOnce(ctx context.Context, cfg VulnScannerConfig) {
+func (a *Agent) runVulnOnce(ctx context.Context, cfg VulnScannerConfig, forceScan bool) {
 	start := time.Now().UTC()
 	httpTimeout := cfg.HTTPTimeout
 	if httpTimeout <= 0 {
@@ -113,12 +122,11 @@ func (a *Agent) runVulnOnce(ctx context.Context, cfg VulnScannerConfig) {
 	// Skip package OSV query when unchanged since the last successful send.
 	a.vulnMu.RLock()
 	lastPkgHash := a.vulnStatus.LastPackagesHash
-	lastSBOMHash := a.vulnStatus.LastSBOMHash
 	lastSent := a.vulnStatus.LastSentAt
 	a.vulnMu.RUnlock()
 
 	doPkg := true
-	if res.Snapshot.PackagesHash != "" && res.Snapshot.PackagesHash == lastPkgHash && !lastSent.IsZero() {
+	if !forceScan && res.Snapshot.PackagesHash != "" && res.Snapshot.PackagesHash == lastPkgHash && !lastSent.IsZero() {
 		doPkg = false
 	}
 
@@ -133,11 +141,23 @@ func (a *Agent) runVulnOnce(ctx context.Context, cfg VulnScannerConfig) {
 
 	findings := make([]vuln.Finding, 0, 512)
 	var stats vuln.OSVStats
+	var exposure *vuln.HostExposure
+	if cfg.ExposureEnabled {
+		if prof, exErr := vuln.CollectHostExposure(vuln.ExposureOptions{
+			HostRoot: cfg.HostRoot,
+			MaxPorts: 512,
+		}); exErr == nil {
+			exposure = &prof
+		}
+	}
+
 	if doPkg {
 		pkgFindings, pkgStats, qErr := vuln.QueryOSV(ctx, res.Snapshot.Packages, vuln.OSVOptions{
 			BaseURL:        cfg.OSVURL,
 			Ecosystem:      ecosystem,
 			MinSeverity:    cfg.MinSeverity,
+			AnalysisProfile: cfg.AnalysisProfile,
+			Exposure:       exposure,
 			BatchSize:      cfg.QueryBatchSize,
 			HTTPTimeout:    httpTimeout,
 			AssetKey:       assetKey,
@@ -156,68 +176,8 @@ func (a *Agent) runVulnOnce(ctx context.Context, cfg VulnScannerConfig) {
 		stats = pkgStats
 	}
 
-	// Optional SBOM scan for application dependencies (pip/npm/maven/go).
-	sbomHash := ""
-	sbomTargets := cfg.SBOMPaths
-	sbomTargetsScanned := 0
-	sbomUniqueCandidates := 0
-	if cfg.SBOMEnabled {
-		cands, sbStats, sbErr := vuln.BuildSBOMCandidates(ctx, vuln.SBOMOptions{
-			SyftPath:      cfg.SBOMSyftPath,
-			Targets:       sbomTargets,
-			Timeout:       cfg.SBOMTimeout,
-			MaxComponents: cfg.SBOMMaxComponents,
-			Tags:          []string{"sbom"},
-		})
-		if sbErr == nil {
-			sbomHash = sbStats.SBOMHash
-			sbomTargetsScanned = sbStats.TargetsScanned
-			sbomUniqueCandidates = sbStats.UniqueCandidates
-			// Skip SBOM OSV query when unchanged since last successful send.
-			doSBOM := true
-			if sbomHash != "" && sbomHash == lastSBOMHash && !lastSent.IsZero() {
-				doSBOM = false
-			}
-			if doSBOM && len(cands) > 0 {
-				items := make([]vuln.PURLQueryItem, 0, len(cands))
-				for _, c := range cands {
-					items = append(items, vuln.PURLQueryItem{
-						Purl:     c.Purl,
-						Version:  c.Version,
-						Eco:      c.Eco,
-						PkgName:  c.PkgName,
-						Evidence: c.Evidence,
-						Tags:     []string{"sbom", strings.ToLower(strings.TrimSpace(c.Eco))},
-					})
-				}
-				sbomFindings, sbOSVStats, qErr := vuln.QueryOSVByPURLs(ctx, items, vuln.OSVOptions{
-					BaseURL:        cfg.OSVURL,
-					MinSeverity:    cfg.MinSeverity,
-					BatchSize:      cfg.QueryBatchSize,
-					HTTPTimeout:    httpTimeout,
-					AssetKey:       assetKey,
-					AssetAgentID:   assetAgentID,
-					TargetLabel:    targetLabel,
-					OS:             res.Snapshot.OS,
-					PackageManager: "sbom",
-				})
-				if qErr != nil {
-					a.vulnMu.Lock()
-					a.vulnStatus.LastError = qErr.Error()
-					a.vulnMu.Unlock()
-					return
-				}
-				findings = append(findings, sbomFindings...)
-				// Merge stats for visibility.
-				stats.QueriedPackages += sbOSVStats.QueriedPackages
-				stats.ReceivedVulns += sbOSVStats.ReceivedVulns
-				stats.EmittedFindings += sbOSVStats.EmittedFindings
-			}
-		}
-	}
-
-	// If both sources were skipped (unchanged), avoid sending anything.
-	if !doPkg && (!cfg.SBOMEnabled || (sbomHash != "" && sbomHash == lastSBOMHash && !lastSent.IsZero())) {
+	// If unchanged since the last successful send, avoid sending anything.
+	if !doPkg {
 		a.vulnMu.Lock()
 		a.vulnStatus.LastError = ""
 		a.vulnMu.Unlock()
@@ -233,38 +193,47 @@ func (a *Agent) runVulnOnce(ctx context.Context, cfg VulnScannerConfig) {
 		Scan: &vuln.ScanMeta{
 			ScanUUID:    scanUUID,
 			Target:      targetLabel,
-			Tool:        "osv",
+			Tool:        "osv-wazuh-like",
 			ToolVersion: "1",
 			Status:      "finished",
 			StartedAt:   &started,
 			FinishedAt:  &finished,
 			Scope: map[string]interface{}{
-				"type":            "host_packages+sbom",
+				"type":            "host_packages_inventory",
 				"host_root":       strings.TrimSpace(cfg.HostRoot),
 				"package_manager": res.Snapshot.Manager,
 				"ecosystem":       ecosystem,
 				"packages_hash":   res.Snapshot.PackagesHash,
-				"sbom_enabled":    cfg.SBOMEnabled,
-				"sbom_paths":      sbomTargets,
-				"sbom_hash":       sbomHash,
+				"analysis_profile": cfg.AnalysisProfile,
+				"manual_trigger":  forceScan,
+				"scan_now_token":  strings.TrimSpace(cfg.ScanNowToken),
 			},
 			Config: map[string]interface{}{
-				"min_severity":        cfg.MinSeverity,
-				"query_batch_size":    cfg.QueryBatchSize,
-				"osv_url":             cfg.OSVURL,
-				"sbom_syft_path":      cfg.SBOMSyftPath,
-				"sbom_timeout":        cfg.SBOMTimeout.String(),
-				"sbom_max_components": cfg.SBOMMaxComponents,
+				"min_severity":      cfg.MinSeverity,
+				"query_batch_size":  cfg.QueryBatchSize,
+				"osv_url":           cfg.OSVURL,
+				"analysis_profile":  cfg.AnalysisProfile,
+				"exposure_enabled":  cfg.ExposureEnabled,
+				"manual_trigger":    forceScan,
 			},
 			Stats: map[string]interface{}{
-				"queried_packages":       stats.QueriedPackages,
-				"received_vulns":         stats.ReceivedVulns,
-				"emitted_findings":       stats.EmittedFindings,
-				"sbom_targets_scanned":   sbomTargetsScanned,
-				"sbom_unique_candidates": sbomUniqueCandidates,
+				"queried_packages":  stats.QueriedPackages,
+				"received_vulns":    stats.ReceivedVulns,
+				"emitted_findings":  stats.EmittedFindings,
 			},
 		},
 		Findings: findings,
+	}
+	if exposure != nil && batch.Scan != nil {
+		if batch.Scan.Scope == nil {
+			batch.Scan.Scope = map[string]interface{}{}
+		}
+		if batch.Scan.Stats == nil {
+			batch.Scan.Stats = map[string]interface{}{}
+		}
+		batch.Scan.Scope["exposure"] = exposure.ToEvidence()
+		batch.Scan.Stats["exposure_surface_score"] = exposure.SurfaceScore
+		batch.Scan.Stats["exposed_ports"] = len(exposure.ExposedPorts)
 	}
 
 	payload, mErr := json.Marshal(batch)
@@ -295,7 +264,6 @@ func (a *Agent) runVulnOnce(ctx context.Context, cfg VulnScannerConfig) {
 	a.vulnStatus.LastError = ""
 	a.vulnStatus.LastSentAt = time.Now().UTC()
 	a.vulnStatus.LastPackagesHash = res.Snapshot.PackagesHash
-	a.vulnStatus.LastSBOMHash = sbomHash
 	a.vulnStatus.LastFindingCount = len(findings)
 	a.vulnStatus.LastStoredCount = stored
 	a.vulnStatus.LastScanUUID = scanUUID
@@ -322,8 +290,10 @@ func (a *Agent) runVulnOnce(ctx context.Context, cfg VulnScannerConfig) {
 				"queried_packages": stats.QueriedPackages,
 				"emitted_findings": stats.EmittedFindings,
 				"stored_findings":  stored,
-				"sbom_enabled":     cfg.SBOMEnabled,
-				"sbom_hash":        sbomHash,
+				"analysis_profile": cfg.AnalysisProfile,
+				"exposure_enabled": cfg.ExposureEnabled,
+				"exposure_score":   mapExposureScore(exposure),
+				"manual_trigger":   forceScan,
 				"duration_ms":      time.Since(start).Milliseconds(),
 			},
 		}
@@ -331,6 +301,13 @@ func (a *Agent) runVulnOnce(ctx context.Context, cfg VulnScannerConfig) {
 		_, _ = a.sender.SendEvents(ctxEv, []model.NetEvent{ev})
 		cancelEv()
 	}
+}
+
+func mapExposureScore(exposure *vuln.HostExposure) int {
+	if exposure == nil {
+		return 0
+	}
+	return exposure.SurfaceScore
 }
 
 func hostnameOrFallback() string {

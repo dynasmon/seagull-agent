@@ -21,6 +21,8 @@ type OSVOptions struct {
 	BaseURL        string
 	Ecosystem      string
 	MinSeverity    string
+	AnalysisProfile string
+	Exposure       *HostExposure
 	BatchSize      int
 	HTTPTimeout    time.Duration
 	AssetKey       string
@@ -226,6 +228,9 @@ func QueryOSV(ctx context.Context, pkgs []model.PackageEntry, opts OSVOptions) (
 					"manager":   opts.PackageManager,
 					"ecosystem": strings.TrimSpace(opts.Ecosystem),
 				}
+				if opts.Exposure != nil {
+					asset["exposure"] = opts.Exposure.ToEvidence()
+				}
 
 				fp := stableFingerprint(opts.AssetKey, "osv", v.ID, strings.TrimSpace(opts.Ecosystem), pkg.Name)
 
@@ -256,6 +261,7 @@ func QueryOSV(ctx context.Context, pkgs []model.PackageEntry, opts OSVOptions) (
 
 					LastSeenAt: &now,
 				}
+				applyWazuhLikeEnrichment(&f, pkg, opts)
 
 				findings = append(findings, f)
 				stats.EmittedFindings++
@@ -567,6 +573,88 @@ func severityFromScore(score float64) string {
 		return "low"
 	}
 	return "unknown"
+}
+
+func applyWazuhLikeEnrichment(f *Finding, pkg model.PackageEntry, opts OSVOptions) {
+	if f == nil {
+		return
+	}
+	profile := strings.TrimSpace(opts.AnalysisProfile)
+	if profile == "" {
+		profile = "wazuh_like_v1"
+	}
+	if f.Evidence == nil {
+		f.Evidence = map[string]interface{}{}
+	}
+
+	exp := opts.Exposure
+	networkVector := strings.Contains(strings.ToUpper(strings.TrimSpace(f.CVSS)), "/AV:N/")
+	packageFacing := false
+	if exp != nil {
+		packageFacing = exp.MatchesPackage(pkg.Name)
+	}
+
+	if exp != nil {
+		if packageFacing && exp.HasExposedPorts && severityRank(f.Severity) >= 2 {
+			f.Severity = bumpSeverity(f.Severity)
+		}
+		conf := f.Confidence
+		if strings.TrimSpace(f.CVE) != "" {
+			conf += 3
+		}
+		if networkVector {
+			conf += 4
+		}
+		if exp.HasExposedPorts {
+			conf += 5
+		}
+		if packageFacing {
+			conf += 8
+		}
+		if exp.SurfaceScore >= 60 {
+			conf += 5
+		}
+		if conf > 99 {
+			conf = 99
+		}
+		f.Confidence = conf
+	}
+
+	tags := []string{"wazuh_like", profile, "host_inventory"}
+	if networkVector {
+		tags = append(tags, "cvss_av_n")
+	}
+	if packageFacing {
+		tags = append(tags, "service_package")
+	}
+	if exp != nil && exp.HasExposedPorts {
+		tags = append(tags, "internet_surface")
+	}
+	f.Tags = uniqTags(append(f.Tags, tags...))
+
+	f.Evidence["analysis"] = map[string]interface{}{
+		"profile":               profile,
+		"package_network_facing": packageFacing,
+		"network_attack_vector": networkVector,
+		"confidence":            f.Confidence,
+	}
+	if exp != nil {
+		f.Evidence["analysis"].(map[string]interface{})["exposure_score"] = exp.SurfaceScore
+		f.Evidence["analysis"].(map[string]interface{})["exposed_ports"] = exp.ExposedPorts
+	}
+}
+
+func bumpSeverity(sev string) string {
+	switch strings.ToLower(strings.TrimSpace(sev)) {
+	case "low":
+		return "medium"
+	case "medium":
+		return "high"
+	case "high":
+		return "critical"
+	default:
+		return sev
+	}
 }
 
 func buildRemediation(pkg model.PackageEntry, v osvVuln) string {

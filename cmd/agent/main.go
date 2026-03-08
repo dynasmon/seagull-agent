@@ -62,6 +62,8 @@ type Config struct {
 	VulnScanEvery        time.Duration
 	VulnOSVURL           string
 	VulnMinSeverity      string
+	VulnAnalysisProfile  string
+	VulnExposureEnabled  bool
 	VulnQueryBatchSize   int
 	VulnCmdTimeout       time.Duration
 	VulnHTTPTimeout      time.Duration
@@ -69,12 +71,6 @@ type Config struct {
 	VulnMaxPackages      int
 	VulnHostRoot         string
 	VulnEmitSummaryEvent bool
-
-	VulnSBOMEnabled       bool
-	VulnSBOMPaths         string
-	VulnSBOMTimeout       time.Duration
-	VulnSBOMMaxComponents int
-	VulnSBOMSyftPath      string
 
 	AuthLogPath         string
 	AuthIncludeAccepted bool
@@ -312,21 +308,18 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc) (*Ag
 				HostRoot:       cfg.SyscollectHostRoot,
 			},
 			VulnScannerConfig{
-				Enabled:           true,
-				Every:             cfg.VulnScanEvery,
-				OSVURL:            cfg.VulnOSVURL,
-				MinSeverity:       cfg.VulnMinSeverity,
-				QueryBatchSize:    cfg.VulnQueryBatchSize,
-				CmdTimeout:        cfg.VulnCmdTimeout,
-				HTTPTimeout:       cfg.VulnHTTPTimeout,
-				MaxOutputBytes:    cfg.VulnMaxOutputBytes,
-				MaxPackages:       cfg.VulnMaxPackages,
-				HostRoot:          cfg.VulnHostRoot,
-				SBOMEnabled:       cfg.VulnSBOMEnabled,
-				SBOMPaths:         splitCSV(cfg.VulnSBOMPaths),
-				SBOMTimeout:       cfg.VulnSBOMTimeout,
-				SBOMMaxComponents: cfg.VulnSBOMMaxComponents,
-				SBOMSyftPath:      cfg.VulnSBOMSyftPath,
+				Enabled:         true,
+				Every:           cfg.VulnScanEvery,
+				OSVURL:          cfg.VulnOSVURL,
+				MinSeverity:     cfg.VulnMinSeverity,
+				AnalysisProfile: cfg.VulnAnalysisProfile,
+				ExposureEnabled: cfg.VulnExposureEnabled,
+				QueryBatchSize:  cfg.VulnQueryBatchSize,
+				CmdTimeout:      cfg.VulnCmdTimeout,
+				HTTPTimeout:     cfg.VulnHTTPTimeout,
+				MaxOutputBytes:  cfg.VulnMaxOutputBytes,
+				MaxPackages:     cfg.VulnMaxPackages,
+				HostRoot:        cfg.VulnHostRoot,
 			},
 		),
 		state: SummaryState{
@@ -1041,6 +1034,8 @@ func loadConfig() Config {
 	vulnEvery := parseDuration(getEnv("NETWATCH_VULN_SCAN_EVERY", "12h"), 12*time.Hour)
 	vulnOSVURL := strings.TrimSpace(getEnv("NETWATCH_VULN_OSV_URL", "https://api.osv.dev"))
 	vulnMinSeverity := strings.ToLower(strings.TrimSpace(getEnv("NETWATCH_VULN_MIN_SEVERITY", "medium")))
+	vulnAnalysisProfile := strings.TrimSpace(getEnv("NETWATCH_VULN_ANALYSIS_PROFILE", "wazuh_like_v1"))
+	vulnExposureEnabled := parseBool(getEnv("NETWATCH_VULN_EXPOSURE_ENABLED", "true"), true)
 	vulnBatch := parseInt(getEnv("NETWATCH_VULN_QUERY_BATCH_SIZE", "200"), 200)
 	vulnCmdTimeout := parseDuration(getEnv("NETWATCH_VULN_CMD_TIMEOUT", "15s"), 15*time.Second)
 	vulnHTTPTimeout := parseDuration(getEnv("NETWATCH_VULN_HTTP_TIMEOUT", "60s"), 60*time.Second)
@@ -1048,11 +1043,6 @@ func loadConfig() Config {
 	vulnMaxPackages := parseInt(getEnv("NETWATCH_VULN_MAX_PACKAGES", strconv.Itoa(syscollectMaxPackages)), syscollectMaxPackages)
 	vulnHostRoot := strings.TrimSpace(getEnv("NETWATCH_VULN_HOST_ROOT", syscollectHostRoot))
 	vulnEmitSummaryEvent := parseBool(getEnv("NETWATCH_VULN_EMIT_SUMMARY_EVENT", "true"), true)
-	vulnSBOMEnabled := parseBool(getEnv("NETWATCH_VULN_SBOM_ENABLED", "true"), true)
-	vulnSBOMPaths := strings.TrimSpace(getEnv("NETWATCH_VULN_SBOM_PATHS", "/host/srv,/host/var/www,/host/opt"))
-	vulnSBOMTimeout := parseDuration(getEnv("NETWATCH_VULN_SBOM_TIMEOUT", "8m"), 8*time.Minute)
-	vulnSBOMMaxComponents := parseInt(getEnv("NETWATCH_VULN_SBOM_MAX_COMPONENTS", "20000"), 20000)
-	vulnSBOMSyftPath := strings.TrimSpace(getEnv("NETWATCH_VULN_SBOM_SYFT_PATH", "/usr/local/bin/syft"))
 
 	logPath := getEnv("NETWATCH_AUTHLOG_PATH", "/var/log/auth.log")
 	includeAccepted := parseBool(getEnv("NETWATCH_AUTHLOG_INCLUDE_ACCEPTED", "false"), false)
@@ -1155,6 +1145,8 @@ func loadConfig() Config {
 		VulnScanEvery:         vulnEvery,
 		VulnOSVURL:            vulnOSVURL,
 		VulnMinSeverity:       vulnMinSeverity,
+		VulnAnalysisProfile:   vulnAnalysisProfile,
+		VulnExposureEnabled:   vulnExposureEnabled,
 		VulnQueryBatchSize:    vulnBatch,
 		VulnCmdTimeout:        vulnCmdTimeout,
 		VulnHTTPTimeout:       vulnHTTPTimeout,
@@ -1162,11 +1154,6 @@ func loadConfig() Config {
 		VulnMaxPackages:       vulnMaxPackages,
 		VulnHostRoot:          vulnHostRoot,
 		VulnEmitSummaryEvent:  vulnEmitSummaryEvent,
-		VulnSBOMEnabled:       vulnSBOMEnabled,
-		VulnSBOMPaths:         vulnSBOMPaths,
-		VulnSBOMTimeout:       vulnSBOMTimeout,
-		VulnSBOMMaxComponents: vulnSBOMMaxComponents,
-		VulnSBOMSyftPath:      vulnSBOMSyftPath,
 
 		AuthLogPath:         logPath,
 		AuthIncludeAccepted: includeAccepted,
