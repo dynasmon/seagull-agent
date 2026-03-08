@@ -26,18 +26,15 @@ type VulnScannerConfig struct {
 	Every          time.Duration
 	OSVURL         string
 	MinSeverity    string
+	AnalysisProfile string
+	ExposureEnabled bool
+	ScanNowToken   string
 	QueryBatchSize int
 	MaxPackages    int
 	CmdTimeout     time.Duration
 	HTTPTimeout    time.Duration
 	MaxOutputBytes int64
 	HostRoot       string
-
-	SBOMEnabled       bool
-	SBOMPaths         []string
-	SBOMTimeout       time.Duration
-	SBOMMaxComponents int
-	SBOMSyftPath      string
 }
 
 type RuntimeConfig struct {
@@ -191,6 +188,18 @@ func (r *RuntimeConfig) VulnScanner() VulnScannerConfig {
 			cfg.MinSeverity = s
 		}
 	}
+	if s, ok := v["analysis_profile"].(string); ok {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			cfg.AnalysisProfile = s
+		}
+	}
+	if b, ok := v["exposure_enabled"].(bool); ok {
+		cfg.ExposureEnabled = b
+	}
+	if s, ok := v["scan_now_token"].(string); ok {
+		cfg.ScanNowToken = strings.TrimSpace(s)
+	}
 	if n, ok := toInt64(v["query_batch_size"]); ok && n > 0 {
 		cfg.QueryBatchSize = int(n)
 	}
@@ -214,27 +223,6 @@ func (r *RuntimeConfig) VulnScanner() VulnScannerConfig {
 		s = strings.TrimSpace(s)
 		if s != "" {
 			cfg.HostRoot = s
-		}
-	}
-
-	if b, ok := v["sbom_enabled"].(bool); ok {
-		cfg.SBOMEnabled = b
-	}
-	if s, ok := v["sbom_paths"].(string); ok {
-		cfg.SBOMPaths = splitCSV(s)
-	}
-	if s, ok := v["sbom_timeout"].(string); ok {
-		if d, err := time.ParseDuration(s); err == nil && d > 0 {
-			cfg.SBOMTimeout = d
-		}
-	}
-	if n, ok := toInt64(v["sbom_max_components"]); ok && n > 0 {
-		cfg.SBOMMaxComponents = int(n)
-	}
-	if s, ok := v["sbom_syft_path"].(string); ok {
-		s = strings.TrimSpace(s)
-		if s != "" {
-			cfg.SBOMSyftPath = s
 		}
 	}
 
