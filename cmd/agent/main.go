@@ -308,7 +308,7 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc) (*Ag
 				HostRoot:       cfg.SyscollectHostRoot,
 			},
 			VulnScannerConfig{
-				Enabled:         true,
+				Enabled:         contains(cfg.Sources, "vuln"),
 				Every:           cfg.VulnScanEvery,
 				OSVURL:          cfg.VulnOSVURL,
 				MinSeverity:     cfg.VulnMinSeverity,
