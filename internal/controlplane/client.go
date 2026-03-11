@@ -37,6 +37,7 @@ type EnrollRequest struct {
 	Hostname string `json:"hostname,omitempty"`
 	OS       string `json:"os,omitempty"`
 	Version  string `json:"version,omitempty"`
+	Token    string `json:"-"`
 }
 
 type EnrollResponse struct {
@@ -62,6 +63,9 @@ func (c *Client) Enroll(ctx context.Context, req EnrollRequest) (EnrollResponse,
 		return out, fmt.Errorf("new enroll request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if token := strings.TrimSpace(req.Token); token != "" {
+		httpReq.Header.Set("X-Enroll-Token", token)
+	}
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {

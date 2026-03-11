@@ -48,6 +48,7 @@ type Config struct {
 	AgentToken      string
 	AgentTokenFile  string
 	AgentConfigFile string
+	EnrollToken     string
 
 	ControlHeartbeatEvery time.Duration
 	ControlConfigEvery    time.Duration
@@ -255,6 +256,7 @@ func main() {
 				Hostname: hostname,
 				OS:       runtime.GOOS,
 				Version:  "0.1.0",
+				Token:    cfg.EnrollToken,
 			})
 			cancel()
 			if err != nil {
@@ -1017,9 +1019,10 @@ func loadConfig() Config {
 	httpTimeout := parseDuration(getEnv("NETWATCH_HTTP_TIMEOUT", "10s"), 10*time.Second)
 	senderMaxBatch := parseInt(getEnv("NETWATCH_SENDER_MAX_BATCH", "300"), 300)
 
-	agentToken := strings.TrimSpace(getEnv("NETWATCH_AGENT_TOKEN", ""))
+	agentToken := strings.TrimSpace(getSecretEnv("NETWATCH_AGENT_TOKEN", ""))
 	agentTokenFile := getEnv("NETWATCH_AGENT_TOKEN_FILE", "/var/lib/netwatch/agent.token")
 	agentConfigFile := getEnv("NETWATCH_AGENT_CONFIG_FILE", "/var/lib/netwatch/agent.config.json")
+	enrollToken := strings.TrimSpace(getSecretEnv("NETWATCH_ENROLL_TOKEN", ""))
 
 	controlHeartbeatEvery := parseDuration(getEnv("NETWATCH_CONTROL_HEARTBEAT_EVERY", "30s"), 30*time.Second)
 	controlConfigEvery := parseDuration(getEnv("NETWATCH_CONTROL_CONFIG_EVERY", "5m"), 5*time.Minute)
@@ -1131,6 +1134,7 @@ func loadConfig() Config {
 		AgentToken:      agentToken,
 		AgentTokenFile:  agentTokenFile,
 		AgentConfigFile: agentConfigFile,
+		EnrollToken:     enrollToken,
 
 		ControlHeartbeatEvery: controlHeartbeatEvery,
 		ControlConfigEvery:    controlConfigEvery,
@@ -1498,6 +1502,18 @@ func getEnv(k, def string) string {
 	if v, ok := os.LookupEnv(k); ok && strings.TrimSpace(v) != "" {
 		return v
 	}
+	return def
+}
+
+func getSecretEnv(k, def string) string {
+	if v, ok := os.LookupEnv(k); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+
+	if filePath, ok := os.LookupEnv(k + "_FILE"); ok && strings.TrimSpace(filePath) != "" {
+		return readTextFile(filePath)
+	}
+
 	return def
 }
 
