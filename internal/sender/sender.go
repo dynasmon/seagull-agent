@@ -24,7 +24,7 @@ type Sender struct {
 	retries   int
 }
 
-func New(baseURL string, timeout time.Duration, maxBatch int) *Sender {
+func New(baseURL string, timeout time.Duration, maxBatch int, httpClient *http.Client) *Sender {
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
@@ -33,11 +33,15 @@ func New(baseURL string, timeout time.Duration, maxBatch int) *Sender {
 	}
 
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: timeout}
+	}
+	httpClient.Timeout = timeout
 
 	return &Sender{
 		baseURL:   baseURL,
 		authToken: "",
-		client:    &http.Client{Timeout: timeout},
+		client:    httpClient,
 		maxBatch:  maxBatch,
 		retries:   3,
 	}
@@ -188,9 +192,6 @@ func (s *Sender) SendInventorySnapshot(ctx context.Context, snap model.Inventory
 	if s.baseURL == "" {
 		return 0, fmt.Errorf("sender baseURL is empty")
 	}
-	if s.authToken == "" {
-		return 0, fmt.Errorf("sender auth token is empty")
-	}
 
 	// Ensure required fields match backend schema expectations.
 	if snap.SchemaVersion <= 0 {
@@ -218,9 +219,6 @@ func (s *Sender) SendInventorySnapshot(ctx context.Context, snap model.Inventory
 func (s *Sender) SendVulnIngest(ctx context.Context, payload []byte) (int, []byte, error) {
 	if s.baseURL == "" {
 		return 0, nil, fmt.Errorf("sender baseURL is empty")
-	}
-	if s.authToken == "" {
-		return 0, nil, fmt.Errorf("sender auth token is empty")
 	}
 	if len(payload) == 0 {
 		return 0, nil, nil
