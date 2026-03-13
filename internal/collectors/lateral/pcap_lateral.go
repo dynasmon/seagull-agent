@@ -225,6 +225,22 @@ func (c *PcapLateralCapturer) packetToEvent(pkt gopacket.Packet, iface string) *
 	if dstPort <= 0 || !c.opts.Ports[dstPort] {
 		return nil
 	}
+	synOnly := tcp.SYN && !tcp.ACK
+	confidence := 62
+	if synOnly {
+		confidence = 78
+	}
+	switch dstPort {
+	case 445, 3389:
+		confidence += 10
+	case 5985, 5986:
+		confidence += 8
+	case 135, 139:
+		confidence += 6
+	}
+	if confidence > 95 {
+		confidence = 95
+	}
 
 	return &model.NetEvent{
 		AgentID:   c.agentID,
@@ -241,6 +257,10 @@ func (c *PcapLateralCapturer) packetToEvent(pkt gopacket.Packet, iface string) *
 			"iface":        iface,
 			"ip_version":   ipVersion,
 			"tcp_flags":    tcpFlagsString(tcp),
+			"collector":    "pcap_lateral",
+			"signal_family": "lateral",
+			"syn_only":     synOnly,
+			"lateral_confidence": confidence,
 		},
 	}
 }
