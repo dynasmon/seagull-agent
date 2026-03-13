@@ -260,6 +260,9 @@ func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *mod
 					"scan_type":  "arp_request",
 					"iface":      iface,
 					"ip_version": 0,
+					"collector":  "pcap_scan",
+					"signal_family": "scan",
+					"scan_confidence": scanConfidenceForType("arp_request"),
 				},
 			}
 		}
@@ -301,13 +304,17 @@ func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *mod
 			DstPort:   dstPort,
 			Proto:     "tcp",
 			Bytes:     len(pkt.Data()),
-			Extra: map[string]interface{}{
-				"scan_type":  scanType,
-				"iface":      iface,
-				"ip_version": ipVersion,
-				"tcp_flags":  tcpFlagsString(tcp),
-			},
-		}
+				Extra: map[string]interface{}{
+					"scan_type":  scanType,
+					"iface":      iface,
+					"ip_version": ipVersion,
+					"tcp_flags":  tcpFlagsString(tcp),
+					"collector":  "pcap_scan",
+					"signal_family": "scan",
+					"scan_confidence": scanConfidenceForTCP(scanType, srcPort, dstPort),
+					"syn_only": scanType == "tcp_syn",
+				},
+			}
 	}
 
 	if udpL := pkt.Layer(layers.LayerTypeUDP); udpL != nil {
@@ -335,12 +342,30 @@ func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *mod
 			DstPort:   dstPort,
 			Proto:     "udp",
 			Bytes:     len(pkt.Data()),
-			Extra: map[string]interface{}{
-				"scan_type":  "udp_probe",
-				"iface":      iface,
-				"ip_version": ipVersion,
-			},
-		}
+				Extra: map[string]interface{}{
+					"scan_type":  "udp_probe",
+					"iface":      iface,
+					"ip_version": ipVersion,
+					"collector":  "pcap_scan",
+					"signal_family": "scan",
+					"scan_confidence": func() int {
+						conf := scanConfidenceForType("udp_probe")
+						if srcPort >= 49152 {
+							conf += 3
+						}
+						switch dstPort {
+						case 53, 161, 1900:
+							conf -= 8
+						case 123:
+							conf -= 10
+						}
+						if conf < 20 {
+							conf = 20
+						}
+						return conf
+					}(),
+				},
+			}
 	}
 
 	if c.opts.IncludeICMP {
@@ -364,6 +389,9 @@ func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *mod
 					"ip_version": ipVersion,
 					"icmp_type":  int(icmp.TypeCode.Type()),
 					"icmp_code":  int(icmp.TypeCode.Code()),
+					"collector":  "pcap_scan",
+					"signal_family": "scan",
+					"scan_confidence": scanConfidenceForType("icmp_echo"),
 				},
 			}
 		}
@@ -390,6 +418,9 @@ func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *mod
 					"ip_version": ipVersion,
 					"icmp_type":  int(icmp.TypeCode.Type()),
 					"icmp_code":  int(icmp.TypeCode.Code()),
+					"collector":  "pcap_scan",
+					"signal_family": "scan",
+					"scan_confidence": scanConfidenceForType("icmp6_echo"),
 				},
 			}
 		}
@@ -445,6 +476,40 @@ func classifyTCP(t *layers.TCP, includeAck bool) string {
 		return "tcp_ack"
 	}
 	return ""
+}
+
+func scanConfidenceForType(scanType string) int {
+	switch scanType {
+	case "tcp_syn":
+		return 85
+	case "tcp_fin", "tcp_null", "tcp_xmas":
+		return 90
+	case "tcp_ack":
+		return 55
+	case "udp_probe":
+		return 45
+	case "icmp_echo", "icmp6_echo":
+		return 40
+	case "arp_request":
+		return 35
+	default:
+		return 30
+	}
+}
+
+func scanConfidenceForTCP(scanType string, srcPort, dstPort int) int {
+	conf := scanConfidenceForType(scanType)
+	if srcPort >= 49152 {
+		conf += 4
+	}
+	switch dstPort {
+	case 22, 135, 139, 445, 3389, 5985, 5986:
+		conf += 6
+	}
+	if conf > 95 {
+		conf = 95
+	}
+	return conf
 }
 
 func tcpFlagsString(t *layers.TCP) string {

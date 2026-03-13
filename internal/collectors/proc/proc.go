@@ -15,6 +15,40 @@ import (
 	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/model"
 )
 
+var tcpStateNames = map[string]string{
+	"01": "established",
+	"02": "syn_sent",
+	"03": "syn_recv",
+	"04": "fin_wait1",
+	"05": "fin_wait2",
+	"06": "time_wait",
+	"07": "close",
+	"08": "close_wait",
+	"09": "last_ack",
+	"0A": "listen",
+	"0B": "closing",
+}
+
+func stateName(stateHex string) string {
+	if v, ok := tcpStateNames[stateHex]; ok {
+		return v
+	}
+	return "unknown"
+}
+
+func stateClassAndConfidence(stateHex string) (string, int) {
+	switch stateHex {
+	case "02", "03":
+		return "attempt", 82
+	case "01":
+		return "session", 60
+	case "06", "04", "05", "08", "09", "0B":
+		return "teardown", 35
+	default:
+		return "other", 25
+	}
+}
+
 type Options struct {
 	AllowStates map[string]bool
 
@@ -183,13 +217,20 @@ func (c *Capturer) captureProc4(ts time.Time) ([]model.NetEvent, error) {
 		extra := map[string]interface{}{
 			"flow_id":       uuid.NewString(),
 			"tcp_state_hex": stateHex,
+			"tcp_state_name": stateName(stateHex),
 			"ip_version":    4,
+			"collector":     "proc_net_tcp",
+			"signal_family": "flow",
+			"flow_direction": "inbound_to_local",
 
 			"local_ip":    localIP,
 			"local_port":  localPort,
 			"remote_ip":   remoteIP,
 			"remote_port": remotePort,
 		}
+		stateClass, confidence := stateClassAndConfidence(stateHex)
+		extra["flow_state_class"] = stateClass
+		extra["flow_confidence"] = confidence
 
 		// Best-effort parsing for optional fields.
 		if len(fields) > 9 {
@@ -278,13 +319,20 @@ func (c *Capturer) captureProc6(ts time.Time) ([]model.NetEvent, error) {
 		extra := map[string]interface{}{
 			"flow_id":       uuid.NewString(),
 			"tcp_state_hex": stateHex,
+			"tcp_state_name": stateName(stateHex),
 			"ip_version":    6,
+			"collector":     "proc_net_tcp",
+			"signal_family": "flow",
+			"flow_direction": "inbound_to_local",
 
 			"local_ip":    localIP,
 			"local_port":  localPort,
 			"remote_ip":   remoteIP,
 			"remote_port": remotePort,
 		}
+		stateClass, confidence := stateClassAndConfidence(stateHex)
+		extra["flow_state_class"] = stateClass
+		extra["flow_confidence"] = confidence
 
 		if len(fields) > 9 {
 			if uid, e := strconv.Atoi(fields[7]); e == nil {

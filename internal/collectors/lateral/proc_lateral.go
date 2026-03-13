@@ -7,6 +7,28 @@ import (
 	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/model"
 )
 
+func lateralConfidence(kind string, dstPort int, stateHex string) int {
+	conf := 55
+	if kind == "attempt" {
+		conf = 72
+	}
+	switch dstPort {
+	case 445, 3389:
+		conf += 8
+	case 5985, 5986:
+		conf += 6
+	case 135, 139:
+		conf += 5
+	}
+	if stateHex == "03" { // SYN_RECV
+		conf += 6
+	}
+	if conf > 95 {
+		conf = 95
+	}
+	return conf
+}
+
 type Options struct {
 	Ports              map[int]bool
 	IncludeEstablished bool
@@ -83,6 +105,10 @@ func (c *ProcLateralCapturer) Capture() ([]model.NetEvent, error) {
 		evs[i].EventType = "lateral_conn"
 		evs[i].Extra["lateral_kind"] = kind
 		evs[i].Extra["lateral_service"] = serviceForPort(evs[i].DstPort)
+		evs[i].Extra["collector"] = "proc_lateral"
+		evs[i].Extra["signal_family"] = "lateral"
+		stateHex, _ := evs[i].Extra["tcp_state_hex"].(string)
+		evs[i].Extra["lateral_confidence"] = lateralConfidence(kind, evs[i].DstPort, stateHex)
 
 		out = append(out, evs[i])
 	}
