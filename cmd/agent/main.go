@@ -25,6 +25,7 @@ import (
 	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/ssh"
 	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/controlplane"
 	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/model"
+	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/netutil"
 	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/sender"
 )
 
@@ -49,10 +50,17 @@ type Config struct {
 	AgentTokenFile  string
 	AgentConfigFile string
 	EnrollToken     string
+	BootstrapToken  string
+
+	TLSCAFile     string
+	TLSCertFile   string
+	TLSKeyFile    string
+	TLSServerName string
 
 	ControlHeartbeatEvery time.Duration
 	ControlConfigEvery    time.Duration
 	ControlEnrollTimeout  time.Duration
+	ForceEnrollOnStart    bool
 
 	SyscollectEvery          time.Duration
 	SyscollectCmdTimeout     time.Duration
@@ -220,6 +228,15 @@ type Agent struct {
 
 func main() {
 	cfg := loadConfig()
+	httpClient, err := netutil.NewHTTPClient(cfg.HTTPTimeout, netutil.TLSOptions{
+		CAFile:     strings.TrimSpace(cfg.TLSCAFile),
+		CertFile:   strings.TrimSpace(cfg.TLSCertFile),
+		KeyFile:    strings.TrimSpace(cfg.TLSKeyFile),
+		ServerName: strings.TrimSpace(cfg.TLSServerName),
+	})
+	if err != nil {
+		log.Fatalf("[AGENT] TLS client init error: %v", err)
+	}
 
 	log.Printf("[AGENT] id=%s api=%s sources=%v interval=%s scan_mode=%s",
 		cfg.AgentID, cfg.APIURL, cfg.Sources, cfg.Interval, normalizeScanMode(cfg.ScanMode),
@@ -230,7 +247,7 @@ func main() {
 
 	{
 		ctx, cancel := context.WithTimeout(rootCtx, 30*time.Second)
-		if err := waitForHealth(ctx, cfg.APIURL); err != nil {
+		if err := waitForHealth(ctx, cfg.APIURL, httpClient); err != nil {
 			logJSON(LevelWarn, "backend_not_ready", map[string]interface{}{
 				"agent_id": cfg.AgentID,
 				"error":    err.Error(),
@@ -242,21 +259,25 @@ func main() {
 	// Control Plane: token bootstrap (env -> file -> enroll).
 	{
 		hostname, _ := os.Hostname()
-		cp := controlplane.New(cfg.APIURL, cfg.HTTPTimeout)
+		cp := controlplane.New(cfg.APIURL, cfg.HTTPTimeout, httpClient)
 
 		token := strings.TrimSpace(cfg.AgentToken)
 		if token == "" {
 			token = strings.TrimSpace(readTextFile(cfg.AgentTokenFile))
 		}
+		bootstrapToken := strings.TrimSpace(cfg.BootstrapToken)
 
-		if token == "" {
+		mtlsConfigured := strings.TrimSpace(cfg.TLSCertFile) != "" && strings.TrimSpace(cfg.TLSKeyFile) != ""
+		shouldEnroll := token == "" || bootstrapToken != "" || (cfg.ForceEnrollOnStart && mtlsConfigured)
+		if shouldEnroll {
 			ctx, cancel := context.WithTimeout(rootCtx, cfg.ControlEnrollTimeout)
 			resp, err := cp.Enroll(ctx, controlplane.EnrollRequest{
-				AgentID:  cfg.AgentID,
-				Hostname: hostname,
-				OS:       runtime.GOOS,
-				Version:  "0.1.0",
-				Token:    cfg.EnrollToken,
+				AgentID:        cfg.AgentID,
+				Hostname:       hostname,
+				OS:             runtime.GOOS,
+				Version:        "0.1.0",
+				Token:          cfg.EnrollToken,
+				BootstrapToken: bootstrapToken,
 			})
 			cancel()
 			if err != nil {
@@ -265,7 +286,7 @@ func main() {
 					"error":    err.Error(),
 				})
 			} else {
-				token = resp.AgentToken
+				token = strings.TrimSpace(resp.AgentToken)
 				if cfg.AgentConfigFile != "" && len(resp.Config) > 0 {
 					if b, mErr := json.Marshal(resp.Config); mErr == nil {
 						_ = atomicWriteFile(cfg.AgentConfigFile, b, 0o600)
@@ -280,7 +301,7 @@ func main() {
 		}
 	}
 
-	a, err := newAgent(cfg, rootCtx, stop)
+	a, err := newAgent(cfg, rootCtx, stop, httpClient)
 	if err != nil {
 		log.Fatalf("[AGENT] init error: %v", err)
 	}
@@ -292,13 +313,13 @@ func main() {
 	a.loop(rootCtx)
 }
 
-func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc) (*Agent, error) {
+func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc, httpClient *http.Client) (*Agent, error) {
 	now := time.Now().UTC()
 
 	a := &Agent{
 		cfg:    cfg,
-		sender: sender.New(cfg.APIURL, cfg.HTTPTimeout, cfg.SenderMaxBatch),
-		cp:     controlplane.New(cfg.APIURL, cfg.HTTPTimeout),
+		sender: sender.New(cfg.APIURL, cfg.HTTPTimeout, cfg.SenderMaxBatch, httpClient),
+		cp:     controlplane.New(cfg.APIURL, cfg.HTTPTimeout, httpClient),
 		runtime: NewRuntimeConfig(
 			cfg.AgentConfigFile,
 			SyscollectorConfig{
@@ -337,13 +358,13 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc) (*Ag
 	if strings.TrimSpace(cfg.AgentToken) != "" {
 		a.sender.SetAuthToken(cfg.AgentToken)
 		a.cp.SetToken(cfg.AgentToken)
-		// Best-effort: pull the current config once at startup.
-		ctx, cancel := context.WithTimeout(rootCtx, cfg.ControlEnrollTimeout)
-		if remoteCfg, err := a.cp.GetConfig(ctx); err == nil && len(remoteCfg) > 0 {
-			_, _ = a.runtime.Apply(remoteCfg)
-		}
-		cancel()
 	}
+	// Best-effort: pull the current config once at startup.
+	ctx, cancel := context.WithTimeout(rootCtx, cfg.ControlEnrollTimeout)
+	if remoteCfg, err := a.cp.GetConfig(ctx); err == nil && len(remoteCfg) > 0 {
+		_, _ = a.runtime.Apply(remoteCfg)
+	}
+	cancel()
 
 	// Apply startup overrides from persisted/control-plane config so operators
 	// can tune agent behavior without editing environment variables.
@@ -571,7 +592,7 @@ func (a *Agent) loop(rootCtx context.Context) {
 }
 
 func (a *Agent) startControlPlane(rootCtx context.Context) {
-	if a.cp == nil || strings.TrimSpace(a.cfg.AgentToken) == "" {
+	if a.cp == nil {
 		return
 	}
 
@@ -1012,7 +1033,7 @@ func (a *Agent) maybeHeartbeat() {
 
 func loadConfig() Config {
 	agentID := getEnv("NETWATCH_AGENT_ID", "agent-unknown")
-	apiURL := getEnv("NETWATCH_API_URL", "http://localhost:8000")
+	apiURL := getEnv("NETWATCH_API_URL", "https://localhost:8443/agent")
 	sources := splitCSVLower(getEnv("NETWATCH_SOURCES", "authlog,proc,scan,ddos"))
 
 	interval := parseDuration(getEnv("NETWATCH_POLL_INTERVAL", "1s"), 1*time.Second)
@@ -1023,10 +1044,17 @@ func loadConfig() Config {
 	agentTokenFile := getEnv("NETWATCH_AGENT_TOKEN_FILE", "/var/lib/netwatch/agent.token")
 	agentConfigFile := getEnv("NETWATCH_AGENT_CONFIG_FILE", "/var/lib/netwatch/agent.config.json")
 	enrollToken := strings.TrimSpace(getSecretEnv("NETWATCH_ENROLL_TOKEN", ""))
+	bootstrapToken := strings.TrimSpace(getSecretEnv("NETWATCH_AGENT_BOOTSTRAP_TOKEN", ""))
+
+	tlsCAFile := strings.TrimSpace(getEnv("NETWATCH_TLS_CA_FILE", ""))
+	tlsCertFile := strings.TrimSpace(getEnv("NETWATCH_TLS_CERT_FILE", ""))
+	tlsKeyFile := strings.TrimSpace(getEnv("NETWATCH_TLS_KEY_FILE", ""))
+	tlsServerName := strings.TrimSpace(getEnv("NETWATCH_TLS_SERVER_NAME", ""))
 
 	controlHeartbeatEvery := parseDuration(getEnv("NETWATCH_CONTROL_HEARTBEAT_EVERY", "30s"), 30*time.Second)
 	controlConfigEvery := parseDuration(getEnv("NETWATCH_CONTROL_CONFIG_EVERY", "5m"), 5*time.Minute)
 	controlEnrollTimeout := parseDuration(getEnv("NETWATCH_CONTROL_ENROLL_TIMEOUT", "10s"), 10*time.Second)
+	forceEnrollOnStart := parseBool(getEnv("NETWATCH_FORCE_ENROLL_ON_START", "true"), true)
 
 	syscollectEvery := parseDuration(getEnv("NETWATCH_SYSCOLLECT_EVERY", "5m"), 5*time.Minute)
 	syscollectCmdTimeout := parseDuration(getEnv("NETWATCH_SYSCOLLECT_CMD_TIMEOUT", "10s"), 10*time.Second)
@@ -1135,10 +1163,17 @@ func loadConfig() Config {
 		AgentTokenFile:  agentTokenFile,
 		AgentConfigFile: agentConfigFile,
 		EnrollToken:     enrollToken,
+		BootstrapToken:  bootstrapToken,
+
+		TLSCAFile:     tlsCAFile,
+		TLSCertFile:   tlsCertFile,
+		TLSKeyFile:    tlsKeyFile,
+		TLSServerName: tlsServerName,
 
 		ControlHeartbeatEvery: controlHeartbeatEvery,
 		ControlConfigEvery:    controlConfigEvery,
 		ControlEnrollTimeout:  controlEnrollTimeout,
+		ForceEnrollOnStart:    forceEnrollOnStart,
 
 		SyscollectEvery:          syscollectEvery,
 		SyscollectCmdTimeout:     syscollectCmdTimeout,
@@ -1233,10 +1268,13 @@ func loadConfig() Config {
 	}
 }
 
-func waitForHealth(ctx context.Context, baseURL string) error {
+func waitForHealth(ctx context.Context, baseURL string, httpClient *http.Client) error {
 	u := strings.TrimRight(strings.TrimSpace(baseURL), "/") + "/health"
 
-	client := &http.Client{Timeout: 2 * time.Second}
+	client := httpClient
+	if client == nil {
+		client = &http.Client{Timeout: 2 * time.Second}
+	}
 	t := time.NewTicker(500 * time.Millisecond)
 	defer t.Stop()
 

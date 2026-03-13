@@ -17,14 +17,18 @@ type Client struct {
 	http    *http.Client
 }
 
-func New(baseURL string, timeout time.Duration) *Client {
+func New(baseURL string, timeout time.Duration, httpClient *http.Client) *Client {
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: timeout}
+	}
+	httpClient.Timeout = timeout
 	return &Client{
 		baseURL: baseURL,
-		http:    &http.Client{Timeout: timeout},
+		http:    httpClient,
 	}
 }
 
@@ -33,16 +37,17 @@ func (c *Client) SetToken(token string) {
 }
 
 type EnrollRequest struct {
-	AgentID  string `json:"agent_id"`
-	Hostname string `json:"hostname,omitempty"`
-	OS       string `json:"os,omitempty"`
-	Version  string `json:"version,omitempty"`
-	Token    string `json:"-"`
+	AgentID        string `json:"agent_id"`
+	Hostname       string `json:"hostname,omitempty"`
+	OS             string `json:"os,omitempty"`
+	Version        string `json:"version,omitempty"`
+	Token          string `json:"-"`
+	BootstrapToken string `json:"-"`
 }
 
 type EnrollResponse struct {
 	AgentID    string                 `json:"agent_id"`
-	AgentToken string                 `json:"agent_token"`
+	AgentToken string                 `json:"agent_token,omitempty"`
 	Config     map[string]interface{} `json:"config"`
 }
 
@@ -66,6 +71,9 @@ func (c *Client) Enroll(ctx context.Context, req EnrollRequest) (EnrollResponse,
 	if token := strings.TrimSpace(req.Token); token != "" {
 		httpReq.Header.Set("X-Enroll-Token", token)
 	}
+	if bootstrapToken := strings.TrimSpace(req.BootstrapToken); bootstrapToken != "" {
+		httpReq.Header.Set("X-Agent-Bootstrap-Token", bootstrapToken)
+	}
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
@@ -82,10 +90,6 @@ func (c *Client) Enroll(ctx context.Context, req EnrollRequest) (EnrollResponse,
 		return out, fmt.Errorf("unmarshal enroll response: %w", err)
 	}
 
-	if out.AgentToken == "" {
-		return out, fmt.Errorf("enroll returned empty agent_token")
-	}
-
 	return out, nil
 }
 
@@ -100,9 +104,6 @@ func (c *Client) Heartbeat(ctx context.Context, hb HeartbeatRequest) error {
 	if c.baseURL == "" {
 		return fmt.Errorf("controlplane baseURL is empty")
 	}
-	if c.token == "" {
-		return fmt.Errorf("controlplane token is empty")
-	}
 
 	payload, err := json.Marshal(hb)
 	if err != nil {
@@ -115,7 +116,9 @@ func (c *Client) Heartbeat(ctx context.Context, hb HeartbeatRequest) error {
 		return fmt.Errorf("new heartbeat request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+c.token)
+	if c.token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.token)
+	}
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
@@ -134,16 +137,15 @@ func (c *Client) GetConfig(ctx context.Context) (map[string]interface{}, error) 
 	if c.baseURL == "" {
 		return nil, fmt.Errorf("controlplane baseURL is empty")
 	}
-	if c.token == "" {
-		return nil, fmt.Errorf("controlplane token is empty")
-	}
 
 	u := c.baseURL + "/agents/config"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, fmt.Errorf("new config request: %w", err)
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+c.token)
+	if c.token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.token)
+	}
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
