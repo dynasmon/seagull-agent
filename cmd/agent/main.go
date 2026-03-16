@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
@@ -46,10 +45,7 @@ type Config struct {
 	HTTPTimeout    time.Duration
 	SenderMaxBatch int
 
-	AgentToken      string
-	AgentTokenFile  string
 	AgentConfigFile string
-	EnrollToken     string
 	BootstrapToken  string
 
 	TLSCAFile     string
@@ -256,19 +252,22 @@ func main() {
 		cancel()
 	}
 
-	// Control Plane: token bootstrap (env -> file -> enroll).
+	// Control Plane enrollment with mTLS identity + bootstrap token.
 	{
 		hostname, _ := os.Hostname()
 		cp := controlplane.New(cfg.APIURL, cfg.HTTPTimeout, httpClient)
 
-		token := strings.TrimSpace(cfg.AgentToken)
-		if token == "" {
-			token = strings.TrimSpace(readTextFile(cfg.AgentTokenFile))
-		}
 		bootstrapToken := strings.TrimSpace(cfg.BootstrapToken)
 
 		mtlsConfigured := strings.TrimSpace(cfg.TLSCertFile) != "" && strings.TrimSpace(cfg.TLSKeyFile) != ""
-		shouldEnroll := token == "" || bootstrapToken != "" || (cfg.ForceEnrollOnStart && mtlsConfigured)
+		shouldEnroll := bootstrapToken != "" || (cfg.ForceEnrollOnStart && mtlsConfigured)
+		if shouldEnroll && bootstrapToken == "" {
+			logJSON(LevelWarn, "agent_enroll_skipped", map[string]interface{}{
+				"agent_id": cfg.AgentID,
+				"reason":   "missing_bootstrap_token",
+			})
+			shouldEnroll = false
+		}
 		if shouldEnroll {
 			ctx, cancel := context.WithTimeout(rootCtx, cfg.ControlEnrollTimeout)
 			resp, err := cp.Enroll(ctx, controlplane.EnrollRequest{
@@ -276,7 +275,6 @@ func main() {
 				Hostname:       hostname,
 				OS:             runtime.GOOS,
 				Version:        "0.1.0",
-				Token:          cfg.EnrollToken,
 				BootstrapToken: bootstrapToken,
 			})
 			cancel()
@@ -286,18 +284,12 @@ func main() {
 					"error":    err.Error(),
 				})
 			} else {
-				token = strings.TrimSpace(resp.AgentToken)
 				if cfg.AgentConfigFile != "" && len(resp.Config) > 0 {
 					if b, mErr := json.Marshal(resp.Config); mErr == nil {
 						_ = atomicWriteFile(cfg.AgentConfigFile, b, 0o600)
 					}
 				}
 			}
-		}
-
-		if token != "" {
-			cfg.AgentToken = token
-			_ = writeTextFile(cfg.AgentTokenFile, token)
 		}
 	}
 
@@ -355,10 +347,6 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc, http
 		},
 	}
 
-	if strings.TrimSpace(cfg.AgentToken) != "" {
-		a.sender.SetAuthToken(cfg.AgentToken)
-		a.cp.SetToken(cfg.AgentToken)
-	}
 	// Best-effort: pull the current config once at startup.
 	ctx, cancel := context.WithTimeout(rootCtx, cfg.ControlEnrollTimeout)
 	if remoteCfg, err := a.cp.GetConfig(ctx); err == nil && len(remoteCfg) > 0 {
@@ -1040,10 +1028,7 @@ func loadConfig() Config {
 	httpTimeout := parseDuration(getEnv("NETWATCH_HTTP_TIMEOUT", "10s"), 10*time.Second)
 	senderMaxBatch := parseInt(getEnv("NETWATCH_SENDER_MAX_BATCH", "300"), 300)
 
-	agentToken := strings.TrimSpace(getSecretEnv("NETWATCH_AGENT_TOKEN", ""))
-	agentTokenFile := getEnv("NETWATCH_AGENT_TOKEN_FILE", "/var/lib/netwatch/agent.token")
 	agentConfigFile := getEnv("NETWATCH_AGENT_CONFIG_FILE", "/var/lib/netwatch/agent.config.json")
-	enrollToken := strings.TrimSpace(getSecretEnv("NETWATCH_ENROLL_TOKEN", ""))
 	bootstrapToken := strings.TrimSpace(getSecretEnv("NETWATCH_AGENT_BOOTSTRAP_TOKEN", ""))
 
 	tlsCAFile := strings.TrimSpace(getEnv("NETWATCH_TLS_CA_FILE", ""))
@@ -1159,10 +1144,7 @@ func loadConfig() Config {
 		HTTPTimeout:    httpTimeout,
 		SenderMaxBatch: senderMaxBatch,
 
-		AgentToken:      agentToken,
-		AgentTokenFile:  agentTokenFile,
 		AgentConfigFile: agentConfigFile,
-		EnrollToken:     enrollToken,
 		BootstrapToken:  bootstrapToken,
 
 		TLSCAFile:     tlsCAFile,
@@ -1917,29 +1899,6 @@ func readTextFile(path string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(b))
-}
-
-func writeTextFile(path string, content string) error {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return nil
-	}
-
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-
-	tmp := path + ".tmp"
-	data := strings.TrimSpace(content)
-	if data != "" {
-		data += "\n"
-	}
-
-	if err := os.WriteFile(tmp, []byte(data), 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
 }
 
 func round2(v float64) float64 {
