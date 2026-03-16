@@ -220,6 +220,9 @@ type Agent struct {
 	vulnStatus VulnScannerStatus
 
 	state SummaryState
+
+	enrollMu          sync.Mutex
+	nextEnrollRetryAt time.Time
 }
 
 func main() {
@@ -631,6 +634,7 @@ func (a *Agent) startControlPlane(rootCtx context.Context) {
 						"agent_id": a.cfg.AgentID,
 						"error":    err.Error(),
 					})
+					a.maybeReEnroll(rootCtx, err.Error(), 0)
 				}
 			}
 		}
@@ -654,6 +658,7 @@ func (a *Agent) startControlPlane(rootCtx context.Context) {
 						"agent_id": a.cfg.AgentID,
 						"error":    err.Error(),
 					})
+					a.maybeReEnroll(rootCtx, err.Error(), 0)
 					continue
 				}
 				if a.runtime != nil && len(cfg) > 0 {
@@ -671,10 +676,81 @@ func (a *Agent) startControlPlane(rootCtx context.Context) {
 	}()
 }
 
+func (a *Agent) maybeReEnroll(rootCtx context.Context, errText string, status int) {
+	if !a.cfg.ForceEnrollOnStart {
+		return
+	}
+	et := strings.ToLower(strings.TrimSpace(errText))
+	should := status == 401 ||
+		strings.Contains(et, "status=401") ||
+		strings.Contains(et, "unknown or revoked agent") ||
+		strings.Contains(et, "unbound or revoked")
+	if !should {
+		return
+	}
+
+	now := time.Now().UTC()
+	a.enrollMu.Lock()
+	if !a.nextEnrollRetryAt.IsZero() && now.Before(a.nextEnrollRetryAt) {
+		a.enrollMu.Unlock()
+		return
+	}
+	// Keep retries bounded to avoid noisy loops under persistent auth failures.
+	a.nextEnrollRetryAt = now.Add(30 * time.Second)
+	a.enrollMu.Unlock()
+
+	bootstrapToken := strings.TrimSpace(getSecretEnv("NETWATCH_AGENT_BOOTSTRAP_TOKEN", ""))
+	if bootstrapToken == "" {
+		logJSON(LevelWarn, "agent_reenroll_skipped", map[string]interface{}{
+			"agent_id": a.cfg.AgentID,
+			"reason":   "missing_bootstrap_token",
+		})
+		return
+	}
+
+	if strings.TrimSpace(a.cfg.TLSCertFile) == "" || strings.TrimSpace(a.cfg.TLSKeyFile) == "" {
+		logJSON(LevelWarn, "agent_reenroll_skipped", map[string]interface{}{
+			"agent_id": a.cfg.AgentID,
+			"reason":   "missing_mtls_material",
+		})
+		return
+	}
+
+	hostname, _ := os.Hostname()
+	ctx, cancel := context.WithTimeout(rootCtx, a.cfg.ControlEnrollTimeout)
+	resp, err := a.cp.Enroll(ctx, controlplane.EnrollRequest{
+		AgentID:        a.cfg.AgentID,
+		Hostname:       hostname,
+		OS:             runtime.GOOS,
+		Version:        "0.1.0",
+		BootstrapToken: bootstrapToken,
+	})
+	cancel()
+	if err != nil {
+		logJSON(LevelWarn, "agent_reenroll_failed", map[string]interface{}{
+			"agent_id": a.cfg.AgentID,
+			"error":    err.Error(),
+		})
+		return
+	}
+
+	if a.cfg.AgentConfigFile != "" && len(resp.Config) > 0 {
+		if b, mErr := json.Marshal(resp.Config); mErr == nil {
+			_ = atomicWriteFile(a.cfg.AgentConfigFile, b, 0o600)
+		}
+	}
+	logJSON(LevelInfo, "agent_reenroll_succeeded", map[string]interface{}{
+		"agent_id": a.cfg.AgentID,
+	})
+}
+
 func (a *Agent) runAndLog(rootCtx context.Context) {
 	res := a.runOnce(rootCtx)
 	if res == nil {
 		return
+	}
+	if res.SendAttempted {
+		a.maybeReEnroll(rootCtx, res.Error, res.Status)
 	}
 
 	a.applyToSummary(res)
