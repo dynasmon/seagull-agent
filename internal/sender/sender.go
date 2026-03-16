@@ -18,7 +18,6 @@ import (
 
 type Sender struct {
 	baseURL   string
-	authToken string
 	client    *http.Client
 	maxBatch  int
 	retries   int
@@ -39,16 +38,11 @@ func New(baseURL string, timeout time.Duration, maxBatch int, httpClient *http.C
 	httpClient.Timeout = timeout
 
 	return &Sender{
-		baseURL:   baseURL,
-		authToken: "",
-		client:    httpClient,
-		maxBatch:  maxBatch,
-		retries:   3,
+		baseURL:  baseURL,
+		client:   httpClient,
+		maxBatch: maxBatch,
+		retries:  3,
 	}
-}
-
-func (s *Sender) SetAuthToken(token string) {
-	s.authToken = strings.TrimSpace(token)
 }
 
 func (s *Sender) SendEvents(ctx context.Context, events []model.NetEvent) (int, error) {
@@ -145,9 +139,6 @@ func (s *Sender) postOnce(ctx context.Context, url string, payload []byte) (int,
 		return 0, fmt.Errorf("new request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if s.authToken != "" {
-		req.Header.Set("Authorization", "Bearer "+s.authToken)
-	}
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -170,9 +161,6 @@ func (s *Sender) postOnceRead(ctx context.Context, url string, payload []byte) (
 		return 0, nil, fmt.Errorf("new request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if s.authToken != "" {
-		req.Header.Set("Authorization", "Bearer "+s.authToken)
-	}
 
 	resp, err := s.client.Do(req)
 	if err != nil {

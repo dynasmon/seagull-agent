@@ -13,7 +13,6 @@ import (
 
 type Client struct {
 	baseURL string
-	token   string
 	http    *http.Client
 }
 
@@ -32,23 +31,17 @@ func New(baseURL string, timeout time.Duration, httpClient *http.Client) *Client
 	}
 }
 
-func (c *Client) SetToken(token string) {
-	c.token = strings.TrimSpace(token)
-}
-
 type EnrollRequest struct {
 	AgentID        string `json:"agent_id"`
 	Hostname       string `json:"hostname,omitempty"`
 	OS             string `json:"os,omitempty"`
 	Version        string `json:"version,omitempty"`
-	Token          string `json:"-"`
 	BootstrapToken string `json:"-"`
 }
 
 type EnrollResponse struct {
-	AgentID    string                 `json:"agent_id"`
-	AgentToken string                 `json:"agent_token,omitempty"`
-	Config     map[string]interface{} `json:"config"`
+	AgentID string                 `json:"agent_id"`
+	Config  map[string]interface{} `json:"config"`
 }
 
 func (c *Client) Enroll(ctx context.Context, req EnrollRequest) (EnrollResponse, error) {
@@ -68,9 +61,6 @@ func (c *Client) Enroll(ctx context.Context, req EnrollRequest) (EnrollResponse,
 		return out, fmt.Errorf("new enroll request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if token := strings.TrimSpace(req.Token); token != "" {
-		httpReq.Header.Set("X-Enroll-Token", token)
-	}
 	if bootstrapToken := strings.TrimSpace(req.BootstrapToken); bootstrapToken != "" {
 		httpReq.Header.Set("X-Agent-Bootstrap-Token", bootstrapToken)
 	}
@@ -116,9 +106,6 @@ func (c *Client) Heartbeat(ctx context.Context, hb HeartbeatRequest) error {
 		return fmt.Errorf("new heartbeat request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if c.token != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.token)
-	}
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
@@ -142,9 +129,6 @@ func (c *Client) GetConfig(ctx context.Context) (map[string]interface{}, error) 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, fmt.Errorf("new config request: %w", err)
-	}
-	if c.token != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.token)
 	}
 
 	resp, err := c.http.Do(httpReq)
