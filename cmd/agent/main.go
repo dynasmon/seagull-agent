@@ -52,6 +52,7 @@ type Config struct {
 	TLSCertFile   string
 	TLSKeyFile    string
 	TLSServerName string
+	TLSWaitTimeout time.Duration
 
 	ControlHeartbeatEvery time.Duration
 	ControlConfigEvery    time.Duration
@@ -227,6 +228,9 @@ type Agent struct {
 
 func main() {
 	cfg := loadConfig()
+	if err := waitForTLSMaterial(cfg); err != nil {
+		log.Fatalf("[AGENT] TLS material not ready: %v", err)
+	}
 	httpClient, err := netutil.NewHTTPClient(cfg.HTTPTimeout, netutil.TLSOptions{
 		CAFile:     strings.TrimSpace(cfg.TLSCAFile),
 		CertFile:   strings.TrimSpace(cfg.TLSCertFile),
@@ -1111,6 +1115,7 @@ func loadConfig() Config {
 	tlsCertFile := strings.TrimSpace(getEnv("NETWATCH_TLS_CERT_FILE", ""))
 	tlsKeyFile := strings.TrimSpace(getEnv("NETWATCH_TLS_KEY_FILE", ""))
 	tlsServerName := strings.TrimSpace(getEnv("NETWATCH_TLS_SERVER_NAME", ""))
+	tlsWaitTimeout := parseDuration(getEnv("NETWATCH_TLS_WAIT_TIMEOUT", "45s"), 45*time.Second)
 
 	controlHeartbeatEvery := parseDuration(getEnv("NETWATCH_CONTROL_HEARTBEAT_EVERY", "30s"), 30*time.Second)
 	controlConfigEvery := parseDuration(getEnv("NETWATCH_CONTROL_CONFIG_EVERY", "5m"), 5*time.Minute)
@@ -1227,6 +1232,7 @@ func loadConfig() Config {
 		TLSCertFile:   tlsCertFile,
 		TLSKeyFile:    tlsKeyFile,
 		TLSServerName: tlsServerName,
+		TLSWaitTimeout: tlsWaitTimeout,
 
 		ControlHeartbeatEvery: controlHeartbeatEvery,
 		ControlConfigEvery:    controlConfigEvery,
@@ -1611,6 +1617,44 @@ func getSecretEnv(k, def string) string {
 	}
 
 	return def
+}
+
+func waitForTLSMaterial(cfg Config) error {
+	paths := make([]string, 0, 3)
+	ca := strings.TrimSpace(cfg.TLSCAFile)
+	cert := strings.TrimSpace(cfg.TLSCertFile)
+	key := strings.TrimSpace(cfg.TLSKeyFile)
+	if ca != "" {
+		paths = append(paths, ca)
+	}
+	if cert != "" {
+		paths = append(paths, cert)
+	}
+	if key != "" {
+		paths = append(paths, key)
+	}
+
+	if len(paths) == 0 || cfg.TLSWaitTimeout <= 0 {
+		return nil
+	}
+
+	deadline := time.Now().Add(cfg.TLSWaitTimeout)
+	for {
+		missing := ""
+		for _, p := range paths {
+			if _, err := os.Stat(p); err != nil {
+				missing = p
+				break
+			}
+		}
+		if missing == "" {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for TLS file %s", missing)
+		}
+		time.Sleep(2 * time.Second)
+	}
 }
 
 func splitCSVLower(s string) []string {

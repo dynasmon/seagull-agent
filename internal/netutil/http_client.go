@@ -3,6 +3,7 @@ package netutil
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -42,6 +43,12 @@ func NewHTTPClient(timeout time.Duration, tlsOpts TLSOptions) (*http.Client, err
 		}
 
 		if tlsOpts.CAFile != "" {
+			if _, statErr := os.Stat(tlsOpts.CAFile); statErr != nil {
+				if errors.Is(statErr, os.ErrNotExist) {
+					return nil, fmt.Errorf("TLS CA file does not exist: %s", tlsOpts.CAFile)
+				}
+				return nil, fmt.Errorf("stat TLS CA file: %w", statErr)
+			}
 			caPem, readErr := os.ReadFile(tlsOpts.CAFile)
 			if readErr != nil {
 				return nil, fmt.Errorf("read TLS CA file: %w", readErr)
@@ -62,6 +69,18 @@ func NewHTTPClient(timeout time.Duration, tlsOpts TLSOptions) (*http.Client, err
 		if tlsOpts.CertFile != "" || tlsOpts.KeyFile != "" {
 			if tlsOpts.CertFile == "" || tlsOpts.KeyFile == "" {
 				return nil, fmt.Errorf("TLS client cert and key must be provided together")
+			}
+			if _, statErr := os.Stat(tlsOpts.CertFile); statErr != nil {
+				if errors.Is(statErr, os.ErrNotExist) {
+					return nil, fmt.Errorf("TLS client certificate does not exist: %s", tlsOpts.CertFile)
+				}
+				return nil, fmt.Errorf("stat TLS client certificate: %w", statErr)
+			}
+			if _, statErr := os.Stat(tlsOpts.KeyFile); statErr != nil {
+				if errors.Is(statErr, os.ErrNotExist) {
+					return nil, fmt.Errorf("TLS client key does not exist: %s", tlsOpts.KeyFile)
+				}
+				return nil, fmt.Errorf("stat TLS client key: %w", statErr)
 			}
 			crt, loadErr := tls.LoadX509KeyPair(tlsOpts.CertFile, tlsOpts.KeyFile)
 			if loadErr != nil {
