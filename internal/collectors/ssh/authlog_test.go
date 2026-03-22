@@ -1,6 +1,8 @@
 package ssh
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -40,5 +42,18 @@ func TestParseLineSudoCommand(t *testing.T) {
 	}
 	if ev.Proto != "sudo" {
 		t.Fatalf("unexpected proto: %s", ev.Proto)
+	}
+}
+
+func TestResolveAuthLogPathUsesConfiguredPathWhenReadable(t *testing.T) {
+	td := t.TempDir()
+	authLog := filepath.Join(td, "auth.log")
+	if err := os.WriteFile(authLog, []byte("ok\n"), 0o600); err != nil {
+		t.Fatalf("write auth log: %v", err)
+	}
+
+	got, err := ResolveAuthLogPath(authLog)
+	if err != nil || got != authLog {
+		t.Fatalf("expected resolved path %s, got %s (err=%v)", authLog, got, err)
 	}
 }

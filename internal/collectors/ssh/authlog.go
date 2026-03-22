@@ -84,6 +84,42 @@ func ValidateAuthLogReadable(path string) error {
 	return nil
 }
 
+func ResolveAuthLogPath(configuredPath string) (string, error) {
+	candidates := make([]string, 0, 8)
+	seen := make(map[string]struct{}, 8)
+	add := func(p string) {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			return
+		}
+		if _, ok := seen[p]; ok {
+			return
+		}
+		seen[p] = struct{}{}
+		candidates = append(candidates, p)
+	}
+
+	add(configuredPath)
+	add("/var/log/auth.log")
+	add("/var/log/secure")
+	add("/host/var/log/auth.log")
+	add("/host/var/log/secure")
+
+	lastErr := error(nil)
+	for _, p := range candidates {
+		if err := ValidateAuthLogReadable(p); err == nil {
+			return p, nil
+		} else {
+			lastErr = err
+		}
+	}
+
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no authlog candidates configured")
+	}
+	return "", lastErr
+}
+
 func (c *AuthLogCapturer) Capture(now time.Time) ([]model.NetEvent, error) {
 	f, err := os.Open(c.opts.Path)
 	if err != nil {

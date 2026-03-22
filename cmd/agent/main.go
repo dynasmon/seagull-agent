@@ -390,15 +390,23 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc, http
 	}
 
 	if contains(cfg.Sources, "authlog") {
-		if err := ssh.ValidateAuthLogReadable(cfg.AuthLogPath); err != nil {
+		resolvedPath, err := ssh.ResolveAuthLogPath(cfg.AuthLogPath)
+		if err != nil {
 			logJSON(LevelWarn, "authlog_source_disabled", map[string]interface{}{
 				"agent_id": cfg.AgentID,
 				"path":     cfg.AuthLogPath,
 				"error":    err.Error(),
 			})
 		} else {
+			if resolvedPath != cfg.AuthLogPath {
+				logJSON(LevelInfo, "authlog_path_resolved", map[string]interface{}{
+					"agent_id":   cfg.AgentID,
+					"configured": cfg.AuthLogPath,
+					"resolved":   resolvedPath,
+				})
+			}
 			a.authCapturer = ssh.NewAuthLogCapturer(cfg.AgentID, ssh.AuthLogOptions{
-				Path:            cfg.AuthLogPath,
+				Path:            resolvedPath,
 				MaxBatchSize:    200,
 				DedupTTL:        cfg.AuthDedupTTL,
 				IncludeAccepted: cfg.AuthIncludeAccepted,
