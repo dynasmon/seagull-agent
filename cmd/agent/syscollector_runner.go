@@ -24,6 +24,7 @@ func (a *Agent) startSyscollector(ctx context.Context) {
 	}
 
 	go func() {
+		startupDelayed := false
 		for {
 			cfg := a.runtime.Syscollector()
 			a.sysMu.RLock()
@@ -34,6 +35,10 @@ func (a *Agent) startSyscollector(ctx context.Context) {
 			if cfg.Enabled {
 				if lastRun.IsZero() {
 					nextIn = 0
+					if !startupDelayed {
+						nextIn = stableJitter(a.cfg.AgentID, "syscollector.startup", a.cfg.SyscollectStartupJitter)
+						startupDelayed = true
+					}
 				} else {
 					d := cfg.Every - time.Since(lastRun)
 					if d < 0 {

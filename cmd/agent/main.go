@@ -48,24 +48,28 @@ type Config struct {
 	AgentConfigFile string
 	BootstrapToken  string
 
-	TLSCAFile     string
-	TLSCertFile   string
-	TLSKeyFile    string
-	TLSServerName string
+	TLSCAFile      string
+	TLSCertFile    string
+	TLSKeyFile     string
+	TLSServerName  string
 	TLSWaitTimeout time.Duration
 
-	ControlHeartbeatEvery time.Duration
-	ControlConfigEvery    time.Duration
-	ControlEnrollTimeout  time.Duration
-	ForceEnrollOnStart    bool
+	ControlHeartbeatEvery  time.Duration
+	ControlHeartbeatJitter time.Duration
+	ControlConfigEvery     time.Duration
+	ControlConfigJitter    time.Duration
+	ControlEnrollTimeout   time.Duration
+	ForceEnrollOnStart     bool
 
 	SyscollectEvery          time.Duration
+	SyscollectStartupJitter  time.Duration
 	SyscollectCmdTimeout     time.Duration
 	SyscollectMaxOutputBytes int64
 	SyscollectMaxPackages    int
 	SyscollectHostRoot       string
 
 	VulnScanEvery        time.Duration
+	VulnStartupJitter    time.Duration
 	VulnOSVURL           string
 	VulnMinSeverity      string
 	VulnAnalysisProfile  string
@@ -386,12 +390,20 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc, http
 	}
 
 	if contains(cfg.Sources, "authlog") {
-		a.authCapturer = ssh.NewAuthLogCapturer(cfg.AgentID, ssh.AuthLogOptions{
-			Path:            cfg.AuthLogPath,
-			MaxBatchSize:    200,
-			DedupTTL:        cfg.AuthDedupTTL,
-			IncludeAccepted: cfg.AuthIncludeAccepted,
-		})
+		if err := ssh.ValidateAuthLogReadable(cfg.AuthLogPath); err != nil {
+			logJSON(LevelWarn, "authlog_source_disabled", map[string]interface{}{
+				"agent_id": cfg.AgentID,
+				"path":     cfg.AuthLogPath,
+				"error":    err.Error(),
+			})
+		} else {
+			a.authCapturer = ssh.NewAuthLogCapturer(cfg.AgentID, ssh.AuthLogOptions{
+				Path:            cfg.AuthLogPath,
+				MaxBatchSize:    200,
+				DedupTTL:        cfg.AuthDedupTTL,
+				IncludeAccepted: cfg.AuthIncludeAccepted,
+			})
+		}
 	}
 
 	if contains(cfg.Sources, "lateral") {
@@ -593,6 +605,17 @@ func (a *Agent) startControlPlane(rootCtx context.Context) {
 
 	// Heartbeat loop
 	go func() {
+		initialDelay := stableJitter(a.cfg.AgentID, "control.heartbeat", a.cfg.ControlHeartbeatJitter)
+		if initialDelay > 0 {
+			t := time.NewTimer(initialDelay)
+			select {
+			case <-rootCtx.Done():
+				t.Stop()
+				return
+			case <-t.C:
+			}
+		}
+
 		t := time.NewTicker(a.cfg.ControlHeartbeatEvery)
 		defer t.Stop()
 
@@ -646,6 +669,17 @@ func (a *Agent) startControlPlane(rootCtx context.Context) {
 
 	// Config pull loop (best-effort). Applies config and persists it locally.
 	go func() {
+		initialDelay := stableJitter(a.cfg.AgentID, "control.config", a.cfg.ControlConfigJitter)
+		if initialDelay > 0 {
+			t := time.NewTimer(initialDelay)
+			select {
+			case <-rootCtx.Done():
+				t.Stop()
+				return
+			case <-t.C:
+			}
+		}
+
 		t := time.NewTicker(a.cfg.ControlConfigEvery)
 		defer t.Stop()
 
@@ -1118,17 +1152,21 @@ func loadConfig() Config {
 	tlsWaitTimeout := parseDuration(getEnv("NETWATCH_TLS_WAIT_TIMEOUT", "45s"), 45*time.Second)
 
 	controlHeartbeatEvery := parseDuration(getEnv("NETWATCH_CONTROL_HEARTBEAT_EVERY", "30s"), 30*time.Second)
+	controlHeartbeatJitter := parseDuration(getEnv("NETWATCH_CONTROL_HEARTBEAT_JITTER", "5s"), 5*time.Second)
 	controlConfigEvery := parseDuration(getEnv("NETWATCH_CONTROL_CONFIG_EVERY", "5m"), 5*time.Minute)
+	controlConfigJitter := parseDuration(getEnv("NETWATCH_CONTROL_CONFIG_JITTER", "30s"), 30*time.Second)
 	controlEnrollTimeout := parseDuration(getEnv("NETWATCH_CONTROL_ENROLL_TIMEOUT", "10s"), 10*time.Second)
 	forceEnrollOnStart := parseBool(getEnv("NETWATCH_FORCE_ENROLL_ON_START", "true"), true)
 
 	syscollectEvery := parseDuration(getEnv("NETWATCH_SYSCOLLECT_EVERY", "5m"), 5*time.Minute)
+	syscollectStartupJitter := parseDuration(getEnv("NETWATCH_SYSCOLLECT_STARTUP_JITTER", "45s"), 45*time.Second)
 	syscollectCmdTimeout := parseDuration(getEnv("NETWATCH_SYSCOLLECT_CMD_TIMEOUT", "10s"), 10*time.Second)
 	syscollectMaxOutputBytes := int64(parseInt(getEnv("NETWATCH_SYSCOLLECT_MAX_OUTPUT_BYTES", "8388608"), 8388608))
 	syscollectMaxPackages := parseInt(getEnv("NETWATCH_SYSCOLLECT_MAX_PACKAGES", "50000"), 50000)
 	syscollectHostRoot := strings.TrimSpace(getEnv("NETWATCH_HOST_ROOT", ""))
 
 	vulnEvery := parseDuration(getEnv("NETWATCH_VULN_SCAN_EVERY", "12h"), 12*time.Hour)
+	vulnStartupJitter := parseDuration(getEnv("NETWATCH_VULN_STARTUP_JITTER", "2m"), 2*time.Minute)
 	vulnOSVURL := strings.TrimSpace(getEnv("NETWATCH_VULN_OSV_URL", "https://api.osv.dev"))
 	vulnMinSeverity := strings.ToLower(strings.TrimSpace(getEnv("NETWATCH_VULN_MIN_SEVERITY", "medium")))
 	vulnAnalysisProfile := strings.TrimSpace(getEnv("NETWATCH_VULN_ANALYSIS_PROFILE", "wazuh_like_v1"))
@@ -1228,35 +1266,39 @@ func loadConfig() Config {
 		AgentConfigFile: agentConfigFile,
 		BootstrapToken:  bootstrapToken,
 
-		TLSCAFile:     tlsCAFile,
-		TLSCertFile:   tlsCertFile,
-		TLSKeyFile:    tlsKeyFile,
-		TLSServerName: tlsServerName,
+		TLSCAFile:      tlsCAFile,
+		TLSCertFile:    tlsCertFile,
+		TLSKeyFile:     tlsKeyFile,
+		TLSServerName:  tlsServerName,
 		TLSWaitTimeout: tlsWaitTimeout,
 
-		ControlHeartbeatEvery: controlHeartbeatEvery,
-		ControlConfigEvery:    controlConfigEvery,
-		ControlEnrollTimeout:  controlEnrollTimeout,
-		ForceEnrollOnStart:    forceEnrollOnStart,
+		ControlHeartbeatEvery:  controlHeartbeatEvery,
+		ControlHeartbeatJitter: controlHeartbeatJitter,
+		ControlConfigEvery:     controlConfigEvery,
+		ControlConfigJitter:    controlConfigJitter,
+		ControlEnrollTimeout:   controlEnrollTimeout,
+		ForceEnrollOnStart:     forceEnrollOnStart,
 
 		SyscollectEvery:          syscollectEvery,
+		SyscollectStartupJitter:  syscollectStartupJitter,
 		SyscollectCmdTimeout:     syscollectCmdTimeout,
 		SyscollectMaxOutputBytes: syscollectMaxOutputBytes,
 		SyscollectMaxPackages:    syscollectMaxPackages,
 		SyscollectHostRoot:       syscollectHostRoot,
 
-		VulnScanEvery:         vulnEvery,
-		VulnOSVURL:            vulnOSVURL,
-		VulnMinSeverity:       vulnMinSeverity,
-		VulnAnalysisProfile:   vulnAnalysisProfile,
-		VulnExposureEnabled:   vulnExposureEnabled,
-		VulnQueryBatchSize:    vulnBatch,
-		VulnCmdTimeout:        vulnCmdTimeout,
-		VulnHTTPTimeout:       vulnHTTPTimeout,
-		VulnMaxOutputBytes:    vulnMaxOutputBytes,
-		VulnMaxPackages:       vulnMaxPackages,
-		VulnHostRoot:          vulnHostRoot,
-		VulnEmitSummaryEvent:  vulnEmitSummaryEvent,
+		VulnScanEvery:        vulnEvery,
+		VulnStartupJitter:    vulnStartupJitter,
+		VulnOSVURL:           vulnOSVURL,
+		VulnMinSeverity:      vulnMinSeverity,
+		VulnAnalysisProfile:  vulnAnalysisProfile,
+		VulnExposureEnabled:  vulnExposureEnabled,
+		VulnQueryBatchSize:   vulnBatch,
+		VulnCmdTimeout:       vulnCmdTimeout,
+		VulnHTTPTimeout:      vulnHTTPTimeout,
+		VulnMaxOutputBytes:   vulnMaxOutputBytes,
+		VulnMaxPackages:      vulnMaxPackages,
+		VulnHostRoot:         vulnHostRoot,
+		VulnEmitSummaryEvent: vulnEmitSummaryEvent,
 
 		AuthLogPath:         logPath,
 		AuthIncludeAccepted: includeAccepted,
@@ -1660,11 +1702,17 @@ func waitForTLSMaterial(cfg Config) error {
 func splitCSVLower(s string) []string {
 	parts := strings.Split(s, ",")
 	out := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
 	for _, p := range parts {
 		p = strings.ToLower(strings.TrimSpace(p))
-		if p != "" {
-			out = append(out, p)
+		if p == "" {
+			continue
 		}
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
 	}
 	return out
 }
