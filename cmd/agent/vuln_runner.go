@@ -30,6 +30,7 @@ func (a *Agent) startVulnScanner(ctx context.Context) {
 
 	go func() {
 		lastTriggerToken := ""
+		startupDelayed := false
 		for {
 			cfg := a.runtime.VulnScanner()
 			a.vulnMu.RLock()
@@ -49,6 +50,10 @@ func (a *Agent) startVulnScanner(ctx context.Context) {
 					nextIn = 0
 				} else if lastRun.IsZero() {
 					nextIn = 0
+					if !startupDelayed {
+						nextIn = stableJitter(a.cfg.AgentID, "vuln.startup", a.cfg.VulnStartupJitter)
+						startupDelayed = true
+					}
 				} else {
 					d := cfg.Every - time.Since(lastRun)
 					if d < 0 {
@@ -150,18 +155,18 @@ func (a *Agent) runVulnOnce(ctx context.Context, cfg VulnScannerConfig, forceSca
 
 	if doPkg {
 		pkgFindings, pkgStats, qErr := vuln.QueryOSV(ctx, res.Snapshot.Packages, vuln.OSVOptions{
-			BaseURL:        cfg.OSVURL,
-			Ecosystem:      ecosystem,
-			MinSeverity:    cfg.MinSeverity,
+			BaseURL:         cfg.OSVURL,
+			Ecosystem:       ecosystem,
+			MinSeverity:     cfg.MinSeverity,
 			AnalysisProfile: cfg.AnalysisProfile,
-			Exposure:       exposure,
-			BatchSize:      cfg.QueryBatchSize,
-			HTTPTimeout:    httpTimeout,
-			AssetKey:       assetKey,
-			AssetAgentID:   assetAgentID,
-			TargetLabel:    targetLabel,
-			OS:             res.Snapshot.OS,
-			PackageManager: res.Snapshot.Manager,
+			Exposure:        exposure,
+			BatchSize:       cfg.QueryBatchSize,
+			HTTPTimeout:     httpTimeout,
+			AssetKey:        assetKey,
+			AssetAgentID:    assetAgentID,
+			TargetLabel:     targetLabel,
+			OS:              res.Snapshot.OS,
+			PackageManager:  res.Snapshot.Manager,
 		})
 		if qErr != nil {
 			a.vulnMu.Lock()
@@ -202,27 +207,27 @@ func (a *Agent) runVulnOnce(ctx context.Context, cfg VulnScannerConfig, forceSca
 			StartedAt:   &started,
 			FinishedAt:  &finished,
 			Scope: map[string]interface{}{
-				"type":            "host_packages_inventory",
-				"host_root":       strings.TrimSpace(cfg.HostRoot),
-				"package_manager": res.Snapshot.Manager,
-				"ecosystem":       ecosystem,
-				"packages_hash":   res.Snapshot.PackagesHash,
+				"type":             "host_packages_inventory",
+				"host_root":        strings.TrimSpace(cfg.HostRoot),
+				"package_manager":  res.Snapshot.Manager,
+				"ecosystem":        ecosystem,
+				"packages_hash":    res.Snapshot.PackagesHash,
 				"analysis_profile": cfg.AnalysisProfile,
-				"manual_trigger":  forceScan,
-				"scan_now_token":  strings.TrimSpace(cfg.ScanNowToken),
+				"manual_trigger":   forceScan,
+				"scan_now_token":   strings.TrimSpace(cfg.ScanNowToken),
 			},
 			Config: map[string]interface{}{
-				"min_severity":      cfg.MinSeverity,
-				"query_batch_size":  cfg.QueryBatchSize,
-				"osv_url":           cfg.OSVURL,
-				"analysis_profile":  cfg.AnalysisProfile,
-				"exposure_enabled":  cfg.ExposureEnabled,
-				"manual_trigger":    forceScan,
+				"min_severity":     cfg.MinSeverity,
+				"query_batch_size": cfg.QueryBatchSize,
+				"osv_url":          cfg.OSVURL,
+				"analysis_profile": cfg.AnalysisProfile,
+				"exposure_enabled": cfg.ExposureEnabled,
+				"manual_trigger":   forceScan,
 			},
 			Stats: map[string]interface{}{
-				"queried_packages":  stats.QueriedPackages,
-				"received_vulns":    stats.ReceivedVulns,
-				"emitted_findings":  stats.EmittedFindings,
+				"queried_packages": stats.QueriedPackages,
+				"received_vulns":   stats.ReceivedVulns,
+				"emitted_findings": stats.EmittedFindings,
 			},
 		},
 		Findings: findings,

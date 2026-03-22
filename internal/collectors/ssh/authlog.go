@@ -70,6 +70,20 @@ func NewAuthLogCapturer(agentID string, opts AuthLogOptions) *AuthLogCapturer {
 	}
 }
 
+func ValidateAuthLogReadable(path string) error {
+	p := strings.TrimSpace(path)
+	if p == "" {
+		p = "/var/log/auth.log"
+	}
+
+	f, err := os.Open(p)
+	if err != nil {
+		return fmt.Errorf("authlog %s unreadable: %w", p, err)
+	}
+	_ = f.Close()
+	return nil
+}
+
 func (c *AuthLogCapturer) Capture(now time.Time) ([]model.NetEvent, error) {
 	f, err := os.Open(c.opts.Path)
 	if err != nil {
