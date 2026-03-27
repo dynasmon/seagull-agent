@@ -47,12 +47,12 @@ type Config struct {
 
 	AgentConfigFile string
 	BootstrapToken  string
+	AgentCredential string
+	AgentCredentialExpiresAt string
+	CredentialFile  string
 
-	TLSCAFile      string
-	TLSCertFile    string
-	TLSKeyFile     string
-	TLSServerName  string
-	TLSWaitTimeout time.Duration
+	TLSCAFile     string
+	TLSServerName string
 
 	ControlHeartbeatEvery  time.Duration
 	ControlHeartbeatJitter time.Duration
@@ -60,6 +60,8 @@ type Config struct {
 	ControlConfigJitter    time.Duration
 	ControlEnrollTimeout   time.Duration
 	ForceEnrollOnStart     bool
+	CredentialRotateEvery  time.Duration
+	CredentialRotateBefore time.Duration
 
 	SyscollectEvery          time.Duration
 	SyscollectStartupJitter  time.Duration
@@ -210,6 +212,9 @@ type Agent struct {
 	sender  *sender.Sender
 	cp      *controlplane.Client
 	runtime *RuntimeConfig
+	credMu  sync.RWMutex
+	cred    string
+	credExp time.Time
 
 	sysMu     sync.RWMutex
 	sysStatus SyscollectorStatus
@@ -232,13 +237,8 @@ type Agent struct {
 
 func main() {
 	cfg := loadConfig()
-	if err := waitForTLSMaterial(cfg); err != nil {
-		log.Fatalf("[AGENT] TLS material not ready: %v", err)
-	}
 	httpClient, err := netutil.NewHTTPClient(cfg.HTTPTimeout, netutil.TLSOptions{
 		CAFile:     strings.TrimSpace(cfg.TLSCAFile),
-		CertFile:   strings.TrimSpace(cfg.TLSCertFile),
-		KeyFile:    strings.TrimSpace(cfg.TLSKeyFile),
 		ServerName: strings.TrimSpace(cfg.TLSServerName),
 	})
 	if err != nil {
@@ -263,15 +263,14 @@ func main() {
 		cancel()
 	}
 
-	// Control Plane enrollment with mTLS identity + bootstrap token.
+	// Control Plane enrollment with bootstrap token + rotating credential.
 	{
 		hostname, _ := os.Hostname()
-		cp := controlplane.New(cfg.APIURL, cfg.HTTPTimeout, httpClient)
+		currentCredential := strings.TrimSpace(cfg.AgentCredential)
+		cp := controlplane.New(cfg.APIURL, cfg.HTTPTimeout, cfg.AgentID, func() string { return currentCredential }, httpClient)
 
 		bootstrapToken := strings.TrimSpace(cfg.BootstrapToken)
-
-		mtlsConfigured := strings.TrimSpace(cfg.TLSCertFile) != "" && strings.TrimSpace(cfg.TLSKeyFile) != ""
-		shouldEnroll := bootstrapToken != "" || (cfg.ForceEnrollOnStart && mtlsConfigured)
+		shouldEnroll := bootstrapToken != "" && (cfg.ForceEnrollOnStart || currentCredential == "")
 		if shouldEnroll && bootstrapToken == "" {
 			logJSON(LevelWarn, "agent_enroll_skipped", map[string]interface{}{
 				"agent_id": cfg.AgentID,
@@ -295,6 +294,12 @@ func main() {
 					"error":    err.Error(),
 				})
 			} else {
+				currentCredential = strings.TrimSpace(resp.Credential.Credential)
+				cfg.AgentCredential = currentCredential
+				cfg.AgentCredentialExpiresAt = strings.TrimSpace(resp.Credential.ExpiresAt)
+				if cfg.CredentialFile != "" && currentCredential != "" {
+					_ = atomicWriteFile(cfg.CredentialFile, []byte(currentCredential+"\n"), 0o600)
+				}
 				if cfg.AgentConfigFile != "" && len(resp.Config) > 0 {
 					if b, mErr := json.Marshal(resp.Config); mErr == nil {
 						_ = atomicWriteFile(cfg.AgentConfigFile, b, 0o600)
@@ -321,8 +326,7 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc, http
 
 	a := &Agent{
 		cfg:    cfg,
-		sender: sender.New(cfg.APIURL, cfg.HTTPTimeout, cfg.SenderMaxBatch, httpClient),
-		cp:     controlplane.New(cfg.APIURL, cfg.HTTPTimeout, httpClient),
+		cred:   strings.TrimSpace(cfg.AgentCredential),
 		runtime: NewRuntimeConfig(
 			cfg.AgentConfigFile,
 			SyscollectorConfig{
@@ -356,6 +360,11 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc, http
 			LastSummaryScanTotal:     0,
 			LastSummaryScanEffective: 0,
 		},
+	}
+	a.sender = sender.New(cfg.APIURL, cfg.HTTPTimeout, cfg.SenderMaxBatch, cfg.AgentID, a.currentCredential, httpClient)
+	a.cp = controlplane.New(cfg.APIURL, cfg.HTTPTimeout, cfg.AgentID, a.currentCredential, httpClient)
+	if ts, err := time.Parse(time.RFC3339, strings.TrimSpace(cfg.AgentCredentialExpiresAt)); err == nil {
+		a.credExp = ts.UTC()
 	}
 
 	// Best-effort: pull the current config once at startup.
@@ -606,6 +615,28 @@ func (a *Agent) loop(rootCtx context.Context) {
 	}
 }
 
+func (a *Agent) currentCredential() string {
+	a.credMu.RLock()
+	defer a.credMu.RUnlock()
+	return strings.TrimSpace(a.cred)
+}
+
+func (a *Agent) setCredential(raw string, expiresAt string) {
+	cred := strings.TrimSpace(raw)
+	if cred == "" {
+		return
+	}
+	a.credMu.Lock()
+	a.cred = cred
+	if ts, err := time.Parse(time.RFC3339, strings.TrimSpace(expiresAt)); err == nil {
+		a.credExp = ts.UTC()
+	}
+	a.credMu.Unlock()
+	if a.cfg.CredentialFile != "" {
+		_ = atomicWriteFile(a.cfg.CredentialFile, []byte(cred+"\n"), 0o600)
+	}
+}
+
 func (a *Agent) startControlPlane(rootCtx context.Context) {
 	if a.cp == nil {
 		return
@@ -720,6 +751,39 @@ func (a *Agent) startControlPlane(rootCtx context.Context) {
 			}
 		}
 	}()
+
+	// Credential rotation loop.
+	go func() {
+		t := time.NewTicker(a.cfg.CredentialRotateEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-rootCtx.Done():
+				return
+			case <-t.C:
+				a.credMu.RLock()
+				exp := a.credExp
+				a.credMu.RUnlock()
+				if exp.IsZero() || time.Until(exp) > a.cfg.CredentialRotateBefore {
+					continue
+				}
+				ctx, cancel := context.WithTimeout(rootCtx, a.cfg.ControlEnrollTimeout)
+				rot, err := a.cp.RotateCredential(ctx)
+				cancel()
+				if err != nil {
+					logJSON(LevelWarn, "agent_credential_rotate_failed", map[string]interface{}{
+						"agent_id": a.cfg.AgentID,
+						"error":    err.Error(),
+					})
+					continue
+				}
+				a.setCredential(rot.Credential, rot.ExpiresAt)
+				logJSON(LevelInfo, "agent_credential_rotated", map[string]interface{}{
+					"agent_id": a.cfg.AgentID,
+				})
+			}
+		}
+	}()
 }
 
 func (a *Agent) maybeReEnroll(rootCtx context.Context, errText string, status int) {
@@ -730,7 +794,9 @@ func (a *Agent) maybeReEnroll(rootCtx context.Context, errText string, status in
 	should := status == 401 ||
 		strings.Contains(et, "status=401") ||
 		strings.Contains(et, "unknown or revoked agent") ||
-		strings.Contains(et, "unbound or revoked")
+		strings.Contains(et, "invalid agent credential") ||
+		strings.Contains(et, "credential expired") ||
+		strings.Contains(et, "credential exhausted")
 	if !should {
 		return
 	}
@@ -754,14 +820,6 @@ func (a *Agent) maybeReEnroll(rootCtx context.Context, errText string, status in
 		return
 	}
 
-	if strings.TrimSpace(a.cfg.TLSCertFile) == "" || strings.TrimSpace(a.cfg.TLSKeyFile) == "" {
-		logJSON(LevelWarn, "agent_reenroll_skipped", map[string]interface{}{
-			"agent_id": a.cfg.AgentID,
-			"reason":   "missing_mtls_material",
-		})
-		return
-	}
-
 	hostname, _ := os.Hostname()
 	ctx, cancel := context.WithTimeout(rootCtx, a.cfg.ControlEnrollTimeout)
 	resp, err := a.cp.Enroll(ctx, controlplane.EnrollRequest{
@@ -779,6 +837,7 @@ func (a *Agent) maybeReEnroll(rootCtx context.Context, errText string, status in
 		})
 		return
 	}
+	a.setCredential(resp.Credential.Credential, resp.Credential.ExpiresAt)
 
 	if a.cfg.AgentConfigFile != "" && len(resp.Config) > 0 {
 		if b, mErr := json.Marshal(resp.Config); mErr == nil {
@@ -1143,7 +1202,10 @@ func (a *Agent) maybeHeartbeat() {
 
 func loadConfig() Config {
 	agentID := getEnv("NETWATCH_AGENT_ID", "agent-unknown")
-	apiURL := getEnv("NETWATCH_API_URL", "https://localhost:8443/agent")
+	apiURL := strings.TrimSpace(getEnv("NETWATCH_API_URL", ""))
+	if apiURL == "" {
+		log.Fatal("[AGENT] NETWATCH_API_URL is required")
+	}
 	sources := splitCSVLower(getEnv("NETWATCH_SOURCES", "authlog,proc,scan,ddos"))
 
 	interval := parseDuration(getEnv("NETWATCH_POLL_INTERVAL", "1s"), 1*time.Second)
@@ -1152,12 +1214,14 @@ func loadConfig() Config {
 
 	agentConfigFile := getEnv("NETWATCH_AGENT_CONFIG_FILE", "/var/lib/netwatch/agent.config.json")
 	bootstrapToken := strings.TrimSpace(getSecretEnv("NETWATCH_AGENT_BOOTSTRAP_TOKEN", ""))
+	credentialFile := strings.TrimSpace(getEnv("NETWATCH_AGENT_CREDENTIAL_FILE", "/var/lib/netwatch/agent.credential"))
+	agentCredential := strings.TrimSpace(getSecretEnv("NETWATCH_AGENT_CREDENTIAL", ""))
+	if agentCredential == "" && credentialFile != "" {
+		agentCredential = strings.TrimSpace(readTextFile(credentialFile))
+	}
 
 	tlsCAFile := strings.TrimSpace(getEnv("NETWATCH_TLS_CA_FILE", ""))
-	tlsCertFile := strings.TrimSpace(getEnv("NETWATCH_TLS_CERT_FILE", ""))
-	tlsKeyFile := strings.TrimSpace(getEnv("NETWATCH_TLS_KEY_FILE", ""))
 	tlsServerName := strings.TrimSpace(getEnv("NETWATCH_TLS_SERVER_NAME", ""))
-	tlsWaitTimeout := parseDuration(getEnv("NETWATCH_TLS_WAIT_TIMEOUT", "45s"), 45*time.Second)
 
 	controlHeartbeatEvery := parseDuration(getEnv("NETWATCH_CONTROL_HEARTBEAT_EVERY", "30s"), 30*time.Second)
 	controlHeartbeatJitter := parseDuration(getEnv("NETWATCH_CONTROL_HEARTBEAT_JITTER", "5s"), 5*time.Second)
@@ -1165,6 +1229,8 @@ func loadConfig() Config {
 	controlConfigJitter := parseDuration(getEnv("NETWATCH_CONTROL_CONFIG_JITTER", "30s"), 30*time.Second)
 	controlEnrollTimeout := parseDuration(getEnv("NETWATCH_CONTROL_ENROLL_TIMEOUT", "10s"), 10*time.Second)
 	forceEnrollOnStart := parseBool(getEnv("NETWATCH_FORCE_ENROLL_ON_START", "true"), true)
+	credentialRotateEvery := parseDuration(getEnv("NETWATCH_CONTROL_CREDENTIAL_ROTATE_EVERY", "5m"), 5*time.Minute)
+	credentialRotateBefore := parseDuration(getEnv("NETWATCH_CONTROL_CREDENTIAL_ROTATE_BEFORE", "24h"), 24*time.Hour)
 
 	syscollectEvery := parseDuration(getEnv("NETWATCH_SYSCOLLECT_EVERY", "5m"), 5*time.Minute)
 	syscollectStartupJitter := parseDuration(getEnv("NETWATCH_SYSCOLLECT_STARTUP_JITTER", "45s"), 45*time.Second)
@@ -1273,12 +1339,12 @@ func loadConfig() Config {
 
 		AgentConfigFile: agentConfigFile,
 		BootstrapToken:  bootstrapToken,
+		AgentCredential: agentCredential,
+		AgentCredentialExpiresAt: "",
+		CredentialFile:  credentialFile,
 
-		TLSCAFile:      tlsCAFile,
-		TLSCertFile:    tlsCertFile,
-		TLSKeyFile:     tlsKeyFile,
-		TLSServerName:  tlsServerName,
-		TLSWaitTimeout: tlsWaitTimeout,
+		TLSCAFile:     tlsCAFile,
+		TLSServerName: tlsServerName,
 
 		ControlHeartbeatEvery:  controlHeartbeatEvery,
 		ControlHeartbeatJitter: controlHeartbeatJitter,
@@ -1286,6 +1352,8 @@ func loadConfig() Config {
 		ControlConfigJitter:    controlConfigJitter,
 		ControlEnrollTimeout:   controlEnrollTimeout,
 		ForceEnrollOnStart:     forceEnrollOnStart,
+		CredentialRotateEvery:  credentialRotateEvery,
+		CredentialRotateBefore: credentialRotateBefore,
 
 		SyscollectEvery:          syscollectEvery,
 		SyscollectStartupJitter:  syscollectStartupJitter,
@@ -1667,44 +1735,6 @@ func getSecretEnv(k, def string) string {
 	}
 
 	return def
-}
-
-func waitForTLSMaterial(cfg Config) error {
-	paths := make([]string, 0, 3)
-	ca := strings.TrimSpace(cfg.TLSCAFile)
-	cert := strings.TrimSpace(cfg.TLSCertFile)
-	key := strings.TrimSpace(cfg.TLSKeyFile)
-	if ca != "" {
-		paths = append(paths, ca)
-	}
-	if cert != "" {
-		paths = append(paths, cert)
-	}
-	if key != "" {
-		paths = append(paths, key)
-	}
-
-	if len(paths) == 0 || cfg.TLSWaitTimeout <= 0 {
-		return nil
-	}
-
-	deadline := time.Now().Add(cfg.TLSWaitTimeout)
-	for {
-		missing := ""
-		for _, p := range paths {
-			if _, err := os.Stat(p); err != nil {
-				missing = p
-				break
-			}
-		}
-		if missing == "" {
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("timed out waiting for TLS file %s", missing)
-		}
-		time.Sleep(2 * time.Second)
-	}
 }
 
 func splitCSVLower(s string) []string {

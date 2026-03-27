@@ -12,11 +12,13 @@ import (
 )
 
 type Client struct {
-	baseURL string
-	http    *http.Client
+	baseURL        string
+	http           *http.Client
+	agentID        string
+	credentialFunc func() string
 }
 
-func New(baseURL string, timeout time.Duration, httpClient *http.Client) *Client {
+func New(baseURL string, timeout time.Duration, agentID string, credentialFunc func() string, httpClient *http.Client) *Client {
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
@@ -26,8 +28,10 @@ func New(baseURL string, timeout time.Duration, httpClient *http.Client) *Client
 	}
 	httpClient.Timeout = timeout
 	return &Client{
-		baseURL: baseURL,
-		http:    httpClient,
+		baseURL:        baseURL,
+		http:           httpClient,
+		agentID:        strings.TrimSpace(agentID),
+		credentialFunc: credentialFunc,
 	}
 }
 
@@ -39,9 +43,29 @@ type EnrollRequest struct {
 	BootstrapToken string `json:"-"`
 }
 
+type Credential struct {
+	Credential string `json:"credential"`
+	ExpiresAt  string `json:"expires_at"`
+	MaxUses    int    `json:"max_uses"`
+	UsedUses   int    `json:"used_uses"`
+}
+
 type EnrollResponse struct {
-	AgentID string                 `json:"agent_id"`
-	Config  map[string]interface{} `json:"config"`
+	AgentID    string                 `json:"agent_id"`
+	Config     map[string]interface{} `json:"config"`
+	Credential Credential             `json:"credential"`
+}
+
+func (c *Client) applyAuthHeaders(req *http.Request) {
+	if c.agentID != "" {
+		req.Header.Set("X-Agent-ID", c.agentID)
+	}
+	if c.credentialFunc == nil {
+		return
+	}
+	if cred := strings.TrimSpace(c.credentialFunc()); cred != "" {
+		req.Header.Set("X-Agent-Credential", cred)
+	}
 }
 
 func (c *Client) Enroll(ctx context.Context, req EnrollRequest) (EnrollResponse, error) {
@@ -61,6 +85,7 @@ func (c *Client) Enroll(ctx context.Context, req EnrollRequest) (EnrollResponse,
 		return out, fmt.Errorf("new enroll request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-Agent-ID", strings.TrimSpace(req.AgentID))
 	if bootstrapToken := strings.TrimSpace(req.BootstrapToken); bootstrapToken != "" {
 		httpReq.Header.Set("X-Agent-Bootstrap-Token", bootstrapToken)
 	}
@@ -106,6 +131,7 @@ func (c *Client) Heartbeat(ctx context.Context, hb HeartbeatRequest) error {
 		return fmt.Errorf("new heartbeat request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	c.applyAuthHeaders(httpReq)
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
@@ -130,6 +156,7 @@ func (c *Client) GetConfig(ctx context.Context) (map[string]interface{}, error) 
 	if err != nil {
 		return nil, fmt.Errorf("new config request: %w", err)
 	}
+	c.applyAuthHeaders(httpReq)
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
@@ -151,6 +178,35 @@ func (c *Client) GetConfig(ctx context.Context) (map[string]interface{}, error) 
 	}
 	if out == nil {
 		out = map[string]interface{}{}
+	}
+	return out, nil
+}
+
+func (c *Client) RotateCredential(ctx context.Context) (Credential, error) {
+	var out Credential
+	if c.baseURL == "" {
+		return out, fmt.Errorf("controlplane baseURL is empty")
+	}
+
+	u := c.baseURL + "/agents/credential/rotate"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, u, nil)
+	if err != nil {
+		return out, fmt.Errorf("new rotate request: %w", err)
+	}
+	c.applyAuthHeaders(httpReq)
+
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return out, fmt.Errorf("rotate credential request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return out, fmt.Errorf("rotate credential failed status=%d body=%s", resp.StatusCode, string(body))
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return out, fmt.Errorf("unmarshal rotate response: %w", err)
 	}
 	return out, nil
 }
