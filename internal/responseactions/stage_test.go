@@ -70,3 +70,36 @@ func TestStageBoundedCapacity(t *testing.T) {
 		t.Fatalf("expected pending=2, got %d", got.Pending)
 	}
 }
+
+func TestStageIgnoresHandledIDs(t *testing.T) {
+	stage := NewStage(8)
+	now := time.Now().UTC()
+
+	stage.MarkHandled(777)
+	got := stage.Stage(now, []controlplane.ResponseAction{
+		{ID: 777, ActionType: "collect_triage_bundle", AgentID: "agent-1", Status: "pending", RequestedAt: now},
+	}, "agent-1")
+	if got.Added != 0 || got.Ignored != 1 {
+		t.Fatalf("unexpected stage result: %+v", got)
+	}
+}
+
+func TestStageNextSkipsExpiredAndMismatched(t *testing.T) {
+	stage := NewStage(8)
+	now := time.Now().UTC()
+	expired := now.Add(-1 * time.Minute)
+
+	stage.Stage(now, []controlplane.ResponseAction{
+		{ID: 1, ActionType: "collect_triage_bundle", AgentID: "other", Status: "pending", RequestedAt: now},
+		{ID: 2, ActionType: "collect_triage_bundle", AgentID: "agent-1", Status: "pending", RequestedAt: now, ExpiresAt: &expired},
+		{ID: 3, ActionType: "collect_triage_bundle", AgentID: "agent-1", Status: "pending", RequestedAt: now},
+	}, "")
+
+	next, ok := stage.Next(now, "agent-1")
+	if !ok {
+		t.Fatalf("expected one eligible action")
+	}
+	if next.Action.ID != 3 {
+		t.Fatalf("expected action id=3, got %d", next.Action.ID)
+	}
+}

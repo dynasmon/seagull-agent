@@ -229,6 +229,16 @@ type responseActionListEnvelope struct {
 	Actions []ResponseAction `json:"actions"`
 }
 
+type ResponseActionExecutionResult struct {
+	ResponseActionID int64                  `json:"response_action_id"`
+	AgentID          string                 `json:"agent_id,omitempty"`
+	Status           string                 `json:"status"`
+	ResultPayload    map[string]interface{} `json:"result_payload,omitempty"`
+	Error            string                 `json:"error,omitempty"`
+	StartedAt        *time.Time             `json:"started_at,omitempty"`
+	FinishedAt       *time.Time             `json:"finished_at,omitempty"`
+}
+
 func (c *Client) ListPendingResponseActions(ctx context.Context) ([]ResponseAction, error) {
 	if c.baseURL == "" {
 		return nil, fmt.Errorf("controlplane baseURL is empty")
@@ -350,4 +360,58 @@ func normalizeResponseAction(a *ResponseAction) error {
 		a.Payload = json.RawMessage(`{}`)
 	}
 	return nil
+}
+
+func (c *Client) ReportResponseActionResult(ctx context.Context, in ResponseActionExecutionResult) error {
+	if c.baseURL == "" {
+		return fmt.Errorf("controlplane baseURL is empty")
+	}
+	if in.ResponseActionID <= 0 {
+		return fmt.Errorf("invalid response_action_id")
+	}
+	in.Status = strings.ToLower(strings.TrimSpace(in.Status))
+	if in.Status == "" {
+		return fmt.Errorf("status is required")
+	}
+
+	payload, err := json.Marshal(in)
+	if err != nil {
+		return fmt.Errorf("marshal response action result: %w", err)
+	}
+
+	paths := []string{
+		"/agents/response-actions/results",
+		"/agents/response/actions/results",
+	}
+	var lastErr error
+	for _, path := range paths {
+		u := c.baseURL + path
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(payload))
+		if err != nil {
+			return fmt.Errorf("new response action result request: %w", err)
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		c.applyAuthHeaders(httpReq)
+
+		resp, err := c.http.Do(httpReq)
+		if err != nil {
+			return fmt.Errorf("response action result request: %w", err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return nil
+		}
+		err = fmt.Errorf("response action result failed status=%d body=%s", resp.StatusCode, string(body))
+		if resp.StatusCode == http.StatusNotFound {
+			lastErr = err
+			continue
+		}
+		return err
+	}
+	if lastErr != nil {
+		return lastErr
+	}
+	return fmt.Errorf("response action result failed")
 }
