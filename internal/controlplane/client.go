@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -209,4 +210,144 @@ func (c *Client) RotateCredential(ctx context.Context) (Credential, error) {
 		return out, fmt.Errorf("unmarshal rotate response: %w", err)
 	}
 	return out, nil
+}
+
+var ErrInvalidResponseAction = errors.New("invalid response action")
+
+type ResponseAction struct {
+	ID          int64           `json:"id"`
+	ActionType  string          `json:"action_type"`
+	AgentID     string          `json:"agent_id"`
+	Status      string          `json:"status"`
+	Payload     json.RawMessage `json:"payload"`
+	RequestedAt time.Time       `json:"requested_at"`
+	ExpiresAt   *time.Time      `json:"expires_at,omitempty"`
+}
+
+type responseActionListEnvelope struct {
+	Items   []ResponseAction `json:"items"`
+	Actions []ResponseAction `json:"actions"`
+}
+
+func (c *Client) ListPendingResponseActions(ctx context.Context) ([]ResponseAction, error) {
+	if c.baseURL == "" {
+		return nil, fmt.Errorf("controlplane baseURL is empty")
+	}
+	paths := []string{
+		"/agents/response-actions/pending",
+		"/agents/response/actions/pending",
+	}
+
+	var lastErr error
+	for _, path := range paths {
+		out, err := c.listPendingResponseActionsPath(ctx, path)
+		if err == nil {
+			return out, nil
+		}
+		if strings.Contains(err.Error(), "status=404") {
+			lastErr = err
+			continue
+		}
+		return nil, err
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return []ResponseAction{}, nil
+}
+
+func (c *Client) listPendingResponseActionsPath(ctx context.Context, path string) ([]ResponseAction, error) {
+	u := c.baseURL + path
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("new response actions request: %w", err)
+	}
+	c.applyAuthHeaders(httpReq)
+
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("response actions request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusNoContent {
+		return []ResponseAction{}, nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("response actions failed status=%d body=%s", resp.StatusCode, string(body))
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		return []ResponseAction{}, nil
+	}
+
+	actions, err := decodeResponseActions(body)
+	if err != nil {
+		return nil, err
+	}
+	for i := range actions {
+		if err := normalizeResponseAction(&actions[i]); err != nil {
+			return nil, fmt.Errorf("decode response action: %w", err)
+		}
+	}
+	return actions, nil
+}
+
+func decodeResponseActions(body []byte) ([]ResponseAction, error) {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return []ResponseAction{}, nil
+	}
+
+	if trimmed[0] == '[' {
+		var out []ResponseAction
+		if err := json.Unmarshal(trimmed, &out); err != nil {
+			return nil, fmt.Errorf("unmarshal response actions array: %w", err)
+		}
+		if out == nil {
+			out = []ResponseAction{}
+		}
+		return out, nil
+	}
+
+	var env responseActionListEnvelope
+	if err := json.Unmarshal(trimmed, &env); err != nil {
+		return nil, fmt.Errorf("unmarshal response actions envelope: %w", err)
+	}
+	if env.Items != nil {
+		return env.Items, nil
+	}
+	if env.Actions != nil {
+		return env.Actions, nil
+	}
+	return []ResponseAction{}, nil
+}
+
+func normalizeResponseAction(a *ResponseAction) error {
+	if a == nil {
+		return fmt.Errorf("%w: nil action", ErrInvalidResponseAction)
+	}
+	a.ActionType = strings.ToLower(strings.TrimSpace(a.ActionType))
+	a.AgentID = strings.TrimSpace(a.AgentID)
+	a.Status = strings.ToLower(strings.TrimSpace(a.Status))
+
+	if a.ID <= 0 {
+		return fmt.Errorf("%w: invalid id", ErrInvalidResponseAction)
+	}
+	if a.ActionType == "" {
+		return fmt.Errorf("%w: empty action_type", ErrInvalidResponseAction)
+	}
+	if a.AgentID == "" {
+		return fmt.Errorf("%w: empty agent_id", ErrInvalidResponseAction)
+	}
+	if a.Status == "" {
+		return fmt.Errorf("%w: empty status", ErrInvalidResponseAction)
+	}
+	if a.RequestedAt.IsZero() {
+		return fmt.Errorf("%w: empty requested_at", ErrInvalidResponseAction)
+	}
+	if len(bytes.TrimSpace(a.Payload)) == 0 {
+		a.Payload = json.RawMessage(`{}`)
+	}
+	return nil
 }

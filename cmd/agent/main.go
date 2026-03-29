@@ -25,6 +25,7 @@ import (
 	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/controlplane"
 	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/model"
 	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/netutil"
+	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/responseactions"
 	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/sender"
 )
 
@@ -58,10 +59,13 @@ type Config struct {
 	ControlHeartbeatJitter time.Duration
 	ControlConfigEvery     time.Duration
 	ControlConfigJitter    time.Duration
+	ControlResponsePollEvery  time.Duration
+	ControlResponsePollJitter time.Duration
 	ControlEnrollTimeout   time.Duration
 	ForceEnrollOnStart     bool
 	CredentialRotateEvery  time.Duration
 	CredentialRotateBefore time.Duration
+	ResponseActionStageMax int
 
 	SyscollectEvery          time.Duration
 	SyscollectStartupJitter  time.Duration
@@ -195,6 +199,8 @@ type SummaryState struct {
 
 	SendAttemptsTotal int
 	SendErrorsTotal   int
+	ResponseActionPollErrorsTotal int
+	ResponseActionsStagedTotal    int
 
 	LastHTTPStatus int
 	LastError      string
@@ -228,6 +234,8 @@ type Agent struct {
 
 	vulnMu     sync.RWMutex
 	vulnStatus VulnScannerStatus
+
+	responseStage *responseactions.Stage
 
 	state SummaryState
 
@@ -327,6 +335,7 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc, http
 	a := &Agent{
 		cfg:    cfg,
 		cred:   strings.TrimSpace(cfg.AgentCredential),
+		responseStage: responseactions.NewStage(cfg.ResponseActionStageMax),
 		runtime: NewRuntimeConfig(
 			cfg.AgentConfigFile,
 			SyscollectorConfig{
@@ -637,6 +646,22 @@ func (a *Agent) setCredential(raw string, expiresAt string) {
 	}
 }
 
+func (a *Agent) stageResponseActions(actions []controlplane.ResponseAction) responseactions.StageResult {
+	if a.responseStage == nil {
+		a.responseStage = responseactions.NewStage(a.cfg.ResponseActionStageMax)
+	}
+	out := a.responseStage.Stage(time.Now().UTC(), actions, a.cfg.AgentID)
+	a.state.ResponseActionsStagedTotal += out.Added
+	return out
+}
+
+func (a *Agent) pendingResponseActions() int {
+	if a.responseStage == nil {
+		return 0
+	}
+	return a.responseStage.PendingCount()
+}
+
 func (a *Agent) startControlPlane(rootCtx context.Context) {
 	if a.cp == nil {
 		return
@@ -674,6 +699,8 @@ func (a *Agent) startControlPlane(rootCtx context.Context) {
 				if a.runtime != nil {
 					metrics["config_hash"] = a.runtime.Hash()
 				}
+				metrics["response_actions_pending"] = a.pendingResponseActions()
+				metrics["response_actions_poll_errors_total"] = a.state.ResponseActionPollErrorsTotal
 				if contains(a.cfg.Sources, "syscollector") {
 					a.sysMu.RLock()
 					s := a.sysStatus
@@ -751,6 +778,38 @@ func (a *Agent) startControlPlane(rootCtx context.Context) {
 			}
 		}
 	}()
+
+	responseactions.StartPolling(rootCtx, responseactions.PollerConfig{
+		AgentID: a.cfg.AgentID,
+		Every:   a.cfg.ControlResponsePollEvery,
+		Jitter:  a.cfg.ControlResponsePollJitter,
+		Timeout: a.cfg.HTTPTimeout,
+	}, responseactions.PollerDeps{
+		Fetch: func(ctx context.Context) ([]controlplane.ResponseAction, error) {
+			return a.cp.ListPendingResponseActions(ctx)
+		},
+		Stage: a.stageResponseActions,
+		OnError: func(err error) {
+			a.state.ResponseActionPollErrorsTotal++
+			logJSON(LevelWarn, "controlplane_response_actions_poll_error", map[string]interface{}{
+				"agent_id": a.cfg.AgentID,
+				"error":    err.Error(),
+			})
+			a.maybeReEnroll(rootCtx, err.Error(), 0)
+		},
+		OnStaged: func(fetched int, result responseactions.StageResult) {
+			if result.Added > 0 || result.Dropped > 0 {
+				logJSON(LevelInfo, "response_actions_staged", map[string]interface{}{
+					"agent_id": a.cfg.AgentID,
+					"fetched":  fetched,
+					"added":    result.Added,
+					"ignored":  result.Ignored,
+					"dropped":  result.Dropped,
+					"pending":  result.Pending,
+				})
+			}
+		},
+	})
 
 	// Credential rotation loop.
 	go func() {
@@ -1175,6 +1234,8 @@ func (a *Agent) flushSummary() {
 
 		"send_attempts_total": a.state.SendAttemptsTotal,
 		"send_errors_total":   a.state.SendErrorsTotal,
+		"response_actions_staged_total":      a.state.ResponseActionsStagedTotal,
+		"response_actions_poll_errors_total": a.state.ResponseActionPollErrorsTotal,
 		"last_http_status":    a.state.LastHTTPStatus,
 		"last_error":          a.state.LastError,
 	})
@@ -1227,10 +1288,13 @@ func loadConfig() Config {
 	controlHeartbeatJitter := parseDuration(getEnv("NETWATCH_CONTROL_HEARTBEAT_JITTER", "5s"), 5*time.Second)
 	controlConfigEvery := parseDuration(getEnv("NETWATCH_CONTROL_CONFIG_EVERY", "5m"), 5*time.Minute)
 	controlConfigJitter := parseDuration(getEnv("NETWATCH_CONTROL_CONFIG_JITTER", "30s"), 30*time.Second)
+	controlResponsePollEvery := parseDuration(getEnv("NETWATCH_CONTROL_RESPONSE_ACTIONS_POLL_EVERY", "15s"), 15*time.Second)
+	controlResponsePollJitter := parseDuration(getEnv("NETWATCH_CONTROL_RESPONSE_ACTIONS_POLL_JITTER", "5s"), 5*time.Second)
 	controlEnrollTimeout := parseDuration(getEnv("NETWATCH_CONTROL_ENROLL_TIMEOUT", "10s"), 10*time.Second)
 	forceEnrollOnStart := parseBool(getEnv("NETWATCH_FORCE_ENROLL_ON_START", "true"), true)
 	credentialRotateEvery := parseDuration(getEnv("NETWATCH_CONTROL_CREDENTIAL_ROTATE_EVERY", "5m"), 5*time.Minute)
 	credentialRotateBefore := parseDuration(getEnv("NETWATCH_CONTROL_CREDENTIAL_ROTATE_BEFORE", "24h"), 24*time.Hour)
+	responseActionStageMax := parseInt(getEnv("NETWATCH_RESPONSE_ACTION_STAGE_MAX", "512"), 512)
 
 	syscollectEvery := parseDuration(getEnv("NETWATCH_SYSCOLLECT_EVERY", "5m"), 5*time.Minute)
 	syscollectStartupJitter := parseDuration(getEnv("NETWATCH_SYSCOLLECT_STARTUP_JITTER", "45s"), 45*time.Second)
@@ -1350,10 +1414,13 @@ func loadConfig() Config {
 		ControlHeartbeatJitter: controlHeartbeatJitter,
 		ControlConfigEvery:     controlConfigEvery,
 		ControlConfigJitter:    controlConfigJitter,
+		ControlResponsePollEvery:  controlResponsePollEvery,
+		ControlResponsePollJitter: controlResponsePollJitter,
 		ControlEnrollTimeout:   controlEnrollTimeout,
 		ForceEnrollOnStart:     forceEnrollOnStart,
 		CredentialRotateEvery:  credentialRotateEvery,
 		CredentialRotateBefore: credentialRotateBefore,
+		ResponseActionStageMax: responseActionStageMax,
 
 		SyscollectEvery:          syscollectEvery,
 		SyscollectStartupJitter:  syscollectStartupJitter,
