@@ -662,6 +662,68 @@ func (a *Agent) pendingResponseActions() int {
 	return a.responseStage.PendingCount()
 }
 
+func (a *Agent) startResponseActionExecutor(rootCtx context.Context) {
+	if a.responseStage == nil || a.cp == nil {
+		return
+	}
+	go func() {
+		t := time.NewTicker(1 * time.Second)
+		defer t.Stop()
+
+		for {
+			select {
+			case <-rootCtx.Done():
+				return
+			case <-t.C:
+				for i := 0; i < 8; i++ {
+					staged, ok := a.responseStage.Next(time.Now().UTC(), a.cfg.AgentID)
+					if !ok {
+						break
+					}
+
+					now := time.Now().UTC()
+					execRes := responseactions.Execute(staged.Action, responseactions.ExecuteOptions{
+						ExpectedAgentID: a.cfg.AgentID,
+						AgentID:         a.cfg.AgentID,
+						BuildVersion:    "0.1.0",
+						Now:             now,
+					})
+					a.responseStage.MarkHandled(staged.Action.ID)
+
+					result := controlplane.ResponseActionExecutionResult{
+						ResponseActionID: staged.Action.ID,
+						AgentID:          a.cfg.AgentID,
+						Status:           execRes.Status,
+						ResultPayload:    execRes.Result,
+						Error:            execRes.Error,
+						StartedAt:        &execRes.StartedAt,
+						FinishedAt:       &execRes.FinishedAt,
+					}
+					ctx, cancel := context.WithTimeout(rootCtx, a.cfg.HTTPTimeout)
+					err := a.cp.ReportResponseActionResult(ctx, result)
+					cancel()
+					if err != nil {
+						logJSON(LevelWarn, "response_action_report_failed", map[string]interface{}{
+							"agent_id":  a.cfg.AgentID,
+							"action_id": staged.Action.ID,
+							"status":    execRes.Status,
+							"error":     err.Error(),
+						})
+						a.maybeReEnroll(rootCtx, err.Error(), 0)
+						continue
+					}
+					logJSON(LevelInfo, "response_action_executed", map[string]interface{}{
+						"agent_id":  a.cfg.AgentID,
+						"action_id": staged.Action.ID,
+						"type":      staged.Action.ActionType,
+						"status":    execRes.Status,
+					})
+				}
+			}
+		}
+	}()
+}
+
 func (a *Agent) startControlPlane(rootCtx context.Context) {
 	if a.cp == nil {
 		return
@@ -810,6 +872,7 @@ func (a *Agent) startControlPlane(rootCtx context.Context) {
 			}
 		},
 	})
+	a.startResponseActionExecutor(rootCtx)
 
 	// Credential rotation loop.
 	go func() {

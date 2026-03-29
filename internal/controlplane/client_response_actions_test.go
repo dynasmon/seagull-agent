@@ -81,3 +81,64 @@ func TestListPendingResponseActionsRejectsMalformedAction(t *testing.T) {
 		t.Fatalf("expected validation error")
 	}
 }
+
+func TestReportResponseActionResultOK(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/agents/response-actions/results" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.Method != http.MethodPost {
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+		if got := strings.TrimSpace(r.Header.Get("X-Agent-ID")); got != "agent-1" {
+			t.Fatalf("unexpected X-Agent-ID: %q", got)
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer ts.Close()
+
+	c := New(ts.URL, 5*time.Second, "agent-1", func() string { return "cred-1" }, ts.Client())
+	now := time.Now().UTC().Truncate(time.Second)
+	err := c.ReportResponseActionResult(context.Background(), ResponseActionExecutionResult{
+		ResponseActionID: 12,
+		AgentID:          "agent-1",
+		Status:           "success",
+		ResultPayload:    map[string]interface{}{"ok": true},
+		StartedAt:        &now,
+		FinishedAt:       &now,
+	})
+	if err != nil {
+		t.Fatalf("ReportResponseActionResult error: %v", err)
+	}
+}
+
+func TestReportResponseActionResultFallbackPath(t *testing.T) {
+	var firstPathSeen bool
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/agents/response-actions/results" {
+			firstPathSeen = true
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.URL.Path == "/agents/response/actions/results" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer ts.Close()
+
+	c := New(ts.URL, 5*time.Second, "agent-1", nil, ts.Client())
+	err := c.ReportResponseActionResult(context.Background(), ResponseActionExecutionResult{
+		ResponseActionID: 13,
+		Status:           "failed",
+		Error:            "x",
+	})
+	if err != nil {
+		t.Fatalf("ReportResponseActionResult error: %v", err)
+	}
+	if !firstPathSeen {
+		t.Fatalf("expected primary path attempt before fallback")
+	}
+}
