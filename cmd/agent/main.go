@@ -713,6 +713,19 @@ func (a *Agent) startResponseActionExecutor(rootCtx context.Context) {
 						BuildVersion:    "0.1.0",
 						EffectiveConfig: a.runtime.Raw(),
 						ModuleStates:    modules,
+						RefreshRuntimeConfig: func() (bool, int, string, error) {
+							ctxCfg, cancelCfg := context.WithTimeout(rootCtx, a.cfg.HTTPTimeout)
+							cfg, err := a.cp.GetConfig(ctxCfg)
+							cancelCfg()
+							if err != nil {
+								return false, 0, "", err
+							}
+							if a.runtime == nil {
+								return false, len(cfg), "", nil
+							}
+							changed, _ := a.runtime.Apply(cfg)
+							return changed, len(cfg), a.runtime.Hash(), nil
+						},
 						AgentStartedAt:  a.state.StartedAt,
 						Now:             now,
 					})

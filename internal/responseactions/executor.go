@@ -23,6 +23,7 @@ type ExecuteOptions struct {
 	BuildVersion    string
 	EffectiveConfig map[string]interface{}
 	ModuleStates    map[string]interface{}
+	RefreshRuntimeConfig func() (changed bool, configKeys int, configHash string, err error)
 	AgentStartedAt  time.Time
 	Now             time.Time
 }
@@ -55,6 +56,13 @@ type triageBundleOptions struct {
 	}
 	Redaction struct {
 		MaskSecrets bool
+	}
+}
+
+type inventorySnapshotOptions struct {
+	Limits struct {
+		MaxProcesses   int
+		MaxConnections int
 	}
 }
 
@@ -94,10 +102,120 @@ func Execute(action controlplane.ResponseAction, opts ExecuteOptions) ExecuteRes
 		out.Result = result
 		out.Error = ""
 		return out
+	case "refresh_runtime_config":
+		result, err := runRefreshRuntimeConfig(action, opts, now)
+		if err != nil {
+			out.Error = err.Error()
+			return out
+		}
+		out.Status = "success"
+		out.Result = result
+		out.Error = ""
+		return out
+	case "trigger_inventory_snapshot":
+		result, err := buildInventorySnapshot(action, opts, now)
+		if err != nil {
+			out.Error = err.Error()
+			return out
+		}
+		out.Status = "success"
+		out.Result = result
+		out.Error = ""
+		return out
 	default:
 		out.Error = fmt.Sprintf("unsupported action_type: %s", strings.TrimSpace(action.ActionType))
 		return out
 	}
+}
+
+func runRefreshRuntimeConfig(action controlplane.ResponseAction, opts ExecuteOptions, now time.Time) (map[string]interface{}, error) {
+	if opts.RefreshRuntimeConfig == nil {
+		return nil, fmt.Errorf("refresh_runtime_config is not available")
+	}
+	changed, configKeys, configHash, err := opts.RefreshRuntimeConfig()
+	if err != nil {
+		return nil, fmt.Errorf("refresh runtime config failed: %w", err)
+	}
+	out := map[string]interface{}{
+		"schema_version": "v1",
+		"refreshed_at":   now.UTC().Format(time.RFC3339),
+		"changed":        changed,
+		"config_keys":    configKeys,
+		"config_hash":    strings.TrimSpace(configHash),
+		"action":         actionMeta(action),
+	}
+	if strings.TrimSpace(opts.BuildVersion) != "" {
+		out["agent_version"] = strings.TrimSpace(opts.BuildVersion)
+	}
+	return out, nil
+}
+
+func buildInventorySnapshot(action controlplane.ResponseAction, opts ExecuteOptions, now time.Time) (map[string]interface{}, error) {
+	snapshotOpts, err := parseInventorySnapshotOptions(action.Payload)
+	if err != nil {
+		return nil, err
+	}
+
+	hostname, err := os.Hostname()
+	if err != nil {
+		hostname = ""
+	}
+	interfaces, _ := net.Interfaces()
+
+	runtimeMeta := map[string]interface{}{
+		"pid":           os.Getpid(),
+		"goos":          runtime.GOOS,
+		"goarch":        runtime.GOARCH,
+		"go_version":    runtime.Version(),
+		"gomaxprocs":    runtime.GOMAXPROCS(0),
+		"num_cpu":       runtime.NumCPU(),
+		"num_goroutine": runtime.NumGoroutine(),
+	}
+	out := map[string]interface{}{
+		"schema_version": "v1",
+		"collected_at":   now.UTC().Format(time.RFC3339),
+		"agent_id":       strings.TrimSpace(opts.AgentID),
+		"hostname":       hostname,
+		"action":         actionMeta(action),
+		"requested": map[string]interface{}{
+			"limits": map[string]interface{}{
+				"max_processes":   snapshotOpts.Limits.MaxProcesses,
+				"max_connections": snapshotOpts.Limits.MaxConnections,
+			},
+		},
+		"runtime":   runtimeMeta,
+		"host":      collectHostSnapshot(hostname, interfaces),
+		"processes": collectProcessSnapshot(snapshotOpts.Limits.MaxProcesses),
+		"network":   collectNetworkSnapshot(snapshotOpts.Limits.MaxConnections, interfaces),
+	}
+	if strings.TrimSpace(opts.BuildVersion) != "" {
+		out["agent_version"] = strings.TrimSpace(opts.BuildVersion)
+	}
+	if !opts.AgentStartedAt.IsZero() {
+		out["agent_uptime_seconds"] = int(now.Sub(opts.AgentStartedAt.UTC()).Seconds())
+	}
+
+	modules := map[string]interface{}{}
+	for k, v := range opts.ModuleStates {
+		modules[k] = v
+	}
+	out["modules"] = modules
+	return out, nil
+}
+
+func actionMeta(action controlplane.ResponseAction) map[string]interface{} {
+	out := map[string]interface{}{
+		"id":           action.ID,
+		"action_type":  action.ActionType,
+		"agent_id":     action.AgentID,
+		"status":       action.Status,
+		"requested_at": action.RequestedAt.UTC().Format(time.RFC3339),
+		"expires_at":   nil,
+	}
+	if action.ExpiresAt != nil {
+		out["expires_at"] = action.ExpiresAt.UTC().Format(time.RFC3339)
+	}
+	return out
 }
 
 func buildTriageBundle(action controlplane.ResponseAction, opts ExecuteOptions, now time.Time) (map[string]interface{}, error) {
@@ -113,18 +231,6 @@ func buildTriageBundle(action controlplane.ResponseAction, opts ExecuteOptions, 
 
 	interfaces, _ := net.Interfaces()
 
-	actionMeta := map[string]interface{}{
-		"id":           action.ID,
-		"action_type":  action.ActionType,
-		"agent_id":     action.AgentID,
-		"status":       action.Status,
-		"requested_at": action.RequestedAt.UTC().Format(time.RFC3339),
-		"expires_at":   nil,
-	}
-	if action.ExpiresAt != nil {
-		actionMeta["expires_at"] = action.ExpiresAt.UTC().Format(time.RFC3339)
-	}
-
 	runtimeMeta := map[string]interface{}{
 		"pid":         os.Getpid(),
 		"goos":        runtime.GOOS,
@@ -139,7 +245,7 @@ func buildTriageBundle(action controlplane.ResponseAction, opts ExecuteOptions, 
 		"schema_version": "v2",
 		"collected_at":   now.UTC().Format(time.RFC3339),
 		"agent_id":       strings.TrimSpace(opts.AgentID),
-		"action":         actionMeta,
+		"action":         actionMeta(action),
 		"requested": map[string]interface{}{
 			"collectors": map[string]interface{}{
 				"runtime":          bundleOpts.Collectors.Runtime,
@@ -296,6 +402,34 @@ func parseTriageBundleOptions(raw json.RawMessage) (triageBundleOptions, error) 
 	}
 	if payload.Limits.MaxEventCount != nil {
 		out.Limits.MaxEventCount = clamp(*payload.Limits.MaxEventCount, 10, 5000)
+	}
+	return out, nil
+}
+
+func parseInventorySnapshotOptions(raw json.RawMessage) (inventorySnapshotOptions, error) {
+	out := inventorySnapshotOptions{}
+	out.Limits.MaxProcesses = 200
+	out.Limits.MaxConnections = 200
+
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return out, nil
+	}
+
+	var payload struct {
+		Limits struct {
+			MaxProcesses   *int `json:"max_processes"`
+			MaxConnections *int `json:"max_connections"`
+		} `json:"limits"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return out, fmt.Errorf("invalid payload JSON: %w", err)
+	}
+	if payload.Limits.MaxProcesses != nil {
+		out.Limits.MaxProcesses = clamp(*payload.Limits.MaxProcesses, 10, 2000)
+	}
+	if payload.Limits.MaxConnections != nil {
+		out.Limits.MaxConnections = clamp(*payload.Limits.MaxConnections, 10, 2000)
 	}
 	return out, nil
 }
