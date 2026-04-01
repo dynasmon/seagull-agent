@@ -682,10 +682,38 @@ func (a *Agent) startResponseActionExecutor(rootCtx context.Context) {
 					}
 
 					now := time.Now().UTC()
+					runningResult := controlplane.ResponseActionExecutionResult{
+						ResponseActionID: staged.Action.ID,
+						AgentID:          a.cfg.AgentID,
+						Status:           "running",
+						StartedAt:        &now,
+					}
+					{
+						ctx, cancel := context.WithTimeout(rootCtx, a.cfg.HTTPTimeout)
+						err := a.cp.ReportResponseActionResult(ctx, runningResult)
+						cancel()
+						if err != nil {
+							logJSON(LevelWarn, "response_action_running_report_failed", map[string]interface{}{
+								"agent_id":  a.cfg.AgentID,
+								"action_id": staged.Action.ID,
+								"error":     err.Error(),
+							})
+							a.maybeReEnroll(rootCtx, err.Error(), 0)
+							continue
+						}
+					}
+
+					modules := map[string]interface{}{}
+					for _, src := range a.cfg.Sources {
+						modules[strings.TrimSpace(src)] = true
+					}
 					execRes := responseactions.Execute(staged.Action, responseactions.ExecuteOptions{
 						ExpectedAgentID: a.cfg.AgentID,
 						AgentID:         a.cfg.AgentID,
 						BuildVersion:    "0.1.0",
+						EffectiveConfig: a.runtime.Raw(),
+						ModuleStates:    modules,
+						AgentStartedAt:  a.state.StartedAt,
 						Now:             now,
 					})
 					a.responseStage.MarkHandled(staged.Action.ID)
