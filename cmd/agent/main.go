@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -48,11 +49,14 @@ type Config struct {
 
 	AgentConfigFile string
 	BootstrapToken  string
+	BootstrapTokenFile string
 	AgentCredential string
 	AgentCredentialExpiresAt string
 	CredentialFile  string
 
 	TLSCAFile     string
+	TLSCertFile   string
+	TLSKeyFile    string
 	TLSServerName string
 
 	ControlHeartbeatEvery  time.Duration
@@ -247,6 +251,8 @@ func main() {
 	cfg := loadConfig()
 	httpClient, err := netutil.NewHTTPClient(cfg.HTTPTimeout, netutil.TLSOptions{
 		CAFile:     strings.TrimSpace(cfg.TLSCAFile),
+		CertFile:   strings.TrimSpace(cfg.TLSCertFile),
+		KeyFile:    strings.TrimSpace(cfg.TLSKeyFile),
 		ServerName: strings.TrimSpace(cfg.TLSServerName),
 	})
 	if err != nil {
@@ -312,6 +318,9 @@ func main() {
 					if b, mErr := json.Marshal(resp.Config); mErr == nil {
 						_ = atomicWriteFile(cfg.AgentConfigFile, b, 0o600)
 					}
+				}
+				if cfg.BootstrapTokenFile != "" {
+					consumeBootstrapTokenFile(cfg.BootstrapTokenFile, cfg.AgentID)
 				}
 			}
 		}
@@ -974,7 +983,7 @@ func (a *Agent) maybeReEnroll(rootCtx context.Context, errText string, status in
 	a.nextEnrollRetryAt = now.Add(30 * time.Second)
 	a.enrollMu.Unlock()
 
-	bootstrapToken := strings.TrimSpace(getSecretEnv("NETWATCH_AGENT_BOOTSTRAP_TOKEN", ""))
+	bootstrapToken := strings.TrimSpace(a.cfg.BootstrapToken)
 	if bootstrapToken == "" {
 		logJSON(LevelWarn, "agent_reenroll_skipped", map[string]interface{}{
 			"agent_id": a.cfg.AgentID,
@@ -1006,6 +1015,9 @@ func (a *Agent) maybeReEnroll(rootCtx context.Context, errText string, status in
 		if b, mErr := json.Marshal(resp.Config); mErr == nil {
 			_ = atomicWriteFile(a.cfg.AgentConfigFile, b, 0o600)
 		}
+	}
+	if a.cfg.BootstrapTokenFile != "" {
+		consumeBootstrapTokenFile(a.cfg.BootstrapTokenFile, a.cfg.AgentID)
 	}
 	logJSON(LevelInfo, "agent_reenroll_succeeded", map[string]interface{}{
 		"agent_id": a.cfg.AgentID,
@@ -1378,7 +1390,10 @@ func loadConfig() Config {
 	senderMaxBatch := parseInt(getEnv("NETWATCH_SENDER_MAX_BATCH", "300"), 300)
 
 	agentConfigFile := getEnv("NETWATCH_AGENT_CONFIG_FILE", "/var/lib/netwatch/agent.config.json")
-	bootstrapToken := strings.TrimSpace(getSecretEnv("NETWATCH_AGENT_BOOTSTRAP_TOKEN", ""))
+	bootstrapToken, bootstrapTokenFile, err := loadBootstrapTokenValue()
+	if err != nil {
+		log.Fatalf("[AGENT] bootstrap token config error: %v", err)
+	}
 	credentialFile := strings.TrimSpace(getEnv("NETWATCH_AGENT_CREDENTIAL_FILE", "/var/lib/netwatch/agent.credential"))
 	agentCredential := strings.TrimSpace(getSecretEnv("NETWATCH_AGENT_CREDENTIAL", ""))
 	if agentCredential == "" && credentialFile != "" {
@@ -1386,7 +1401,12 @@ func loadConfig() Config {
 	}
 
 	tlsCAFile := strings.TrimSpace(getEnv("NETWATCH_TLS_CA_FILE", ""))
+	tlsCertFile := strings.TrimSpace(getEnv("NETWATCH_TLS_CERT_FILE", ""))
+	tlsKeyFile := strings.TrimSpace(getEnv("NETWATCH_TLS_KEY_FILE", ""))
 	tlsServerName := strings.TrimSpace(getEnv("NETWATCH_TLS_SERVER_NAME", ""))
+	if (tlsCertFile == "") != (tlsKeyFile == "") {
+		log.Fatal("[AGENT] NETWATCH_TLS_CERT_FILE and NETWATCH_TLS_KEY_FILE must be set together")
+	}
 
 	controlHeartbeatEvery := parseDuration(getEnv("NETWATCH_CONTROL_HEARTBEAT_EVERY", "30s"), 30*time.Second)
 	controlHeartbeatJitter := parseDuration(getEnv("NETWATCH_CONTROL_HEARTBEAT_JITTER", "5s"), 5*time.Second)
@@ -1505,13 +1525,16 @@ func loadConfig() Config {
 		HTTPTimeout:    httpTimeout,
 		SenderMaxBatch: senderMaxBatch,
 
-		AgentConfigFile: agentConfigFile,
-		BootstrapToken:  bootstrapToken,
-		AgentCredential: agentCredential,
+		AgentConfigFile:          agentConfigFile,
+		BootstrapToken:           bootstrapToken,
+		BootstrapTokenFile:       bootstrapTokenFile,
+		AgentCredential:          agentCredential,
 		AgentCredentialExpiresAt: "",
-		CredentialFile:  credentialFile,
+		CredentialFile:           credentialFile,
 
 		TLSCAFile:     tlsCAFile,
+		TLSCertFile:   tlsCertFile,
+		TLSKeyFile:    tlsKeyFile,
 		TLSServerName: tlsServerName,
 
 		ControlHeartbeatEvery:  controlHeartbeatEvery,
@@ -1908,6 +1931,42 @@ func getSecretEnv(k, def string) string {
 	return def
 }
 
+func loadBootstrapTokenValue() (string, string, error) {
+	token := strings.TrimSpace(getSecretEnv("NETWATCH_AGENT_BOOTSTRAP_TOKEN", ""))
+	tokenFile := strings.TrimSpace(getEnv("NETWATCH_AGENT_BOOTSTRAP_TOKEN_FILE", ""))
+	if tokenFile == "" {
+		return token, "", nil
+	}
+
+	fileToken, err := readRequiredTextFile(tokenFile)
+	if err != nil {
+		return "", tokenFile, fmt.Errorf("NETWATCH_AGENT_BOOTSTRAP_TOKEN_FILE=%q: %w", tokenFile, err)
+	}
+	return fileToken, tokenFile, nil
+}
+
+func consumeBootstrapTokenFile(path string, agentID string) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return
+	}
+	if err := os.Remove(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return
+		}
+		logJSON(LevelWarn, "agent_bootstrap_token_file_delete_failed", map[string]interface{}{
+			"agent_id": agentID,
+			"path":     path,
+			"error":    err.Error(),
+		})
+		return
+	}
+	logJSON(LevelInfo, "agent_bootstrap_token_file_deleted", map[string]interface{}{
+		"agent_id": agentID,
+		"path":     path,
+	})
+}
+
 func splitCSVLower(s string) []string {
 	parts := strings.Split(s, ",")
 	out := make([]string, 0, len(parts))
@@ -2276,6 +2335,22 @@ func readTextFile(path string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(b))
+}
+
+func readRequiredTextFile(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", fmt.Errorf("path is empty")
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	value := strings.TrimSpace(string(b))
+	if value == "" {
+		return "", fmt.Errorf("file is empty")
+	}
+	return value, nil
 }
 
 func round2(v float64) float64 {
