@@ -19,8 +19,11 @@ import (
 	"time"
 
 	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/ddos"
+	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/fim"
+	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/l7"
 	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/lateral"
 	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/proc"
+	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/procexec"
 	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/scan"
 	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/ssh"
 	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/controlplane"
@@ -98,6 +101,29 @@ type Config struct {
 
 	ProcTCP4Path string
 	ProcTCP6Path string
+
+	ProcExecEvery             time.Duration
+	ProcExecMaxBatch          int
+	ProcExecHashEnabled       bool
+	ProcExecHashMaxBytes      int64
+	ProcExecEmitInitial       bool
+	ProcExecIgnoreExeNames    map[string]bool
+	ProcExecIgnoreCmdContains []string
+
+	FIMEvery          time.Duration
+	FIMMaxBatch       int
+	FIMMaxDepth       int
+	FIMHashEnabled    bool
+	FIMHashMaxBytes   int64
+	FIMEmitInitial    bool
+	FIMWatchPaths     []string
+	FIMExcludePaths   []string
+
+	L7Iface           string
+	L7DedupTTL        time.Duration
+	L7MaxBatch        int
+	L7MaxPayloadBytes int
+	L7IncludePayload  bool
 
 	SkipLoopback         bool
 	SkipLinkLocal        bool
@@ -230,6 +256,9 @@ type Agent struct {
 	sysStatus SyscollectorStatus
 
 	procCapturer *proc.Capturer
+	procExecCapturer *procexec.Capturer
+	fimCapturer      *fim.Capturer
+	l7Capturer       *l7.PcapL7Capturer
 	authCapturer *ssh.AuthLogCapturer
 	lateralProc  *lateral.ProcLateralCapturer
 	lateralPcap  *lateral.PcapLateralCapturer
@@ -416,6 +445,38 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc, http
 		a.procCapturer = proc.New(cfg.AgentID, cfg.ProcTCP4Path, cfg.ProcTCP6Path, opts)
 	}
 
+	if contains(cfg.Sources, "proc_exec") {
+		a.procExecCapturer = procexec.New(cfg.AgentID, procexec.Options{
+			MinInterval:        cfg.ProcExecEvery,
+			MaxBatchSize:       cfg.ProcExecMaxBatch,
+			HashExecutables:    cfg.ProcExecHashEnabled,
+			HashMaxBytes:       cfg.ProcExecHashMaxBytes,
+			EmitInitialState:   cfg.ProcExecEmitInitial,
+			IgnoreExeNames:     cfg.ProcExecIgnoreExeNames,
+			IgnoreCmdContains:  cfg.ProcExecIgnoreCmdContains,
+			ProcRoot:           "/proc",
+			CmdlineMaxBytes:    2048,
+			HashCacheTTL:       6 * time.Hour,
+			HashCacheMaxItems:  4096,
+			UsernameCacheTTL:   10 * time.Minute,
+		})
+	}
+
+	if contains(cfg.Sources, "fim") {
+		a.fimCapturer = fim.New(cfg.AgentID, fim.Options{
+			WatchPaths:        cfg.FIMWatchPaths,
+			Exclude:           cfg.FIMExcludePaths,
+			MinInterval:       cfg.FIMEvery,
+			MaxBatchSize:      cfg.FIMMaxBatch,
+			MaxDepth:          cfg.FIMMaxDepth,
+			EmitInitialState:  cfg.FIMEmitInitial,
+			HashEnabled:       cfg.FIMHashEnabled,
+			HashMaxBytes:      cfg.FIMHashMaxBytes,
+			HashCacheTTL:      6 * time.Hour,
+			HashCacheMaxItems: 4096,
+		})
+	}
+
 	if contains(cfg.Sources, "authlog") {
 		resolvedPath, err := ssh.ResolveAuthLogPath(cfg.AuthLogPath)
 		if err != nil {
@@ -531,6 +592,34 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc, http
 				stop()
 			}
 		}()
+	}
+
+	if contains(cfg.Sources, "l7") {
+		l7c, err := l7.NewPcapL7Capturer(cfg.AgentID, l7.PcapL7Options{
+			Interface:       cfg.L7Iface,
+			DedupTTL:        cfg.L7DedupTTL,
+			MaxBatchSize:    cfg.L7MaxBatch,
+			MaxPayloadBytes: cfg.L7MaxPayloadBytes,
+			IncludePayload:  cfg.L7IncludePayload,
+			SkipLoopback:    cfg.SkipLoopback,
+			SkipLinkLocal:   cfg.SkipLinkLocal,
+		})
+		if err != nil {
+			logJSON(LevelWarn, "l7_capture_disabled", map[string]interface{}{
+				"agent_id": cfg.AgentID,
+				"error":    err.Error(),
+			})
+		} else {
+			a.l7Capturer = l7c
+			go func() {
+				if err := a.l7Capturer.Start(rootCtx); err != nil {
+					logJSON(LevelWarn, "l7_capture_stopped", map[string]interface{}{
+						"agent_id": cfg.AgentID,
+						"error":    err.Error(),
+					})
+				}
+			}()
+		}
 	}
 
 	if contains(cfg.Sources, "ddos") {
@@ -1078,6 +1167,30 @@ func (a *Agent) runOnce(rootCtx context.Context) *CycleResult {
 		}
 	}
 
+	if a.procExecCapturer != nil {
+		evs, err := a.procExecCapturer.Capture(time.Now().UTC())
+		if err != nil {
+			logJSON(LevelWarn, "proc_exec_capture_error", map[string]interface{}{
+				"agent_id": a.cfg.AgentID,
+				"error":    err.Error(),
+			})
+		} else if len(evs) > 0 {
+			events = append(events, evs...)
+		}
+	}
+
+	if a.fimCapturer != nil {
+		evs, err := a.fimCapturer.Capture(time.Now().UTC())
+		if err != nil {
+			logJSON(LevelWarn, "fim_capture_error", map[string]interface{}{
+				"agent_id": a.cfg.AgentID,
+				"error":    err.Error(),
+			})
+		} else if len(evs) > 0 {
+			events = append(events, evs...)
+		}
+	}
+
 	if a.lateralProc != nil {
 		evs, err := a.lateralProc.Capture()
 		if err != nil {
@@ -1108,6 +1221,13 @@ func (a *Agent) runOnce(rootCtx context.Context) *CycleResult {
 		evs := a.ddosCapturer.Drain()
 		if len(evs) > 0 {
 			ddosEvs = append(ddosEvs, evs...)
+		}
+	}
+
+	if a.l7Capturer != nil {
+		evs := a.l7Capturer.Drain()
+		if len(evs) > 0 {
+			events = append(events, evs...)
 		}
 	}
 
@@ -1383,7 +1503,7 @@ func loadConfig() Config {
 	if apiURL == "" {
 		log.Fatal("[AGENT] NETWATCH_API_URL is required")
 	}
-	sources := splitCSVLower(getEnv("NETWATCH_SOURCES", "authlog,proc,scan,ddos"))
+	sources := splitCSVLower(getEnv("NETWATCH_SOURCES", "authlog,proc,proc_exec,fim,scan,ddos,l7"))
 
 	interval := parseDuration(getEnv("NETWATCH_POLL_INTERVAL", "1s"), 1*time.Second)
 	httpTimeout := parseDuration(getEnv("NETWATCH_HTTP_TIMEOUT", "10s"), 10*time.Second)
@@ -1447,6 +1567,22 @@ func loadConfig() Config {
 
 	procTCP4Path := getEnv("NETWATCH_PROC_TCP4_PATH", "/proc/net/tcp")
 	procTCP6Path := getEnv("NETWATCH_PROC_TCP6_PATH", "/proc/net/tcp6")
+	procExecEvery := parseDuration(getEnv("NETWATCH_PROC_EXEC_EVERY", "2s"), 2*time.Second)
+	procExecMaxBatch := parseInt(getEnv("NETWATCH_PROC_EXEC_MAX_BATCH", "200"), 200)
+	procExecHashEnabled := parseBool(getEnv("NETWATCH_PROC_EXEC_HASH_ENABLED", "true"), true)
+	procExecHashMaxBytes := int64(parseInt(getEnv("NETWATCH_PROC_EXEC_HASH_MAX_BYTES", "26214400"), 26214400))
+	procExecEmitInitial := parseBool(getEnv("NETWATCH_PROC_EXEC_EMIT_INITIAL", "false"), false)
+	procExecIgnoreExeNames := parseStringSet(getEnv("NETWATCH_PROC_EXEC_IGNORE_EXE", "sleep"))
+	procExecIgnoreCmdContains := splitCSVLower(getEnv("NETWATCH_PROC_EXEC_IGNORE_CMD_CONTAINS", "systemd --user"))
+
+	fimEvery := parseDuration(getEnv("NETWATCH_FIM_EVERY", "30s"), 30*time.Second)
+	fimMaxBatch := parseInt(getEnv("NETWATCH_FIM_MAX_BATCH", "200"), 200)
+	fimMaxDepth := parseInt(getEnv("NETWATCH_FIM_MAX_DEPTH", "4"), 4)
+	fimHashEnabled := parseBool(getEnv("NETWATCH_FIM_HASH_ENABLED", "true"), true)
+	fimHashMaxBytes := int64(parseInt(getEnv("NETWATCH_FIM_HASH_MAX_BYTES", "2097152"), 2097152))
+	fimEmitInitial := parseBool(getEnv("NETWATCH_FIM_EMIT_INITIAL", "false"), false)
+	fimWatchPaths := splitCSV(getEnv("NETWATCH_FIM_PATHS", ""))
+	fimExclude := splitCSV(getEnv("NETWATCH_FIM_EXCLUDE_PATHS", ""))
 
 	skipLoopback := parseBool(getEnv("NETWATCH_SKIP_LOOPBACK", "true"), true)
 	skipLinkLocal := parseBool(getEnv("NETWATCH_SKIP_LINK_LOCAL", "true"), true)
@@ -1473,6 +1609,11 @@ func loadConfig() Config {
 	scanDedup := parseDuration(getEnv("NETWATCH_SCAN_DEDUP_TTL", "2s"), 2*time.Second)
 	scanMaxBatch := parseInt(getEnv("NETWATCH_SCAN_MAX_BATCH", "5000"), 5000)
 	scanMode := getEnv("NETWATCH_SCAN_MODE", "summary")
+	l7Iface := getEnv("NETWATCH_L7_PCAP_IFACE", scanIface)
+	l7Dedup := parseDuration(getEnv("NETWATCH_L7_DEDUP_TTL", "20s"), 20*time.Second)
+	l7MaxBatch := parseInt(getEnv("NETWATCH_L7_MAX_BATCH", "400"), 400)
+	l7MaxPayload := parseInt(getEnv("NETWATCH_L7_MAX_PAYLOAD_BYTES", "768"), 768)
+	l7IncludePayload := parseBool(getEnv("NETWATCH_L7_INCLUDE_PAYLOAD", "true"), true)
 
 	ddosIface := getEnv("NETWATCH_DDOS_PCAP_IFACE", scanIface)
 	ddosWindow := parseDuration(getEnv("NETWATCH_DDOS_WINDOW", "1s"), 1*time.Second)
@@ -1576,6 +1717,29 @@ func loadConfig() Config {
 
 		ProcTCP4Path: procTCP4Path,
 		ProcTCP6Path: procTCP6Path,
+
+		ProcExecEvery:             procExecEvery,
+		ProcExecMaxBatch:          procExecMaxBatch,
+		ProcExecHashEnabled:       procExecHashEnabled,
+		ProcExecHashMaxBytes:      procExecHashMaxBytes,
+		ProcExecEmitInitial:       procExecEmitInitial,
+		ProcExecIgnoreExeNames:    procExecIgnoreExeNames,
+		ProcExecIgnoreCmdContains: procExecIgnoreCmdContains,
+
+		FIMEvery:        fimEvery,
+		FIMMaxBatch:     fimMaxBatch,
+		FIMMaxDepth:     fimMaxDepth,
+		FIMHashEnabled:  fimHashEnabled,
+		FIMHashMaxBytes: fimHashMaxBytes,
+		FIMEmitInitial:  fimEmitInitial,
+		FIMWatchPaths:   fimWatchPaths,
+		FIMExcludePaths: fimExclude,
+
+		L7Iface:           l7Iface,
+		L7DedupTTL:        l7Dedup,
+		L7MaxBatch:        l7MaxBatch,
+		L7MaxPayloadBytes: l7MaxPayload,
+		L7IncludePayload:  l7IncludePayload,
 
 		SkipLoopback:         skipLoopback,
 		SkipLinkLocal:        skipLinkLocal,
@@ -2061,6 +2225,19 @@ func parseIntSet(csv string) map[int]bool {
 	return out
 }
 
+func parseStringSet(csv string) map[string]bool {
+	parts := strings.Split(csv, ",")
+	out := make(map[string]bool, len(parts))
+	for _, p := range parts {
+		p = strings.ToLower(strings.TrimSpace(p))
+		if p == "" {
+			continue
+		}
+		out[p] = true
+	}
+	return out
+}
+
 func asMap(v interface{}) map[string]interface{} {
 	if v == nil {
 		return nil
@@ -2103,6 +2280,34 @@ func asBool(v interface{}) (bool, bool) {
 		}
 	default:
 		return false, false
+	}
+}
+
+func asStringSlice(v interface{}) []string {
+	switch t := v.(type) {
+	case []string:
+		out := make([]string, 0, len(t))
+		for _, s := range t {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	case []interface{}:
+		out := make([]string, 0, len(t))
+		for _, x := range t {
+			s := strings.TrimSpace(fmt.Sprintf("%v", x))
+			if s == "" || s == "<nil>" {
+				continue
+			}
+			out = append(out, s)
+		}
+		return out
+	case string:
+		return splitCSV(t)
+	default:
+		return nil
 	}
 }
 
@@ -2219,109 +2424,211 @@ func applyAgentRuntimeOverrides(cfg *Config, raw map[string]interface{}) {
 	if modules == nil {
 		return
 	}
-	dd := asMap(modules["ddos"])
-	if dd == nil {
-		return
-	}
+	if dd := asMap(modules["ddos"]); dd != nil {
+		if enabled, ok := asBool(dd["enabled"]); ok {
+			if enabled {
+				cfg.Sources = ensureSource(cfg.Sources, "ddos")
+			} else {
+				cfg.Sources = removeSource(cfg.Sources, "ddos")
+			}
+		}
 
-	if enabled, ok := asBool(dd["enabled"]); ok {
-		if enabled {
-			cfg.Sources = ensureSource(cfg.Sources, "ddos")
-		} else {
-			cfg.Sources = removeSource(cfg.Sources, "ddos")
+		if s, ok := asString(dd["iface"]); ok {
+			cfg.DDoSIface = s
+		}
+		cfg.DDoSWindow = asDuration(dd["window"], cfg.DDoSWindow)
+		cfg.DDoSEvalEvery = asDuration(dd["eval_every"], cfg.DDoSEvalEvery)
+		cfg.DDoSCooldown = asDuration(dd["cooldown"], cfg.DDoSCooldown)
+
+		if n, ok := asInt(dd["sustain_windows"]); ok && n > 0 {
+			cfg.DDoSSustainWindows = n
+		}
+		if n, ok := asInt(dd["baseline_warmup_windows"]); ok && n > 0 {
+			cfg.DDoSBaselineWarmupWindows = n
+		}
+		if f, ok := asFloat(dd["baseline_alpha"]); ok && f > 0 {
+			cfg.DDoSBaselineAlpha = f
+		}
+		if f, ok := asFloat(dd["baseline_factor"]); ok && f > 1 {
+			cfg.DDoSBaselineFactor = f
+		}
+		if f, ok := asFloat(dd["min_pps"]); ok && f > 0 {
+			cfg.DDoSMinPPS = f
+		}
+		if f, ok := asFloat(dd["min_bps"]); ok && f > 0 {
+			cfg.DDoSMinBPS = f
+		}
+		if n, ok := asInt(dd["min_packets"]); ok && n >= 0 {
+			cfg.DDoSMinPackets = n
+		}
+		if n, ok := asInt(dd["min_requests"]); ok && n >= 0 {
+			cfg.DDoSMinRequests = n
+		}
+		if n, ok := asInt(dd["min_confidence"]); ok && n > 0 {
+			cfg.DDoSMinConfidence = n
+		}
+		if f, ok := asFloat(dd["min_syn_ratio"]); ok && f > 0 {
+			cfg.DDoSMinSynRatio = f
+		}
+		if n, ok := asInt(dd["min_src_ips"]); ok && n > 0 {
+			cfg.DDoSMinSrcIPs = n
+		}
+		if f, ok := asFloat(dd["min_src_entropy_norm"]); ok && f > 0 {
+			cfg.DDoSMinSrcEntropyNorm = f
+		}
+		if b, ok := asBool(dd["enable_l7"]); ok {
+			cfg.DDoSEnableL7 = b
+		}
+		if f, ok := asFloat(dd["min_http_rps"]); ok && f > 0 {
+			cfg.DDoSMinHTTPRPS = f
+		}
+		if f, ok := asFloat(dd["min_tls_hs_rps"]); ok && f > 0 {
+			cfg.DDoSMinTLSHSRPS = f
+		}
+		if f, ok := asFloat(dd["min_l7_ratio"]); ok && f > 0 {
+			cfg.DDoSMinL7Ratio = f
+		}
+		if b, ok := asBool(dd["enable_entropy"]); ok {
+			cfg.DDoSEnableEntropy = b
+		}
+		if f, ok := asFloat(dd["min_src_entropy_norm_signal"]); ok && f > 0 {
+			cfg.DDoSMinSrcEntropyNormSignal = f
+		}
+		if f, ok := asFloat(dd["min_port_entropy_norm"]); ok && f > 0 {
+			cfg.DDoSMinPortEntropyNorm = f
+		}
+		if n, ok := asInt(dd["port_entropy_topn"]); ok && n > 0 {
+			cfg.DDoSPortEntropyTopN = n
+		}
+		if s, ok := asString(dd["cardinality_mode"]); ok {
+			cfg.DDoSCardinalityMode = strings.ToLower(s)
+		}
+		if n, ok := asInt(dd["hll_precision"]); ok && n > 0 {
+			cfg.DDoSHLLPrecision = n
+		}
+		if n, ok := asInt(dd["bloom_bits"]); ok && n > 0 {
+			cfg.DDoSBloomBits = n
+		}
+		if n, ok := asInt(dd["max_unique_src"]); ok && n > 0 {
+			cfg.DDoSMaxUniqueSrc = n
+		}
+		if n, ok := asInt(dd["top_src"]); ok && n > 0 {
+			cfg.DDoSTopSrc = n
+		}
+		if n, ok := asInt(dd["max_batch"]); ok && n > 0 {
+			cfg.DDoSMaxBatch = n
+		}
+		if n, ok := asInt(dd["backpressure_high_watermark"]); ok && n > 0 {
+			cfg.DDoSBackpressureHighWM = n
+		}
+		if n, ok := asInt(dd["backpressure_sample_every"]); ok && n > 0 {
+			cfg.DDoSBackpressureSampleEvery = n
 		}
 	}
 
-	if s, ok := asString(dd["iface"]); ok {
-		cfg.DDoSIface = s
+	if pe := asMap(modules["proc_exec"]); pe != nil {
+		if enabled, ok := asBool(pe["enabled"]); ok {
+			if enabled {
+				cfg.Sources = ensureSource(cfg.Sources, "proc_exec")
+			} else {
+				cfg.Sources = removeSource(cfg.Sources, "proc_exec")
+			}
+		}
+		cfg.ProcExecEvery = asDuration(pe["every"], cfg.ProcExecEvery)
+		if n, ok := asInt(pe["max_batch"]); ok && n > 0 {
+			cfg.ProcExecMaxBatch = n
+		}
+		if b, ok := asBool(pe["hash_enabled"]); ok {
+			cfg.ProcExecHashEnabled = b
+		}
+		if n, ok := asInt(pe["hash_max_bytes"]); ok && n > 0 {
+			cfg.ProcExecHashMaxBytes = int64(n)
+		}
+		if b, ok := asBool(pe["emit_initial"]); ok {
+			cfg.ProcExecEmitInitial = b
+		}
+		if vals := asStringSlice(pe["ignore_exe"]); len(vals) > 0 {
+			set := make(map[string]bool, len(vals))
+			for _, v := range vals {
+				kv := strings.ToLower(strings.TrimSpace(v))
+				if kv == "" {
+					continue
+				}
+				set[kv] = true
+			}
+			cfg.ProcExecIgnoreExeNames = set
+		}
+		if vals := asStringSlice(pe["ignore_cmd_contains"]); len(vals) > 0 {
+			out := make([]string, 0, len(vals))
+			seen := map[string]struct{}{}
+			for _, v := range vals {
+				kv := strings.ToLower(strings.TrimSpace(v))
+				if kv == "" {
+					continue
+				}
+				if _, ok := seen[kv]; ok {
+					continue
+				}
+				seen[kv] = struct{}{}
+				out = append(out, kv)
+			}
+			cfg.ProcExecIgnoreCmdContains = out
+		}
 	}
-	cfg.DDoSWindow = asDuration(dd["window"], cfg.DDoSWindow)
-	cfg.DDoSEvalEvery = asDuration(dd["eval_every"], cfg.DDoSEvalEvery)
-	cfg.DDoSCooldown = asDuration(dd["cooldown"], cfg.DDoSCooldown)
 
-	if n, ok := asInt(dd["sustain_windows"]); ok && n > 0 {
-		cfg.DDoSSustainWindows = n
+	if fm := asMap(modules["fim"]); fm != nil {
+		if enabled, ok := asBool(fm["enabled"]); ok {
+			if enabled {
+				cfg.Sources = ensureSource(cfg.Sources, "fim")
+			} else {
+				cfg.Sources = removeSource(cfg.Sources, "fim")
+			}
+		}
+		cfg.FIMEvery = asDuration(fm["every"], cfg.FIMEvery)
+		if n, ok := asInt(fm["max_batch"]); ok && n > 0 {
+			cfg.FIMMaxBatch = n
+		}
+		if n, ok := asInt(fm["max_depth"]); ok && n > 0 {
+			cfg.FIMMaxDepth = n
+		}
+		if b, ok := asBool(fm["hash_enabled"]); ok {
+			cfg.FIMHashEnabled = b
+		}
+		if n, ok := asInt(fm["hash_max_bytes"]); ok && n > 0 {
+			cfg.FIMHashMaxBytes = int64(n)
+		}
+		if b, ok := asBool(fm["emit_initial"]); ok {
+			cfg.FIMEmitInitial = b
+		}
+		if vals := asStringSlice(fm["paths"]); len(vals) > 0 {
+			cfg.FIMWatchPaths = vals
+		}
+		if vals := asStringSlice(fm["exclude_paths"]); len(vals) > 0 {
+			cfg.FIMExcludePaths = vals
+		}
 	}
-	if n, ok := asInt(dd["baseline_warmup_windows"]); ok && n > 0 {
-		cfg.DDoSBaselineWarmupWindows = n
-	}
-	if f, ok := asFloat(dd["baseline_alpha"]); ok && f > 0 {
-		cfg.DDoSBaselineAlpha = f
-	}
-	if f, ok := asFloat(dd["baseline_factor"]); ok && f > 1 {
-		cfg.DDoSBaselineFactor = f
-	}
-	if f, ok := asFloat(dd["min_pps"]); ok && f > 0 {
-		cfg.DDoSMinPPS = f
-	}
-	if f, ok := asFloat(dd["min_bps"]); ok && f > 0 {
-		cfg.DDoSMinBPS = f
-	}
-	if n, ok := asInt(dd["min_packets"]); ok && n >= 0 {
-		cfg.DDoSMinPackets = n
-	}
-	if n, ok := asInt(dd["min_requests"]); ok && n >= 0 {
-		cfg.DDoSMinRequests = n
-	}
-	if n, ok := asInt(dd["min_confidence"]); ok && n > 0 {
-		cfg.DDoSMinConfidence = n
-	}
-	if f, ok := asFloat(dd["min_syn_ratio"]); ok && f > 0 {
-		cfg.DDoSMinSynRatio = f
-	}
-	if n, ok := asInt(dd["min_src_ips"]); ok && n > 0 {
-		cfg.DDoSMinSrcIPs = n
-	}
-	if f, ok := asFloat(dd["min_src_entropy_norm"]); ok && f > 0 {
-		cfg.DDoSMinSrcEntropyNorm = f
-	}
-	if b, ok := asBool(dd["enable_l7"]); ok {
-		cfg.DDoSEnableL7 = b
-	}
-	if f, ok := asFloat(dd["min_http_rps"]); ok && f > 0 {
-		cfg.DDoSMinHTTPRPS = f
-	}
-	if f, ok := asFloat(dd["min_tls_hs_rps"]); ok && f > 0 {
-		cfg.DDoSMinTLSHSRPS = f
-	}
-	if f, ok := asFloat(dd["min_l7_ratio"]); ok && f > 0 {
-		cfg.DDoSMinL7Ratio = f
-	}
-	if b, ok := asBool(dd["enable_entropy"]); ok {
-		cfg.DDoSEnableEntropy = b
-	}
-	if f, ok := asFloat(dd["min_src_entropy_norm_signal"]); ok && f > 0 {
-		cfg.DDoSMinSrcEntropyNormSignal = f
-	}
-	if f, ok := asFloat(dd["min_port_entropy_norm"]); ok && f > 0 {
-		cfg.DDoSMinPortEntropyNorm = f
-	}
-	if n, ok := asInt(dd["port_entropy_topn"]); ok && n > 0 {
-		cfg.DDoSPortEntropyTopN = n
-	}
-	if s, ok := asString(dd["cardinality_mode"]); ok {
-		cfg.DDoSCardinalityMode = strings.ToLower(s)
-	}
-	if n, ok := asInt(dd["hll_precision"]); ok && n > 0 {
-		cfg.DDoSHLLPrecision = n
-	}
-	if n, ok := asInt(dd["bloom_bits"]); ok && n > 0 {
-		cfg.DDoSBloomBits = n
-	}
-	if n, ok := asInt(dd["max_unique_src"]); ok && n > 0 {
-		cfg.DDoSMaxUniqueSrc = n
-	}
-	if n, ok := asInt(dd["top_src"]); ok && n > 0 {
-		cfg.DDoSTopSrc = n
-	}
-	if n, ok := asInt(dd["max_batch"]); ok && n > 0 {
-		cfg.DDoSMaxBatch = n
-	}
-	if n, ok := asInt(dd["backpressure_high_watermark"]); ok && n > 0 {
-		cfg.DDoSBackpressureHighWM = n
-	}
-	if n, ok := asInt(dd["backpressure_sample_every"]); ok && n > 0 {
-		cfg.DDoSBackpressureSampleEvery = n
+
+	if l7m := asMap(modules["l7"]); l7m != nil {
+		if enabled, ok := asBool(l7m["enabled"]); ok {
+			if enabled {
+				cfg.Sources = ensureSource(cfg.Sources, "l7")
+			} else {
+				cfg.Sources = removeSource(cfg.Sources, "l7")
+			}
+		}
+		if s, ok := asString(l7m["iface"]); ok {
+			cfg.L7Iface = s
+		}
+		cfg.L7DedupTTL = asDuration(l7m["dedup_ttl"], cfg.L7DedupTTL)
+		if n, ok := asInt(l7m["max_batch"]); ok && n > 0 {
+			cfg.L7MaxBatch = n
+		}
+		if n, ok := asInt(l7m["max_payload_bytes"]); ok && n > 0 {
+			cfg.L7MaxPayloadBytes = n
+		}
+		if b, ok := asBool(l7m["include_payload"]); ok {
+			cfg.L7IncludePayload = b
+		}
 	}
 }
 
