@@ -42,6 +42,15 @@ const (
 	LevelError
 )
 
+const (
+	defaultL7Sources         = "authlog,proc,proc_exec,fim,scan,ddos,l7"
+	defaultL7DedupTTL        = 20 * time.Second
+	defaultL7MaxBatch        = 400
+	defaultL7MaxPayloadBytes = 512
+	maxL7MaxBatch            = 2000
+	maxL7MaxPayloadBytes     = 4096
+)
+
 type Config struct {
 	AgentID        string
 	APIURL         string
@@ -50,29 +59,29 @@ type Config struct {
 	HTTPTimeout    time.Duration
 	SenderMaxBatch int
 
-	AgentConfigFile string
-	BootstrapToken  string
-	BootstrapTokenFile string
-	AgentCredential string
+	AgentConfigFile          string
+	BootstrapToken           string
+	BootstrapTokenFile       string
+	AgentCredential          string
 	AgentCredentialExpiresAt string
-	CredentialFile  string
+	CredentialFile           string
 
 	TLSCAFile     string
 	TLSCertFile   string
 	TLSKeyFile    string
 	TLSServerName string
 
-	ControlHeartbeatEvery  time.Duration
-	ControlHeartbeatJitter time.Duration
-	ControlConfigEvery     time.Duration
-	ControlConfigJitter    time.Duration
+	ControlHeartbeatEvery     time.Duration
+	ControlHeartbeatJitter    time.Duration
+	ControlConfigEvery        time.Duration
+	ControlConfigJitter       time.Duration
 	ControlResponsePollEvery  time.Duration
 	ControlResponsePollJitter time.Duration
-	ControlEnrollTimeout   time.Duration
-	ForceEnrollOnStart     bool
-	CredentialRotateEvery  time.Duration
-	CredentialRotateBefore time.Duration
-	ResponseActionStageMax int
+	ControlEnrollTimeout      time.Duration
+	ForceEnrollOnStart        bool
+	CredentialRotateEvery     time.Duration
+	CredentialRotateBefore    time.Duration
+	ResponseActionStageMax    int
 
 	SyscollectEvery          time.Duration
 	SyscollectStartupJitter  time.Duration
@@ -110,14 +119,14 @@ type Config struct {
 	ProcExecIgnoreExeNames    map[string]bool
 	ProcExecIgnoreCmdContains []string
 
-	FIMEvery          time.Duration
-	FIMMaxBatch       int
-	FIMMaxDepth       int
-	FIMHashEnabled    bool
-	FIMHashMaxBytes   int64
-	FIMEmitInitial    bool
-	FIMWatchPaths     []string
-	FIMExcludePaths   []string
+	FIMEvery        time.Duration
+	FIMMaxBatch     int
+	FIMMaxDepth     int
+	FIMHashEnabled  bool
+	FIMHashMaxBytes int64
+	FIMEmitInitial  bool
+	FIMWatchPaths   []string
+	FIMExcludePaths []string
 
 	L7Iface           string
 	L7DedupTTL        time.Duration
@@ -227,8 +236,8 @@ type SummaryState struct {
 	MaxScanCycle  int
 	MaxPortsCycle int
 
-	SendAttemptsTotal int
-	SendErrorsTotal   int
+	SendAttemptsTotal             int
+	SendErrorsTotal               int
 	ResponseActionPollErrorsTotal int
 	ResponseActionsStagedTotal    int
 
@@ -255,15 +264,15 @@ type Agent struct {
 	sysMu     sync.RWMutex
 	sysStatus SyscollectorStatus
 
-	procCapturer *proc.Capturer
+	procCapturer     *proc.Capturer
 	procExecCapturer *procexec.Capturer
 	fimCapturer      *fim.Capturer
 	l7Capturer       *l7.PcapL7Capturer
-	authCapturer *ssh.AuthLogCapturer
-	lateralProc  *lateral.ProcLateralCapturer
-	lateralPcap  *lateral.PcapLateralCapturer
-	scanCapturer *scan.PcapScanCapturer
-	ddosCapturer *ddos.PcapDDoSCapturer
+	authCapturer     *ssh.AuthLogCapturer
+	lateralProc      *lateral.ProcLateralCapturer
+	lateralPcap      *lateral.PcapLateralCapturer
+	scanCapturer     *scan.PcapScanCapturer
+	ddosCapturer     *ddos.PcapDDoSCapturer
 
 	vulnMu     sync.RWMutex
 	vulnStatus VulnScannerStatus
@@ -371,8 +380,8 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc, http
 	now := time.Now().UTC()
 
 	a := &Agent{
-		cfg:    cfg,
-		cred:   strings.TrimSpace(cfg.AgentCredential),
+		cfg:           cfg,
+		cred:          strings.TrimSpace(cfg.AgentCredential),
 		responseStage: responseactions.NewStage(cfg.ResponseActionStageMax),
 		runtime: NewRuntimeConfig(
 			cfg.AgentConfigFile,
@@ -447,18 +456,18 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc, http
 
 	if contains(cfg.Sources, "proc_exec") {
 		a.procExecCapturer = procexec.New(cfg.AgentID, procexec.Options{
-			MinInterval:        cfg.ProcExecEvery,
-			MaxBatchSize:       cfg.ProcExecMaxBatch,
-			HashExecutables:    cfg.ProcExecHashEnabled,
-			HashMaxBytes:       cfg.ProcExecHashMaxBytes,
-			EmitInitialState:   cfg.ProcExecEmitInitial,
-			IgnoreExeNames:     cfg.ProcExecIgnoreExeNames,
-			IgnoreCmdContains:  cfg.ProcExecIgnoreCmdContains,
-			ProcRoot:           "/proc",
-			CmdlineMaxBytes:    2048,
-			HashCacheTTL:       6 * time.Hour,
-			HashCacheMaxItems:  4096,
-			UsernameCacheTTL:   10 * time.Minute,
+			MinInterval:       cfg.ProcExecEvery,
+			MaxBatchSize:      cfg.ProcExecMaxBatch,
+			HashExecutables:   cfg.ProcExecHashEnabled,
+			HashMaxBytes:      cfg.ProcExecHashMaxBytes,
+			EmitInitialState:  cfg.ProcExecEmitInitial,
+			IgnoreExeNames:    cfg.ProcExecIgnoreExeNames,
+			IgnoreCmdContains: cfg.ProcExecIgnoreCmdContains,
+			ProcRoot:          "/proc",
+			CmdlineMaxBytes:   2048,
+			HashCacheTTL:      6 * time.Hour,
+			HashCacheMaxItems: 4096,
+			UsernameCacheTTL:  10 * time.Minute,
 		})
 	}
 
@@ -606,16 +615,23 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc, http
 		})
 		if err != nil {
 			logJSON(LevelWarn, "l7_capture_disabled", map[string]interface{}{
-				"agent_id": cfg.AgentID,
-				"error":    err.Error(),
+				"agent_id":              cfg.AgentID,
+				"interface":             cfg.L7Iface,
+				"include_payload":       cfg.L7IncludePayload,
+				"max_batch":             cfg.L7MaxBatch,
+				"max_payload_bytes":     cfg.L7MaxPayloadBytes,
+				"error":                 err.Error(),
+				"continuing_without_l7": true,
 			})
 		} else {
 			a.l7Capturer = l7c
 			go func() {
 				if err := a.l7Capturer.Start(rootCtx); err != nil {
 					logJSON(LevelWarn, "l7_capture_stopped", map[string]interface{}{
-						"agent_id": cfg.AgentID,
-						"error":    err.Error(),
+						"agent_id":              cfg.AgentID,
+						"interface":             cfg.L7Iface,
+						"error":                 err.Error(),
+						"continuing_without_l7": true,
 					})
 				}
 			}()
@@ -824,8 +840,8 @@ func (a *Agent) startResponseActionExecutor(rootCtx context.Context) {
 							changed, _ := a.runtime.Apply(cfg)
 							return changed, len(cfg), a.runtime.Hash(), nil
 						},
-						AgentStartedAt:  a.state.StartedAt,
-						Now:             now,
+						AgentStartedAt: a.state.StartedAt,
+						Now:            now,
 					})
 					a.responseStage.MarkHandled(staged.Action.ID)
 
@@ -1468,12 +1484,12 @@ func (a *Agent) flushSummary() {
 		"max_scan_cycle":  a.state.MaxScanCycle,
 		"max_ports_cycle": a.state.MaxPortsCycle,
 
-		"send_attempts_total": a.state.SendAttemptsTotal,
-		"send_errors_total":   a.state.SendErrorsTotal,
+		"send_attempts_total":                a.state.SendAttemptsTotal,
+		"send_errors_total":                  a.state.SendErrorsTotal,
 		"response_actions_staged_total":      a.state.ResponseActionsStagedTotal,
 		"response_actions_poll_errors_total": a.state.ResponseActionPollErrorsTotal,
-		"last_http_status":    a.state.LastHTTPStatus,
-		"last_error":          a.state.LastError,
+		"last_http_status":                   a.state.LastHTTPStatus,
+		"last_error":                         a.state.LastError,
 	})
 
 	a.state.LastSummaryAt = now
@@ -1503,7 +1519,7 @@ func loadConfig() Config {
 	if apiURL == "" {
 		log.Fatal("[AGENT] SEAGULL_API_URL is required")
 	}
-	sources := splitCSVLower(getEnv("SEAGULL_SOURCES", "authlog,proc,proc_exec,fim,scan,ddos,l7"))
+	sources := splitCSVLower(getEnv("SEAGULL_SOURCES", defaultL7Sources))
 
 	interval := parseDuration(getEnv("SEAGULL_POLL_INTERVAL", "1s"), 1*time.Second)
 	httpTimeout := parseDuration(getEnv("SEAGULL_HTTP_TIMEOUT", "10s"), 10*time.Second)
@@ -1609,11 +1625,11 @@ func loadConfig() Config {
 	scanDedup := parseDuration(getEnv("SEAGULL_SCAN_DEDUP_TTL", "2s"), 2*time.Second)
 	scanMaxBatch := parseInt(getEnv("SEAGULL_SCAN_MAX_BATCH", "5000"), 5000)
 	scanMode := getEnv("SEAGULL_SCAN_MODE", "summary")
-	l7Iface := getEnv("SEAGULL_L7_PCAP_IFACE", scanIface)
-	l7Dedup := parseDuration(getEnv("SEAGULL_L7_DEDUP_TTL", "20s"), 20*time.Second)
-	l7MaxBatch := parseInt(getEnv("SEAGULL_L7_MAX_BATCH", "400"), 400)
-	l7MaxPayload := parseInt(getEnv("SEAGULL_L7_MAX_PAYLOAD_BYTES", "768"), 768)
-	l7IncludePayload := parseBool(getEnv("SEAGULL_L7_INCLUDE_PAYLOAD", "true"), true)
+	l7Iface := getEnvAlias("SEAGULL_L7_PCAP_IFACE", scanIface, "SEAGULL_L7_IFACE")
+	l7Dedup := parseDuration(getEnvAlias("SEAGULL_L7_DEDUP_TTL", defaultL7DedupTTL.String()), defaultL7DedupTTL)
+	l7MaxBatch := parseInt(getEnvAlias("SEAGULL_L7_MAX_BATCH", strconv.Itoa(defaultL7MaxBatch), "SEAGULL_L7_BATCH_SIZE"), defaultL7MaxBatch)
+	l7MaxPayload := parseInt(getEnvAlias("SEAGULL_L7_MAX_PAYLOAD_BYTES", strconv.Itoa(defaultL7MaxPayloadBytes), "SEAGULL_L7_PAYLOAD_BYTES"), defaultL7MaxPayloadBytes)
+	l7IncludePayload := parseBool(getEnvAlias("SEAGULL_L7_INCLUDE_PAYLOAD", "false"), false)
 
 	ddosIface := getEnv("SEAGULL_DDOS_PCAP_IFACE", scanIface)
 	ddosWindow := parseDuration(getEnv("SEAGULL_DDOS_WINDOW", "1s"), 1*time.Second)
@@ -1658,7 +1674,7 @@ func loadConfig() Config {
 	logHeartbeatEvery := parseDuration(getEnv("SEAGULL_LOG_HEARTBEAT_EVERY", "60s"), 60*time.Second)
 	logMinEvents := parseInt(getEnv("SEAGULL_LOG_MIN_EVENTS", "50"), 50)
 
-	return Config{
+	cfg := Config{
 		AgentID:        agentID,
 		APIURL:         apiURL,
 		Sources:        sources,
@@ -1678,17 +1694,17 @@ func loadConfig() Config {
 		TLSKeyFile:    tlsKeyFile,
 		TLSServerName: tlsServerName,
 
-		ControlHeartbeatEvery:  controlHeartbeatEvery,
-		ControlHeartbeatJitter: controlHeartbeatJitter,
-		ControlConfigEvery:     controlConfigEvery,
-		ControlConfigJitter:    controlConfigJitter,
+		ControlHeartbeatEvery:     controlHeartbeatEvery,
+		ControlHeartbeatJitter:    controlHeartbeatJitter,
+		ControlConfigEvery:        controlConfigEvery,
+		ControlConfigJitter:       controlConfigJitter,
 		ControlResponsePollEvery:  controlResponsePollEvery,
 		ControlResponsePollJitter: controlResponsePollJitter,
-		ControlEnrollTimeout:   controlEnrollTimeout,
-		ForceEnrollOnStart:     forceEnrollOnStart,
-		CredentialRotateEvery:  credentialRotateEvery,
-		CredentialRotateBefore: credentialRotateBefore,
-		ResponseActionStageMax: responseActionStageMax,
+		ControlEnrollTimeout:      controlEnrollTimeout,
+		ForceEnrollOnStart:        forceEnrollOnStart,
+		CredentialRotateEvery:     credentialRotateEvery,
+		CredentialRotateBefore:    credentialRotateBefore,
+		ResponseActionStageMax:    responseActionStageMax,
 
 		SyscollectEvery:          syscollectEvery,
 		SyscollectStartupJitter:  syscollectStartupJitter,
@@ -1806,6 +1822,8 @@ func loadConfig() Config {
 		LogHeartbeatEvery: logHeartbeatEvery,
 		LogMinEvents:      logMinEvents,
 	}
+	sanitizeL7Config(&cfg)
+	return cfg
 }
 
 func waitForHealth(ctx context.Context, baseURL string, httpClient *http.Client) error {
@@ -2089,6 +2107,24 @@ func getEnv(k, def string) string {
 	return def
 }
 
+func getEnvAlias(k, def string, aliases ...string) string {
+	if v, ok := os.LookupEnv(k); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+	if strings.HasPrefix(k, "SEAGULL_") {
+		legacyKey := "NETWATCH_" + strings.TrimPrefix(k, "SEAGULL_")
+		if v, ok := os.LookupEnv(legacyKey); ok && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	for _, alias := range aliases {
+		if v := getEnv(alias, ""); strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return def
+}
+
 func getSecretEnv(k, def string) string {
 	if v, ok := os.LookupEnv(k); ok && strings.TrimSpace(v) != "" {
 		return strings.TrimSpace(v)
@@ -2207,6 +2243,30 @@ func parseBool(s string, def bool) bool {
 	default:
 		return def
 	}
+}
+
+func clampInt(v, minValue, maxValue int) int {
+	if v < minValue {
+		return minValue
+	}
+	if v > maxValue {
+		return maxValue
+	}
+	return v
+}
+
+func sanitizeL7Config(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	if strings.TrimSpace(cfg.L7Iface) == "" {
+		cfg.L7Iface = "any"
+	}
+	if cfg.L7DedupTTL <= 0 {
+		cfg.L7DedupTTL = defaultL7DedupTTL
+	}
+	cfg.L7MaxBatch = clampInt(cfg.L7MaxBatch, 1, maxL7MaxBatch)
+	cfg.L7MaxPayloadBytes = clampInt(cfg.L7MaxPayloadBytes, 1, maxL7MaxPayloadBytes)
 }
 
 func parseCIDRs(csv string) []*net.IPNet {
@@ -2646,6 +2706,7 @@ func applyAgentRuntimeOverrides(cfg *Config, raw map[string]interface{}) {
 			cfg.L7IncludePayload = b
 		}
 	}
+	sanitizeL7Config(cfg)
 }
 
 func readTextFile(path string) string {
