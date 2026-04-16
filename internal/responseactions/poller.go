@@ -5,7 +5,7 @@ import (
 	"hash/fnv"
 	"time"
 
-	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/controlplane"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/controlplane"
 )
 
 type PollerConfig struct {

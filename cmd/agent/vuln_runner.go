@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/syscollector"
-	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/vuln"
-	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/model"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/syscollector"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/vuln"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
 )
 
 type VulnScannerStatus struct {

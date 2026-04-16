@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/controlplane"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/controlplane"
 )
 
 func TestStartPollingStagesActions(t *testing.T) {

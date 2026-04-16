@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-CREDENTIAL_FILE="${NETWATCH_AGENT_CREDENTIAL_FILE:-/var/lib/netwatch/agent.credential}"
+CREDENTIAL_FILE="${SEAGULL_AGENT_CREDENTIAL_FILE:-/var/lib/seagull/agent.credential}"
 mkdir -p "$(dirname "$CREDENTIAL_FILE")"
 
 copy_file() {
@@ -21,6 +21,6 @@ copy_file() {
   install -m "$mode" "$src" "$dst"
 }
 
-copy_file "${NETWATCH_AGENT_CREDENTIAL_SOURCE_FILE:-}" "$CREDENTIAL_FILE" 0600
+copy_file "${SEAGULL_AGENT_CREDENTIAL_SOURCE_FILE:-}" "$CREDENTIAL_FILE" 0600
 
-exec /usr/local/bin/netwatch-agent
+exec /usr/local/bin/seagull-agent

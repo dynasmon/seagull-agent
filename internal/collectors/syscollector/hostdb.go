@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/model"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
 )
 
 // parseDpkgStatus reads /var/lib/dpkg/status and extracts installed packages.

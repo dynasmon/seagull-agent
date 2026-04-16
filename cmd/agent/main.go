@@ -18,19 +18,19 @@ import (
 	"syscall"
 	"time"
 
-	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/ddos"
-	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/fim"
-	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/l7"
-	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/lateral"
-	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/proc"
-	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/procexec"
-	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/scan"
-	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/ssh"
-	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/controlplane"
-	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/model"
-	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/netutil"
-	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/responseactions"
-	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/sender"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/ddos"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/fim"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/l7"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/lateral"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/proc"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/procexec"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/scan"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/ssh"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/controlplane"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/netutil"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/responseactions"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/sender"
 )
 
 type LogLevel int
@@ -1498,165 +1498,165 @@ func (a *Agent) maybeHeartbeat() {
 }
 
 func loadConfig() Config {
-	agentID := getEnv("NETWATCH_AGENT_ID", "agent-unknown")
-	apiURL := strings.TrimSpace(getEnv("NETWATCH_API_URL", ""))
+	agentID := getEnv("SEAGULL_AGENT_ID", "agent-unknown")
+	apiURL := strings.TrimSpace(getEnv("SEAGULL_API_URL", ""))
 	if apiURL == "" {
-		log.Fatal("[AGENT] NETWATCH_API_URL is required")
+		log.Fatal("[AGENT] SEAGULL_API_URL is required")
 	}
-	sources := splitCSVLower(getEnv("NETWATCH_SOURCES", "authlog,proc,proc_exec,fim,scan,ddos,l7"))
+	sources := splitCSVLower(getEnv("SEAGULL_SOURCES", "authlog,proc,proc_exec,fim,scan,ddos,l7"))
 
-	interval := parseDuration(getEnv("NETWATCH_POLL_INTERVAL", "1s"), 1*time.Second)
-	httpTimeout := parseDuration(getEnv("NETWATCH_HTTP_TIMEOUT", "10s"), 10*time.Second)
-	senderMaxBatch := parseInt(getEnv("NETWATCH_SENDER_MAX_BATCH", "300"), 300)
+	interval := parseDuration(getEnv("SEAGULL_POLL_INTERVAL", "1s"), 1*time.Second)
+	httpTimeout := parseDuration(getEnv("SEAGULL_HTTP_TIMEOUT", "10s"), 10*time.Second)
+	senderMaxBatch := parseInt(getEnv("SEAGULL_SENDER_MAX_BATCH", "300"), 300)
 
-	agentConfigFile := getEnv("NETWATCH_AGENT_CONFIG_FILE", "/var/lib/netwatch/agent.config.json")
+	agentConfigFile := getEnv("SEAGULL_AGENT_CONFIG_FILE", "/var/lib/seagull/agent.config.json")
 	bootstrapToken, bootstrapTokenFile, err := loadBootstrapTokenValue()
 	if err != nil {
 		log.Fatalf("[AGENT] bootstrap token config error: %v", err)
 	}
-	credentialFile := strings.TrimSpace(getEnv("NETWATCH_AGENT_CREDENTIAL_FILE", "/var/lib/netwatch/agent.credential"))
-	agentCredential := strings.TrimSpace(getSecretEnv("NETWATCH_AGENT_CREDENTIAL", ""))
+	credentialFile := strings.TrimSpace(getEnv("SEAGULL_AGENT_CREDENTIAL_FILE", "/var/lib/seagull/agent.credential"))
+	agentCredential := strings.TrimSpace(getSecretEnv("SEAGULL_AGENT_CREDENTIAL", ""))
 	if agentCredential == "" && credentialFile != "" {
 		agentCredential = strings.TrimSpace(readTextFile(credentialFile))
 	}
 
-	tlsCAFile := strings.TrimSpace(getEnv("NETWATCH_TLS_CA_FILE", ""))
-	tlsCertFile := strings.TrimSpace(getEnv("NETWATCH_TLS_CERT_FILE", ""))
-	tlsKeyFile := strings.TrimSpace(getEnv("NETWATCH_TLS_KEY_FILE", ""))
-	tlsServerName := strings.TrimSpace(getEnv("NETWATCH_TLS_SERVER_NAME", ""))
+	tlsCAFile := strings.TrimSpace(getEnv("SEAGULL_TLS_CA_FILE", ""))
+	tlsCertFile := strings.TrimSpace(getEnv("SEAGULL_TLS_CERT_FILE", ""))
+	tlsKeyFile := strings.TrimSpace(getEnv("SEAGULL_TLS_KEY_FILE", ""))
+	tlsServerName := strings.TrimSpace(getEnv("SEAGULL_TLS_SERVER_NAME", ""))
 	if (tlsCertFile == "") != (tlsKeyFile == "") {
-		log.Fatal("[AGENT] NETWATCH_TLS_CERT_FILE and NETWATCH_TLS_KEY_FILE must be set together")
+		log.Fatal("[AGENT] SEAGULL_TLS_CERT_FILE and SEAGULL_TLS_KEY_FILE must be set together")
 	}
 
-	controlHeartbeatEvery := parseDuration(getEnv("NETWATCH_CONTROL_HEARTBEAT_EVERY", "30s"), 30*time.Second)
-	controlHeartbeatJitter := parseDuration(getEnv("NETWATCH_CONTROL_HEARTBEAT_JITTER", "5s"), 5*time.Second)
-	controlConfigEvery := parseDuration(getEnv("NETWATCH_CONTROL_CONFIG_EVERY", "5m"), 5*time.Minute)
-	controlConfigJitter := parseDuration(getEnv("NETWATCH_CONTROL_CONFIG_JITTER", "30s"), 30*time.Second)
-	controlResponsePollEvery := parseDuration(getEnv("NETWATCH_CONTROL_RESPONSE_ACTIONS_POLL_EVERY", "15s"), 15*time.Second)
-	controlResponsePollJitter := parseDuration(getEnv("NETWATCH_CONTROL_RESPONSE_ACTIONS_POLL_JITTER", "5s"), 5*time.Second)
-	controlEnrollTimeout := parseDuration(getEnv("NETWATCH_CONTROL_ENROLL_TIMEOUT", "10s"), 10*time.Second)
-	forceEnrollOnStart := parseBool(getEnv("NETWATCH_FORCE_ENROLL_ON_START", "true"), true)
-	credentialRotateEvery := parseDuration(getEnv("NETWATCH_CONTROL_CREDENTIAL_ROTATE_EVERY", "5m"), 5*time.Minute)
-	credentialRotateBefore := parseDuration(getEnv("NETWATCH_CONTROL_CREDENTIAL_ROTATE_BEFORE", "24h"), 24*time.Hour)
-	responseActionStageMax := parseInt(getEnv("NETWATCH_RESPONSE_ACTION_STAGE_MAX", "512"), 512)
+	controlHeartbeatEvery := parseDuration(getEnv("SEAGULL_CONTROL_HEARTBEAT_EVERY", "30s"), 30*time.Second)
+	controlHeartbeatJitter := parseDuration(getEnv("SEAGULL_CONTROL_HEARTBEAT_JITTER", "5s"), 5*time.Second)
+	controlConfigEvery := parseDuration(getEnv("SEAGULL_CONTROL_CONFIG_EVERY", "5m"), 5*time.Minute)
+	controlConfigJitter := parseDuration(getEnv("SEAGULL_CONTROL_CONFIG_JITTER", "30s"), 30*time.Second)
+	controlResponsePollEvery := parseDuration(getEnv("SEAGULL_CONTROL_RESPONSE_ACTIONS_POLL_EVERY", "15s"), 15*time.Second)
+	controlResponsePollJitter := parseDuration(getEnv("SEAGULL_CONTROL_RESPONSE_ACTIONS_POLL_JITTER", "5s"), 5*time.Second)
+	controlEnrollTimeout := parseDuration(getEnv("SEAGULL_CONTROL_ENROLL_TIMEOUT", "10s"), 10*time.Second)
+	forceEnrollOnStart := parseBool(getEnv("SEAGULL_FORCE_ENROLL_ON_START", "true"), true)
+	credentialRotateEvery := parseDuration(getEnv("SEAGULL_CONTROL_CREDENTIAL_ROTATE_EVERY", "5m"), 5*time.Minute)
+	credentialRotateBefore := parseDuration(getEnv("SEAGULL_CONTROL_CREDENTIAL_ROTATE_BEFORE", "24h"), 24*time.Hour)
+	responseActionStageMax := parseInt(getEnv("SEAGULL_RESPONSE_ACTION_STAGE_MAX", "512"), 512)
 
-	syscollectEvery := parseDuration(getEnv("NETWATCH_SYSCOLLECT_EVERY", "5m"), 5*time.Minute)
-	syscollectStartupJitter := parseDuration(getEnv("NETWATCH_SYSCOLLECT_STARTUP_JITTER", "45s"), 45*time.Second)
-	syscollectCmdTimeout := parseDuration(getEnv("NETWATCH_SYSCOLLECT_CMD_TIMEOUT", "10s"), 10*time.Second)
-	syscollectMaxOutputBytes := int64(parseInt(getEnv("NETWATCH_SYSCOLLECT_MAX_OUTPUT_BYTES", "8388608"), 8388608))
-	syscollectMaxPackages := parseInt(getEnv("NETWATCH_SYSCOLLECT_MAX_PACKAGES", "50000"), 50000)
-	syscollectHostRoot := strings.TrimSpace(getEnv("NETWATCH_HOST_ROOT", ""))
+	syscollectEvery := parseDuration(getEnv("SEAGULL_SYSCOLLECT_EVERY", "5m"), 5*time.Minute)
+	syscollectStartupJitter := parseDuration(getEnv("SEAGULL_SYSCOLLECT_STARTUP_JITTER", "45s"), 45*time.Second)
+	syscollectCmdTimeout := parseDuration(getEnv("SEAGULL_SYSCOLLECT_CMD_TIMEOUT", "10s"), 10*time.Second)
+	syscollectMaxOutputBytes := int64(parseInt(getEnv("SEAGULL_SYSCOLLECT_MAX_OUTPUT_BYTES", "8388608"), 8388608))
+	syscollectMaxPackages := parseInt(getEnv("SEAGULL_SYSCOLLECT_MAX_PACKAGES", "50000"), 50000)
+	syscollectHostRoot := strings.TrimSpace(getEnv("SEAGULL_HOST_ROOT", ""))
 
-	vulnEvery := parseDuration(getEnv("NETWATCH_VULN_SCAN_EVERY", "12h"), 12*time.Hour)
-	vulnStartupJitter := parseDuration(getEnv("NETWATCH_VULN_STARTUP_JITTER", "2m"), 2*time.Minute)
-	vulnOSVURL := strings.TrimSpace(getEnv("NETWATCH_VULN_OSV_URL", "https://api.osv.dev"))
-	vulnMinSeverity := strings.ToLower(strings.TrimSpace(getEnv("NETWATCH_VULN_MIN_SEVERITY", "medium")))
-	vulnAnalysisProfile := strings.TrimSpace(getEnv("NETWATCH_VULN_ANALYSIS_PROFILE", "wazuh_like_v1"))
-	vulnExposureEnabled := parseBool(getEnv("NETWATCH_VULN_EXPOSURE_ENABLED", "true"), true)
-	vulnBatch := parseInt(getEnv("NETWATCH_VULN_QUERY_BATCH_SIZE", "200"), 200)
-	vulnCmdTimeout := parseDuration(getEnv("NETWATCH_VULN_CMD_TIMEOUT", "15s"), 15*time.Second)
-	vulnHTTPTimeout := parseDuration(getEnv("NETWATCH_VULN_HTTP_TIMEOUT", "60s"), 60*time.Second)
-	vulnMaxOutputBytes := int64(parseInt(getEnv("NETWATCH_VULN_MAX_OUTPUT_BYTES", "8388608"), 8388608))
-	vulnMaxPackages := parseInt(getEnv("NETWATCH_VULN_MAX_PACKAGES", strconv.Itoa(syscollectMaxPackages)), syscollectMaxPackages)
-	vulnHostRoot := strings.TrimSpace(getEnv("NETWATCH_VULN_HOST_ROOT", syscollectHostRoot))
-	vulnEmitSummaryEvent := parseBool(getEnv("NETWATCH_VULN_EMIT_SUMMARY_EVENT", "true"), true)
+	vulnEvery := parseDuration(getEnv("SEAGULL_VULN_SCAN_EVERY", "12h"), 12*time.Hour)
+	vulnStartupJitter := parseDuration(getEnv("SEAGULL_VULN_STARTUP_JITTER", "2m"), 2*time.Minute)
+	vulnOSVURL := strings.TrimSpace(getEnv("SEAGULL_VULN_OSV_URL", "https://api.osv.dev"))
+	vulnMinSeverity := strings.ToLower(strings.TrimSpace(getEnv("SEAGULL_VULN_MIN_SEVERITY", "medium")))
+	vulnAnalysisProfile := strings.TrimSpace(getEnv("SEAGULL_VULN_ANALYSIS_PROFILE", "wazuh_like_v1"))
+	vulnExposureEnabled := parseBool(getEnv("SEAGULL_VULN_EXPOSURE_ENABLED", "true"), true)
+	vulnBatch := parseInt(getEnv("SEAGULL_VULN_QUERY_BATCH_SIZE", "200"), 200)
+	vulnCmdTimeout := parseDuration(getEnv("SEAGULL_VULN_CMD_TIMEOUT", "15s"), 15*time.Second)
+	vulnHTTPTimeout := parseDuration(getEnv("SEAGULL_VULN_HTTP_TIMEOUT", "60s"), 60*time.Second)
+	vulnMaxOutputBytes := int64(parseInt(getEnv("SEAGULL_VULN_MAX_OUTPUT_BYTES", "8388608"), 8388608))
+	vulnMaxPackages := parseInt(getEnv("SEAGULL_VULN_MAX_PACKAGES", strconv.Itoa(syscollectMaxPackages)), syscollectMaxPackages)
+	vulnHostRoot := strings.TrimSpace(getEnv("SEAGULL_VULN_HOST_ROOT", syscollectHostRoot))
+	vulnEmitSummaryEvent := parseBool(getEnv("SEAGULL_VULN_EMIT_SUMMARY_EVENT", "true"), true)
 
-	logPath := getEnv("NETWATCH_AUTHLOG_PATH", "/var/log/auth.log")
-	includeAccepted := parseBool(getEnv("NETWATCH_AUTHLOG_INCLUDE_ACCEPTED", "false"), false)
-	authDedupTTL := parseDuration(getEnv("NETWATCH_AUTHLOG_DEDUP_TTL", "30s"), 30*time.Second)
+	logPath := getEnv("SEAGULL_AUTHLOG_PATH", "/var/log/auth.log")
+	includeAccepted := parseBool(getEnv("SEAGULL_AUTHLOG_INCLUDE_ACCEPTED", "false"), false)
+	authDedupTTL := parseDuration(getEnv("SEAGULL_AUTHLOG_DEDUP_TTL", "30s"), 30*time.Second)
 
-	procTCP4Path := getEnv("NETWATCH_PROC_TCP4_PATH", "/proc/net/tcp")
-	procTCP6Path := getEnv("NETWATCH_PROC_TCP6_PATH", "/proc/net/tcp6")
-	procExecEvery := parseDuration(getEnv("NETWATCH_PROC_EXEC_EVERY", "2s"), 2*time.Second)
-	procExecMaxBatch := parseInt(getEnv("NETWATCH_PROC_EXEC_MAX_BATCH", "200"), 200)
-	procExecHashEnabled := parseBool(getEnv("NETWATCH_PROC_EXEC_HASH_ENABLED", "true"), true)
-	procExecHashMaxBytes := int64(parseInt(getEnv("NETWATCH_PROC_EXEC_HASH_MAX_BYTES", "26214400"), 26214400))
-	procExecEmitInitial := parseBool(getEnv("NETWATCH_PROC_EXEC_EMIT_INITIAL", "false"), false)
-	procExecIgnoreExeNames := parseStringSet(getEnv("NETWATCH_PROC_EXEC_IGNORE_EXE", "sleep"))
-	procExecIgnoreCmdContains := splitCSVLower(getEnv("NETWATCH_PROC_EXEC_IGNORE_CMD_CONTAINS", "systemd --user"))
+	procTCP4Path := getEnv("SEAGULL_PROC_TCP4_PATH", "/proc/net/tcp")
+	procTCP6Path := getEnv("SEAGULL_PROC_TCP6_PATH", "/proc/net/tcp6")
+	procExecEvery := parseDuration(getEnv("SEAGULL_PROC_EXEC_EVERY", "2s"), 2*time.Second)
+	procExecMaxBatch := parseInt(getEnv("SEAGULL_PROC_EXEC_MAX_BATCH", "200"), 200)
+	procExecHashEnabled := parseBool(getEnv("SEAGULL_PROC_EXEC_HASH_ENABLED", "true"), true)
+	procExecHashMaxBytes := int64(parseInt(getEnv("SEAGULL_PROC_EXEC_HASH_MAX_BYTES", "26214400"), 26214400))
+	procExecEmitInitial := parseBool(getEnv("SEAGULL_PROC_EXEC_EMIT_INITIAL", "false"), false)
+	procExecIgnoreExeNames := parseStringSet(getEnv("SEAGULL_PROC_EXEC_IGNORE_EXE", "sleep"))
+	procExecIgnoreCmdContains := splitCSVLower(getEnv("SEAGULL_PROC_EXEC_IGNORE_CMD_CONTAINS", "systemd --user"))
 
-	fimEvery := parseDuration(getEnv("NETWATCH_FIM_EVERY", "30s"), 30*time.Second)
-	fimMaxBatch := parseInt(getEnv("NETWATCH_FIM_MAX_BATCH", "200"), 200)
-	fimMaxDepth := parseInt(getEnv("NETWATCH_FIM_MAX_DEPTH", "4"), 4)
-	fimHashEnabled := parseBool(getEnv("NETWATCH_FIM_HASH_ENABLED", "true"), true)
-	fimHashMaxBytes := int64(parseInt(getEnv("NETWATCH_FIM_HASH_MAX_BYTES", "2097152"), 2097152))
-	fimEmitInitial := parseBool(getEnv("NETWATCH_FIM_EMIT_INITIAL", "false"), false)
-	fimWatchPaths := splitCSV(getEnv("NETWATCH_FIM_PATHS", ""))
-	fimExclude := splitCSV(getEnv("NETWATCH_FIM_EXCLUDE_PATHS", ""))
+	fimEvery := parseDuration(getEnv("SEAGULL_FIM_EVERY", "30s"), 30*time.Second)
+	fimMaxBatch := parseInt(getEnv("SEAGULL_FIM_MAX_BATCH", "200"), 200)
+	fimMaxDepth := parseInt(getEnv("SEAGULL_FIM_MAX_DEPTH", "4"), 4)
+	fimHashEnabled := parseBool(getEnv("SEAGULL_FIM_HASH_ENABLED", "true"), true)
+	fimHashMaxBytes := int64(parseInt(getEnv("SEAGULL_FIM_HASH_MAX_BYTES", "2097152"), 2097152))
+	fimEmitInitial := parseBool(getEnv("SEAGULL_FIM_EMIT_INITIAL", "false"), false)
+	fimWatchPaths := splitCSV(getEnv("SEAGULL_FIM_PATHS", ""))
+	fimExclude := splitCSV(getEnv("SEAGULL_FIM_EXCLUDE_PATHS", ""))
 
-	skipLoopback := parseBool(getEnv("NETWATCH_SKIP_LOOPBACK", "true"), true)
-	skipLinkLocal := parseBool(getEnv("NETWATCH_SKIP_LINK_LOCAL", "true"), true)
-	skipPrivate := parseBool(getEnv("NETWATCH_SKIP_PRIVATE_TO_PRIVATE", "false"), false)
+	skipLoopback := parseBool(getEnv("SEAGULL_SKIP_LOOPBACK", "true"), true)
+	skipLinkLocal := parseBool(getEnv("SEAGULL_SKIP_LINK_LOCAL", "true"), true)
+	skipPrivate := parseBool(getEnv("SEAGULL_SKIP_PRIVATE_TO_PRIVATE", "false"), false)
 
-	procDropOutbound := parseBool(getEnv("NETWATCH_PROC_DROP_LIKELY_OUTBOUND", "true"), true)
-	ephemeralMin := parseInt(getEnv("NETWATCH_EPHEMERAL_PORT_MIN", "49152"), 49152)
+	procDropOutbound := parseBool(getEnv("SEAGULL_PROC_DROP_LIKELY_OUTBOUND", "true"), true)
+	ephemeralMin := parseInt(getEnv("SEAGULL_EPHEMERAL_PORT_MIN", "49152"), 49152)
 
-	dedupTTL := parseDuration(getEnv("NETWATCH_DEDUP_TTL", "30s"), 30*time.Second)
-	establishedTTL := parseDuration(getEnv("NETWATCH_ESTABLISHED_TTL", "10m"), 10*time.Minute)
+	dedupTTL := parseDuration(getEnv("SEAGULL_DEDUP_TTL", "30s"), 30*time.Second)
+	establishedTTL := parseDuration(getEnv("SEAGULL_ESTABLISHED_TTL", "10m"), 10*time.Minute)
 
-	denyCIDRs := parseCIDRs(getEnv("NETWATCH_DENY_CIDRS", ""))
-	denyDstPorts := parseIntSet(getEnv("NETWATCH_DENY_DST_PORTS", ""))
-	denySrcPorts := parseIntSet(getEnv("NETWATCH_DENY_SRC_PORTS", ""))
+	denyCIDRs := parseCIDRs(getEnv("SEAGULL_DENY_CIDRS", ""))
+	denyDstPorts := parseIntSet(getEnv("SEAGULL_DENY_DST_PORTS", ""))
+	denySrcPorts := parseIntSet(getEnv("SEAGULL_DENY_SRC_PORTS", ""))
 
-	lateralMode := strings.ToLower(strings.TrimSpace(getEnv("NETWATCH_LATERAL_MODE", "pcap")))
-	lateralIface := getEnv("NETWATCH_LATERAL_PCAP_IFACE", getEnv("NETWATCH_PCAP_IFACE", "any"))
-	lateralPorts := parseIntSet(getEnv("NETWATCH_LATERAL_PORTS", "22,445,3389,5985,5986,135,139"))
-	lateralIncludeEstablished := parseBool(getEnv("NETWATCH_LATERAL_INCLUDE_ESTABLISHED", "true"), true)
-	lateralDedup := parseDuration(getEnv("NETWATCH_LATERAL_DEDUP_TTL", "5s"), 5*time.Second)
-	lateralMaxBatch := parseInt(getEnv("NETWATCH_LATERAL_MAX_BATCH", "500"), 500)
+	lateralMode := strings.ToLower(strings.TrimSpace(getEnv("SEAGULL_LATERAL_MODE", "pcap")))
+	lateralIface := getEnv("SEAGULL_LATERAL_PCAP_IFACE", getEnv("SEAGULL_PCAP_IFACE", "any"))
+	lateralPorts := parseIntSet(getEnv("SEAGULL_LATERAL_PORTS", "22,445,3389,5985,5986,135,139"))
+	lateralIncludeEstablished := parseBool(getEnv("SEAGULL_LATERAL_INCLUDE_ESTABLISHED", "true"), true)
+	lateralDedup := parseDuration(getEnv("SEAGULL_LATERAL_DEDUP_TTL", "5s"), 5*time.Second)
+	lateralMaxBatch := parseInt(getEnv("SEAGULL_LATERAL_MAX_BATCH", "500"), 500)
 
-	scanIface := getEnv("NETWATCH_PCAP_IFACE", "any")
-	scanDedup := parseDuration(getEnv("NETWATCH_SCAN_DEDUP_TTL", "2s"), 2*time.Second)
-	scanMaxBatch := parseInt(getEnv("NETWATCH_SCAN_MAX_BATCH", "5000"), 5000)
-	scanMode := getEnv("NETWATCH_SCAN_MODE", "summary")
-	l7Iface := getEnv("NETWATCH_L7_PCAP_IFACE", scanIface)
-	l7Dedup := parseDuration(getEnv("NETWATCH_L7_DEDUP_TTL", "20s"), 20*time.Second)
-	l7MaxBatch := parseInt(getEnv("NETWATCH_L7_MAX_BATCH", "400"), 400)
-	l7MaxPayload := parseInt(getEnv("NETWATCH_L7_MAX_PAYLOAD_BYTES", "768"), 768)
-	l7IncludePayload := parseBool(getEnv("NETWATCH_L7_INCLUDE_PAYLOAD", "true"), true)
+	scanIface := getEnv("SEAGULL_PCAP_IFACE", "any")
+	scanDedup := parseDuration(getEnv("SEAGULL_SCAN_DEDUP_TTL", "2s"), 2*time.Second)
+	scanMaxBatch := parseInt(getEnv("SEAGULL_SCAN_MAX_BATCH", "5000"), 5000)
+	scanMode := getEnv("SEAGULL_SCAN_MODE", "summary")
+	l7Iface := getEnv("SEAGULL_L7_PCAP_IFACE", scanIface)
+	l7Dedup := parseDuration(getEnv("SEAGULL_L7_DEDUP_TTL", "20s"), 20*time.Second)
+	l7MaxBatch := parseInt(getEnv("SEAGULL_L7_MAX_BATCH", "400"), 400)
+	l7MaxPayload := parseInt(getEnv("SEAGULL_L7_MAX_PAYLOAD_BYTES", "768"), 768)
+	l7IncludePayload := parseBool(getEnv("SEAGULL_L7_INCLUDE_PAYLOAD", "true"), true)
 
-	ddosIface := getEnv("NETWATCH_DDOS_PCAP_IFACE", scanIface)
-	ddosWindow := parseDuration(getEnv("NETWATCH_DDOS_WINDOW", "1s"), 1*time.Second)
-	ddosEvalEvery := parseDuration(getEnv("NETWATCH_DDOS_EVAL_EVERY", "1s"), 1*time.Second)
-	ddosCooldown := parseDuration(getEnv("NETWATCH_DDOS_COOLDOWN", "30s"), 30*time.Second)
-	ddosSustain := parseInt(getEnv("NETWATCH_DDOS_SUSTAIN_WINDOWS", "3"), 3)
-	ddosWarmup := parseInt(getEnv("NETWATCH_DDOS_BASELINE_WARMUP_WINDOWS", "20"), 20)
-	ddosAlpha := parseFloat(getEnv("NETWATCH_DDOS_BASELINE_ALPHA", "0.08"), 0.08)
-	ddosFactor := parseFloat(getEnv("NETWATCH_DDOS_BASELINE_FACTOR", "4.0"), 4.0)
-	ddosMinPPS := parseFloat(getEnv("NETWATCH_DDOS_MIN_PPS", "3000"), 3000)
-	ddosMinBPS := parseFloat(getEnv("NETWATCH_DDOS_MIN_BPS", "500000"), 500000)
-	ddosMinPackets := parseInt(getEnv("NETWATCH_DDOS_MIN_PACKETS", "0"), 0)
-	ddosMinRequests := parseInt(getEnv("NETWATCH_DDOS_MIN_REQUESTS", "0"), 0)
-	ddosMinConf := parseInt(getEnv("NETWATCH_DDOS_MIN_CONFIDENCE", "70"), 70)
-	ddosMinSynRatio := parseFloat(getEnv("NETWATCH_DDOS_MIN_SYN_RATIO", "0.70"), 0.70)
-	ddosMinSrcIPs := parseInt(getEnv("NETWATCH_DDOS_MIN_SRC_IPS", "30"), 30)
-	ddosMinSrcEntropy := parseFloat(getEnv("NETWATCH_DDOS_MIN_SRC_ENTROPY_NORM", "0.70"), 0.70)
+	ddosIface := getEnv("SEAGULL_DDOS_PCAP_IFACE", scanIface)
+	ddosWindow := parseDuration(getEnv("SEAGULL_DDOS_WINDOW", "1s"), 1*time.Second)
+	ddosEvalEvery := parseDuration(getEnv("SEAGULL_DDOS_EVAL_EVERY", "1s"), 1*time.Second)
+	ddosCooldown := parseDuration(getEnv("SEAGULL_DDOS_COOLDOWN", "30s"), 30*time.Second)
+	ddosSustain := parseInt(getEnv("SEAGULL_DDOS_SUSTAIN_WINDOWS", "3"), 3)
+	ddosWarmup := parseInt(getEnv("SEAGULL_DDOS_BASELINE_WARMUP_WINDOWS", "20"), 20)
+	ddosAlpha := parseFloat(getEnv("SEAGULL_DDOS_BASELINE_ALPHA", "0.08"), 0.08)
+	ddosFactor := parseFloat(getEnv("SEAGULL_DDOS_BASELINE_FACTOR", "4.0"), 4.0)
+	ddosMinPPS := parseFloat(getEnv("SEAGULL_DDOS_MIN_PPS", "3000"), 3000)
+	ddosMinBPS := parseFloat(getEnv("SEAGULL_DDOS_MIN_BPS", "500000"), 500000)
+	ddosMinPackets := parseInt(getEnv("SEAGULL_DDOS_MIN_PACKETS", "0"), 0)
+	ddosMinRequests := parseInt(getEnv("SEAGULL_DDOS_MIN_REQUESTS", "0"), 0)
+	ddosMinConf := parseInt(getEnv("SEAGULL_DDOS_MIN_CONFIDENCE", "70"), 70)
+	ddosMinSynRatio := parseFloat(getEnv("SEAGULL_DDOS_MIN_SYN_RATIO", "0.70"), 0.70)
+	ddosMinSrcIPs := parseInt(getEnv("SEAGULL_DDOS_MIN_SRC_IPS", "30"), 30)
+	ddosMinSrcEntropy := parseFloat(getEnv("SEAGULL_DDOS_MIN_SRC_ENTROPY_NORM", "0.70"), 0.70)
 
-	ddosEnableL7 := parseBool(getEnv("NETWATCH_DDOS_ENABLE_L7", "true"), true)
-	ddosMinHTTPRPS := parseFloat(getEnv("NETWATCH_DDOS_MIN_HTTP_RPS", "200"), 200)
-	ddosMinTLS := parseFloat(getEnv("NETWATCH_DDOS_MIN_TLS_HS_RPS", "200"), 200)
-	ddosMinL7Ratio := parseFloat(getEnv("NETWATCH_DDOS_MIN_L7_RATIO", "0.15"), 0.15)
+	ddosEnableL7 := parseBool(getEnv("SEAGULL_DDOS_ENABLE_L7", "true"), true)
+	ddosMinHTTPRPS := parseFloat(getEnv("SEAGULL_DDOS_MIN_HTTP_RPS", "200"), 200)
+	ddosMinTLS := parseFloat(getEnv("SEAGULL_DDOS_MIN_TLS_HS_RPS", "200"), 200)
+	ddosMinL7Ratio := parseFloat(getEnv("SEAGULL_DDOS_MIN_L7_RATIO", "0.15"), 0.15)
 
-	ddosEnableEntropy := parseBool(getEnv("NETWATCH_DDOS_ENABLE_ENTROPY", "true"), true)
-	ddosMinSrcEntropySig := parseFloat(getEnv("NETWATCH_DDOS_MIN_SRC_ENTROPY_NORM_SIGNAL", "0.75"), 0.75)
-	ddosMinPortEntropy := parseFloat(getEnv("NETWATCH_DDOS_MIN_PORT_ENTROPY_NORM", "0.35"), 0.35)
-	ddosPortTopN := parseInt(getEnv("NETWATCH_DDOS_PORT_ENTROPY_TOPN", "16"), 16)
+	ddosEnableEntropy := parseBool(getEnv("SEAGULL_DDOS_ENABLE_ENTROPY", "true"), true)
+	ddosMinSrcEntropySig := parseFloat(getEnv("SEAGULL_DDOS_MIN_SRC_ENTROPY_NORM_SIGNAL", "0.75"), 0.75)
+	ddosMinPortEntropy := parseFloat(getEnv("SEAGULL_DDOS_MIN_PORT_ENTROPY_NORM", "0.35"), 0.35)
+	ddosPortTopN := parseInt(getEnv("SEAGULL_DDOS_PORT_ENTROPY_TOPN", "16"), 16)
 
-	ddosCardMode := strings.ToLower(strings.TrimSpace(getEnv("NETWATCH_DDOS_CARDINALITY_MODE", "hll")))
-	ddosHLLP := parseInt(getEnv("NETWATCH_DDOS_HLL_PRECISION", "14"), 14)
-	ddosBloomBits := parseInt(getEnv("NETWATCH_DDOS_BLOOM_BITS", "1048576"), 1048576)
-	ddosMaxUnique := parseInt(getEnv("NETWATCH_DDOS_MAX_UNIQUE_SRC", "500000"), 500000)
-	ddosTopSrc := parseInt(getEnv("NETWATCH_DDOS_TOP_SRC", "20"), 20)
-	ddosMaxBatch := parseInt(getEnv("NETWATCH_DDOS_MAX_BATCH", "200"), 200)
-	ddosBpHighWM := parseInt(getEnv("NETWATCH_DDOS_BACKPRESSURE_HIGH_WATERMARK", "160"), 160)
-	ddosBpSampleEvery := parseInt(getEnv("NETWATCH_DDOS_BACKPRESSURE_SAMPLE_EVERY", "4"), 4)
+	ddosCardMode := strings.ToLower(strings.TrimSpace(getEnv("SEAGULL_DDOS_CARDINALITY_MODE", "hll")))
+	ddosHLLP := parseInt(getEnv("SEAGULL_DDOS_HLL_PRECISION", "14"), 14)
+	ddosBloomBits := parseInt(getEnv("SEAGULL_DDOS_BLOOM_BITS", "1048576"), 1048576)
+	ddosMaxUnique := parseInt(getEnv("SEAGULL_DDOS_MAX_UNIQUE_SRC", "500000"), 500000)
+	ddosTopSrc := parseInt(getEnv("SEAGULL_DDOS_TOP_SRC", "20"), 20)
+	ddosMaxBatch := parseInt(getEnv("SEAGULL_DDOS_MAX_BATCH", "200"), 200)
+	ddosBpHighWM := parseInt(getEnv("SEAGULL_DDOS_BACKPRESSURE_HIGH_WATERMARK", "160"), 160)
+	ddosBpSampleEvery := parseInt(getEnv("SEAGULL_DDOS_BACKPRESSURE_SAMPLE_EVERY", "4"), 4)
 
-	levelStr := getEnv("NETWATCH_LOG_LEVEL", "info")
+	levelStr := getEnv("SEAGULL_LOG_LEVEL", "info")
 	logLevel := parseLogLevel(levelStr)
 
-	logSummaryEvery := parseDuration(getEnv("NETWATCH_LOG_SUMMARY_EVERY", "10s"), 10*time.Second)
-	logHeartbeatEvery := parseDuration(getEnv("NETWATCH_LOG_HEARTBEAT_EVERY", "60s"), 60*time.Second)
-	logMinEvents := parseInt(getEnv("NETWATCH_LOG_MIN_EVENTS", "50"), 50)
+	logSummaryEvery := parseDuration(getEnv("SEAGULL_LOG_SUMMARY_EVERY", "10s"), 10*time.Second)
+	logHeartbeatEvery := parseDuration(getEnv("SEAGULL_LOG_HEARTBEAT_EVERY", "60s"), 60*time.Second)
+	logMinEvents := parseInt(getEnv("SEAGULL_LOG_MIN_EVENTS", "50"), 50)
 
 	return Config{
 		AgentID:        agentID,
@@ -2080,6 +2080,12 @@ func getEnv(k, def string) string {
 	if v, ok := os.LookupEnv(k); ok && strings.TrimSpace(v) != "" {
 		return v
 	}
+	if strings.HasPrefix(k, "SEAGULL_") {
+		legacyKey := "NETWATCH_" + strings.TrimPrefix(k, "SEAGULL_")
+		if v, ok := os.LookupEnv(legacyKey); ok && strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
 	return def
 }
 
@@ -2092,19 +2098,29 @@ func getSecretEnv(k, def string) string {
 		return readTextFile(filePath)
 	}
 
+	if strings.HasPrefix(k, "SEAGULL_") {
+		legacyKey := "NETWATCH_" + strings.TrimPrefix(k, "SEAGULL_")
+		if v, ok := os.LookupEnv(legacyKey); ok && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+		if filePath, ok := os.LookupEnv(legacyKey + "_FILE"); ok && strings.TrimSpace(filePath) != "" {
+			return readTextFile(filePath)
+		}
+	}
+
 	return def
 }
 
 func loadBootstrapTokenValue() (string, string, error) {
-	token := strings.TrimSpace(getSecretEnv("NETWATCH_AGENT_BOOTSTRAP_TOKEN", ""))
-	tokenFile := strings.TrimSpace(getEnv("NETWATCH_AGENT_BOOTSTRAP_TOKEN_FILE", ""))
+	token := strings.TrimSpace(getSecretEnv("SEAGULL_AGENT_BOOTSTRAP_TOKEN", ""))
+	tokenFile := strings.TrimSpace(getEnv("SEAGULL_AGENT_BOOTSTRAP_TOKEN_FILE", ""))
 	if tokenFile == "" {
 		return token, "", nil
 	}
 
 	fileToken, err := readRequiredTextFile(tokenFile)
 	if err != nil {
-		return "", tokenFile, fmt.Errorf("NETWATCH_AGENT_BOOTSTRAP_TOKEN_FILE=%q: %w", tokenFile, err)
+		return "", tokenFile, fmt.Errorf("SEAGULL_AGENT_BOOTSTRAP_TOKEN_FILE=%q: %w", tokenFile, err)
 	}
 	return fileToken, tokenFile, nil
 }

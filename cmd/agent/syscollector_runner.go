@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/syscollector"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/syscollector"
 )
 
 type SyscollectorStatus struct {
