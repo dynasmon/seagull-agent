@@ -13,7 +13,7 @@ import (
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 
-	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/model"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
 )
 
 type PcapL7Options struct {

@@ -1,4 +1,4 @@
-module gitlab.com/nathanmblima/dynasmon-netwatch/agent
+module gitlab.com/nathanmblima/dynasmon-seagull/agent
 
 go 1.22
 

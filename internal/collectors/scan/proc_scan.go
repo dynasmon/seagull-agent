@@ -3,8 +3,8 @@ package scan
 import (
 	"time"
 
-	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/collectors/proc"
-	"gitlab.com/nathanmblima/dynasmon-netwatch/agent/internal/model"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/proc"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
 )
 
 func scanConfidenceFromProcState(stateHex string) int {

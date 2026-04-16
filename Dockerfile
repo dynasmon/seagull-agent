@@ -8,15 +8,15 @@ RUN go mod download
 
 COPY . .
 ENV CGO_ENABLED=1
-RUN go build -o /bin/netwatch-agent ./cmd/agent
+RUN go build -o /bin/seagull-agent ./cmd/agent
 
 FROM alpine:3.20
 
 RUN apk add --no-cache libpcap ca-certificates rpm
 
-COPY --from=builder /bin/netwatch-agent /usr/local/bin/netwatch-agent
-COPY docker-entrypoint.sh /usr/local/bin/netwatch-agent-entrypoint
+COPY --from=builder /bin/seagull-agent /usr/local/bin/seagull-agent
+COPY docker-entrypoint.sh /usr/local/bin/seagull-agent-entrypoint
 
-RUN chmod +x /usr/local/bin/netwatch-agent-entrypoint
+RUN chmod +x /usr/local/bin/seagull-agent-entrypoint
 
-ENTRYPOINT ["/usr/local/bin/netwatch-agent-entrypoint"]
+ENTRYPOINT ["/usr/local/bin/seagull-agent-entrypoint"]
