@@ -292,6 +292,7 @@ type Agent struct {
 	state SummaryState
 
 	enrollMu          sync.Mutex
+	recoveryInFlight  bool
 	recoveryFailures  int
 	nextEnrollRetryAt time.Time
 }
@@ -1280,17 +1281,27 @@ func (a *Agent) recoverIdentity(rootCtx context.Context, trigger string, force b
 
 	now := time.Now().UTC()
 	a.enrollMu.Lock()
+	if a.recoveryInFlight {
+		a.enrollMu.Unlock()
+		return fmt.Errorf("identity recovery already in progress")
+	}
 	if !force && !a.nextEnrollRetryAt.IsZero() && now.Before(a.nextEnrollRetryAt) {
 		next := a.nextEnrollRetryAt
 		a.enrollMu.Unlock()
 		return fmt.Errorf("identity recovery backed off until %s", next.Format(time.RFC3339))
 	}
+	failures := a.recoveryFailures
 	a.nextEnrollRetryAt = time.Time{}
+	a.recoveryInFlight = true
 	a.enrollMu.Unlock()
+	defer func() {
+		a.enrollMu.Lock()
+		a.recoveryInFlight = false
+		a.enrollMu.Unlock()
+	}()
 
 	bootstrapToken := strings.TrimSpace(a.currentBootstrapToken())
 	currentRenewal, renewalExp, previousRenewal, previousRenewalExp := a.recoveryTokenSnapshot()
-	_, _, _, failures, _ := a.authStateSnapshot()
 	renewalToken := strings.TrimSpace(currentRenewal)
 	if !renewalExp.IsZero() && now.After(renewalExp) {
 		renewalToken = ""
@@ -1792,10 +1803,6 @@ func loadConfig() Config {
 
 	agentConfigFile := getEnv("SEAGULL_AGENT_CONFIG_FILE", "/var/lib/seagull/agent.config.json")
 	agentIdentityStateFile := getEnv("SEAGULL_AGENT_IDENTITY_STATE_FILE", "/var/lib/seagull/agent.identity.json")
-	bootstrapToken, bootstrapTokenFile, err := loadBootstrapTokenValue()
-	if err != nil {
-		log.Fatalf("[AGENT] bootstrap token config error: %v", err)
-	}
 	credentialFile := strings.TrimSpace(getEnv("SEAGULL_AGENT_CREDENTIAL_FILE", "/var/lib/seagull/agent.credential"))
 	agentCredential := strings.TrimSpace(getSecretEnv("SEAGULL_AGENT_CREDENTIAL", ""))
 	agentCredentialExpiresAt := ""
@@ -1825,6 +1832,11 @@ func loadConfig() Config {
 
 	if agentCredential == "" && credentialFile != "" {
 		agentCredential = strings.TrimSpace(readTextFile(credentialFile))
+	}
+	hasExistingIdentity := agentCredential != "" || renewalToken != "" || previousRenewalToken != ""
+	bootstrapToken, bootstrapTokenFile, err := loadBootstrapTokenValue(hasExistingIdentity)
+	if err != nil {
+		log.Fatalf("[AGENT] bootstrap token config error: %v", err)
 	}
 
 	tlsCAFile := strings.TrimSpace(getEnv("SEAGULL_TLS_CA_FILE", ""))
@@ -2443,16 +2455,26 @@ func getSecretEnv(k, def string) string {
 	return def
 }
 
-func loadBootstrapTokenValue() (string, string, error) {
+func loadBootstrapTokenValue(hasExistingIdentity bool) (string, string, error) {
 	token := strings.TrimSpace(getSecretEnv("SEAGULL_AGENT_BOOTSTRAP_TOKEN", ""))
 	tokenFile := strings.TrimSpace(getEnv("SEAGULL_AGENT_BOOTSTRAP_TOKEN_FILE", ""))
 	if tokenFile == "" {
 		return token, "", nil
 	}
 
-	fileToken, err := readRequiredTextFile(tokenFile)
+	data, err := os.ReadFile(tokenFile)
 	if err != nil {
+		if hasExistingIdentity && os.IsNotExist(err) {
+			return token, tokenFile, nil
+		}
 		return "", tokenFile, fmt.Errorf("SEAGULL_AGENT_BOOTSTRAP_TOKEN_FILE=%q: %w", tokenFile, err)
+	}
+	fileToken := strings.TrimSpace(string(data))
+	if fileToken == "" {
+		if hasExistingIdentity {
+			return token, tokenFile, nil
+		}
+		return "", tokenFile, fmt.Errorf("SEAGULL_AGENT_BOOTSTRAP_TOKEN_FILE=%q: file is empty", tokenFile)
 	}
 	return fileToken, tokenFile, nil
 }
@@ -3023,22 +3045,6 @@ func readTextFile(path string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(b))
-}
-
-func readRequiredTextFile(path string) (string, error) {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return "", fmt.Errorf("path is empty")
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	value := strings.TrimSpace(string(b))
-	if value == "" {
-		return "", fmt.Errorf("file is empty")
-	}
-	return value, nil
 }
 
 func round2(v float64) float64 {
