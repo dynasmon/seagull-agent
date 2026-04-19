@@ -45,10 +45,12 @@ type EnrollRequest struct {
 }
 
 type Credential struct {
-	Credential string `json:"credential"`
-	ExpiresAt  string `json:"expires_at"`
-	MaxUses    int    `json:"max_uses"`
-	UsedUses   int    `json:"used_uses"`
+	Credential            string `json:"credential"`
+	ExpiresAt             string `json:"expires_at"`
+	MaxUses               int    `json:"max_uses"`
+	UsedUses              int    `json:"used_uses"`
+	RenewalToken          string `json:"renewal_token"`
+	RenewalTokenExpiresAt string `json:"renewal_token_expires_at"`
 }
 
 type EnrollResponse struct {

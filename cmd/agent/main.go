@@ -59,12 +59,17 @@ type Config struct {
 	HTTPTimeout    time.Duration
 	SenderMaxBatch int
 
-	AgentConfigFile          string
-	BootstrapToken           string
-	BootstrapTokenFile       string
-	AgentCredential          string
-	AgentCredentialExpiresAt string
-	CredentialFile           string
+	AgentConfigFile               string
+	AgentIdentityStateFile        string
+	BootstrapToken                string
+	BootstrapTokenFile            string
+	AgentCredential               string
+	AgentCredentialExpiresAt      string
+	CredentialFile                string
+	RenewalToken                  string
+	RenewalTokenExpiresAt         string
+	PreviousRenewalToken          string
+	PreviousRenewalTokenExpiresAt string
 
 	TLSCAFile     string
 	TLSCertFile   string
@@ -254,12 +259,17 @@ type SummaryState struct {
 type Agent struct {
 	cfg Config
 
-	sender  *sender.Sender
-	cp      *controlplane.Client
-	runtime *RuntimeConfig
-	credMu  sync.RWMutex
-	cred    string
-	credExp time.Time
+	sender               *sender.Sender
+	cp                   *controlplane.Client
+	runtime              *RuntimeConfig
+	credMu               sync.RWMutex
+	cred                 string
+	credExp              time.Time
+	renewalToken         string
+	renewalExp           time.Time
+	previousRenewalToken string
+	previousRenewalExp   time.Time
+	lastRecoveryMethod   string
 
 	sysMu     sync.RWMutex
 	sysStatus SyscollectorStatus
@@ -282,6 +292,7 @@ type Agent struct {
 	state SummaryState
 
 	enrollMu          sync.Mutex
+	recoveryFailures  int
 	nextEnrollRetryAt time.Time
 }
 
@@ -315,59 +326,11 @@ func main() {
 		cancel()
 	}
 
-	// Control Plane enrollment with bootstrap token + rotating credential.
-	{
-		hostname, _ := os.Hostname()
-		currentCredential := strings.TrimSpace(cfg.AgentCredential)
-		cp := controlplane.New(cfg.APIURL, cfg.HTTPTimeout, cfg.AgentID, func() string { return currentCredential }, httpClient)
-
-		bootstrapToken := strings.TrimSpace(cfg.BootstrapToken)
-		shouldEnroll := bootstrapToken != "" && (cfg.ForceEnrollOnStart || currentCredential == "")
-		if shouldEnroll && bootstrapToken == "" {
-			logJSON(LevelWarn, "agent_enroll_skipped", map[string]interface{}{
-				"agent_id": cfg.AgentID,
-				"reason":   "missing_bootstrap_token",
-			})
-			shouldEnroll = false
-		}
-		if shouldEnroll {
-			ctx, cancel := context.WithTimeout(rootCtx, cfg.ControlEnrollTimeout)
-			resp, err := cp.Enroll(ctx, controlplane.EnrollRequest{
-				AgentID:        cfg.AgentID,
-				Hostname:       hostname,
-				OS:             runtime.GOOS,
-				Version:        "0.1.0",
-				BootstrapToken: bootstrapToken,
-			})
-			cancel()
-			if err != nil {
-				logJSON(LevelWarn, "agent_enroll_failed", map[string]interface{}{
-					"agent_id": cfg.AgentID,
-					"error":    err.Error(),
-				})
-			} else {
-				currentCredential = strings.TrimSpace(resp.Credential.Credential)
-				cfg.AgentCredential = currentCredential
-				cfg.AgentCredentialExpiresAt = strings.TrimSpace(resp.Credential.ExpiresAt)
-				if cfg.CredentialFile != "" && currentCredential != "" {
-					_ = atomicWriteFile(cfg.CredentialFile, []byte(currentCredential+"\n"), 0o600)
-				}
-				if cfg.AgentConfigFile != "" && len(resp.Config) > 0 {
-					if b, mErr := json.Marshal(resp.Config); mErr == nil {
-						_ = atomicWriteFile(cfg.AgentConfigFile, b, 0o600)
-					}
-				}
-				if cfg.BootstrapTokenFile != "" {
-					consumeBootstrapTokenFile(cfg.BootstrapTokenFile, cfg.AgentID)
-				}
-			}
-		}
-	}
-
 	a, err := newAgent(cfg, rootCtx, stop, httpClient)
 	if err != nil {
 		log.Fatalf("[AGENT] init error: %v", err)
 	}
+	a.ensureInitialIdentity(rootCtx)
 
 	a.startControlPlane(rootCtx)
 	a.startSyscollector(rootCtx)
@@ -380,9 +343,12 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc, http
 	now := time.Now().UTC()
 
 	a := &Agent{
-		cfg:           cfg,
-		cred:          strings.TrimSpace(cfg.AgentCredential),
-		responseStage: responseactions.NewStage(cfg.ResponseActionStageMax),
+		cfg:                  cfg,
+		cred:                 strings.TrimSpace(cfg.AgentCredential),
+		renewalToken:         strings.TrimSpace(cfg.RenewalToken),
+		previousRenewalToken: strings.TrimSpace(cfg.PreviousRenewalToken),
+		lastRecoveryMethod:   "startup",
+		responseStage:        responseactions.NewStage(cfg.ResponseActionStageMax),
 		runtime: NewRuntimeConfig(
 			cfg.AgentConfigFile,
 			SyscollectorConfig{
@@ -419,9 +385,9 @@ func newAgent(cfg Config, rootCtx context.Context, stop context.CancelFunc, http
 	}
 	a.sender = sender.New(cfg.APIURL, cfg.HTTPTimeout, cfg.SenderMaxBatch, cfg.AgentID, a.currentCredential, httpClient)
 	a.cp = controlplane.New(cfg.APIURL, cfg.HTTPTimeout, cfg.AgentID, a.currentCredential, httpClient)
-	if ts, err := time.Parse(time.RFC3339, strings.TrimSpace(cfg.AgentCredentialExpiresAt)); err == nil {
-		a.credExp = ts.UTC()
-	}
+	a.credExp = parseOptionalRFC3339(cfg.AgentCredentialExpiresAt)
+	a.renewalExp = parseOptionalRFC3339(cfg.RenewalTokenExpiresAt)
+	a.previousRenewalExp = parseOptionalRFC3339(cfg.PreviousRenewalTokenExpiresAt)
 
 	// Best-effort: pull the current config once at startup.
 	ctx, cancel := context.WithTimeout(rootCtx, cfg.ControlEnrollTimeout)
@@ -744,19 +710,133 @@ func (a *Agent) currentCredential() string {
 	return strings.TrimSpace(a.cred)
 }
 
-func (a *Agent) setCredential(raw string, expiresAt string) {
-	cred := strings.TrimSpace(raw)
-	if cred == "" {
-		return
+func (a *Agent) currentRenewalToken() string {
+	a.credMu.RLock()
+	defer a.credMu.RUnlock()
+	return strings.TrimSpace(a.renewalToken)
+}
+
+func (a *Agent) recoveryTokenSnapshot() (string, time.Time, string, time.Time) {
+	a.credMu.RLock()
+	defer a.credMu.RUnlock()
+	return strings.TrimSpace(a.renewalToken), a.renewalExp, strings.TrimSpace(a.previousRenewalToken), a.previousRenewalExp
+}
+
+func (a *Agent) currentBootstrapToken() string {
+	if tokenFile := strings.TrimSpace(a.cfg.BootstrapTokenFile); tokenFile != "" {
+		return strings.TrimSpace(readTextFile(tokenFile))
 	}
+	return strings.TrimSpace(a.cfg.BootstrapToken)
+}
+
+func (a *Agent) authStateSnapshot() (time.Time, time.Time, string, int, time.Time) {
+	a.credMu.RLock()
+	credExp := a.credExp
+	renewalExp := a.renewalExp
+	recoveryMethod := a.lastRecoveryMethod
+	a.credMu.RUnlock()
+	a.enrollMu.Lock()
+	recoveryFailures := a.recoveryFailures
+	nextRetryAt := a.nextEnrollRetryAt
+	a.enrollMu.Unlock()
+	return credExp, renewalExp, recoveryMethod, recoveryFailures, nextRetryAt
+}
+
+func (a *Agent) applyCredentialUpdate(update controlplane.Credential, recoveryMethod string) error {
+	cred := strings.TrimSpace(update.Credential)
+	if cred == "" {
+		return fmt.Errorf("empty credential update")
+	}
+	currentRenewal, currentRenewalExp, previousRenewal, previousRenewalExp := a.recoveryTokenSnapshot()
+	renewalToken := strings.TrimSpace(update.RenewalToken)
+	renewalExpiresAt := strings.TrimSpace(update.RenewalTokenExpiresAt)
+	if renewalToken == "" {
+		renewalToken = currentRenewal
+		if renewalExpiresAt == "" && !currentRenewalExp.IsZero() {
+			renewalExpiresAt = currentRenewalExp.Format(time.RFC3339)
+		}
+	}
+	previousRenewalToken := previousRenewal
+	previousRenewalTokenExpiresAt := formatOptionalTime(previousRenewalExp)
+	if renewalToken != "" && renewalToken != currentRenewal {
+		previousRenewalToken = currentRenewal
+		previousRenewalTokenExpiresAt = formatOptionalTime(currentRenewalExp)
+	}
+
+	state := PersistedIdentityState{
+		AgentID:                       a.cfg.AgentID,
+		Credential:                    cred,
+		CredentialExpiresAt:           strings.TrimSpace(update.ExpiresAt),
+		RenewalToken:                  renewalToken,
+		RenewalTokenExpiresAt:         renewalExpiresAt,
+		PreviousRenewalToken:          previousRenewalToken,
+		PreviousRenewalTokenExpiresAt: previousRenewalTokenExpiresAt,
+		LastRecoveryMethod:            strings.TrimSpace(recoveryMethod),
+	}
+	if err := saveIdentityState(a.cfg.AgentIdentityStateFile, state); err != nil {
+		return err
+	}
+	if a.cfg.CredentialFile != "" {
+		if err := atomicWriteFile(a.cfg.CredentialFile, []byte(cred+"\n"), 0o600); err != nil {
+			logJSON(LevelWarn, "agent_credential_compat_write_failed", map[string]interface{}{
+				"agent_id": a.cfg.AgentID,
+				"path":     a.cfg.CredentialFile,
+				"error":    err.Error(),
+			})
+		}
+	}
+
 	a.credMu.Lock()
 	a.cred = cred
-	if ts, err := time.Parse(time.RFC3339, strings.TrimSpace(expiresAt)); err == nil {
-		a.credExp = ts.UTC()
-	}
+	a.credExp = parseOptionalRFC3339(update.ExpiresAt)
+	a.renewalToken = renewalToken
+	a.renewalExp = parseOptionalRFC3339(renewalExpiresAt)
+	a.previousRenewalToken = previousRenewalToken
+	a.previousRenewalExp = parseOptionalRFC3339(previousRenewalTokenExpiresAt)
+	a.lastRecoveryMethod = strings.TrimSpace(recoveryMethod)
 	a.credMu.Unlock()
-	if a.cfg.CredentialFile != "" {
-		_ = atomicWriteFile(a.cfg.CredentialFile, []byte(cred+"\n"), 0o600)
+	a.enrollMu.Lock()
+	a.recoveryFailures = 0
+	a.nextEnrollRetryAt = time.Time{}
+	a.enrollMu.Unlock()
+	return nil
+}
+
+func (a *Agent) persistRemoteConfig(cfg map[string]interface{}) {
+	if a.cfg.AgentConfigFile == "" || len(cfg) == 0 {
+		return
+	}
+	if b, err := json.Marshal(cfg); err == nil {
+		_ = atomicWriteFile(a.cfg.AgentConfigFile, b, 0o600)
+	}
+}
+
+func (a *Agent) ensureInitialIdentity(rootCtx context.Context) {
+	cred := a.currentCredential()
+	if cred != "" {
+		if a.cfg.CredentialFile != "" {
+			_ = atomicWriteFile(a.cfg.CredentialFile, []byte(cred+"\n"), 0o600)
+		}
+		credExp, renewalExp, _, _, _ := a.authStateSnapshot()
+		logJSON(LevelInfo, "agent_identity_loaded", map[string]interface{}{
+			"agent_id":                a.cfg.AgentID,
+			"identity_state_file":     a.cfg.AgentIdentityStateFile,
+			"credential_file":         a.cfg.CredentialFile,
+			"credential_expires_at":   formatOptionalTime(credExp),
+			"renewal_token_present":   strings.TrimSpace(a.currentRenewalToken()) != "",
+			"renewal_expires_at":      formatOptionalTime(renewalExp),
+			"bootstrap_token_present": strings.TrimSpace(a.currentBootstrapToken()) != "",
+		})
+		return
+	}
+	if !a.cfg.ForceEnrollOnStart {
+		return
+	}
+	if err := a.recoverIdentity(rootCtx, "startup_missing_identity", false); err != nil {
+		logJSON(LevelWarn, "agent_identity_bootstrap_failed", map[string]interface{}{
+			"agent_id": a.cfg.AgentID,
+			"error":    err.Error(),
+		})
 	}
 }
 
@@ -812,7 +892,7 @@ func (a *Agent) startResponseActionExecutor(rootCtx context.Context) {
 								"action_id": staged.Action.ID,
 								"error":     err.Error(),
 							})
-							a.maybeReEnroll(rootCtx, err.Error(), 0)
+							a.maybeRecoverIdentity(rootCtx, "response_action_running_report", err.Error(), 0)
 							continue
 						}
 					}
@@ -864,7 +944,7 @@ func (a *Agent) startResponseActionExecutor(rootCtx context.Context) {
 							"status":    execRes.Status,
 							"error":     err.Error(),
 						})
-						a.maybeReEnroll(rootCtx, err.Error(), 0)
+						a.maybeRecoverIdentity(rootCtx, "response_action_report", err.Error(), 0)
 						continue
 					}
 					logJSON(LevelInfo, "response_action_executed", map[string]interface{}{
@@ -883,6 +963,52 @@ func (a *Agent) startControlPlane(rootCtx context.Context) {
 	if a.cp == nil {
 		return
 	}
+
+	// One-time identity refresh for upgraded agents that only have the legacy credential file.
+	go func() {
+		delay := stableJitter(a.cfg.AgentID, "control.identity_refresh", 90*time.Second)
+		if delay > 0 {
+			t := time.NewTimer(delay)
+			select {
+			case <-rootCtx.Done():
+				t.Stop()
+				return
+			case <-t.C:
+			}
+		}
+
+		if strings.TrimSpace(a.currentCredential()) == "" {
+			return
+		}
+		credExp, renewalExp, _, _, _ := a.authStateSnapshot()
+		if !credExp.IsZero() && !renewalExp.IsZero() {
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(rootCtx, a.cfg.ControlEnrollTimeout)
+		rot, err := a.cp.RotateCredential(ctx)
+		cancel()
+		if err != nil {
+			logJSON(LevelWarn, "agent_identity_refresh_failed", map[string]interface{}{
+				"agent_id": a.cfg.AgentID,
+				"error":    err.Error(),
+			})
+			a.maybeRecoverIdentity(rootCtx, "startup_identity_refresh", err.Error(), 0)
+			return
+		}
+		if err := a.applyCredentialUpdate(rot, "startup_refresh"); err != nil {
+			logJSON(LevelWarn, "agent_identity_refresh_persist_failed", map[string]interface{}{
+				"agent_id": a.cfg.AgentID,
+				"error":    err.Error(),
+			})
+			return
+		}
+		logJSON(LevelInfo, "agent_identity_refreshed", map[string]interface{}{
+			"agent_id":              a.cfg.AgentID,
+			"credential_expires_at": strings.TrimSpace(rot.ExpiresAt),
+			"renewal_expires_at":    strings.TrimSpace(rot.RenewalTokenExpiresAt),
+		})
+	}()
 
 	// Heartbeat loop
 	go func() {
@@ -912,6 +1038,25 @@ func (a *Agent) startControlPlane(rootCtx context.Context) {
 					"last_http_status":    a.state.LastHTTPStatus,
 					"last_error":          a.state.LastError,
 					"send_attempts_total": a.state.SendAttemptsTotal,
+				}
+				credExp, renewalExp, recoveryMethod, recoveryFailures, nextRetryAt := a.authStateSnapshot()
+				metrics["auth_identity_state_file"] = a.cfg.AgentIdentityStateFile
+				metrics["auth_has_credential"] = strings.TrimSpace(a.currentCredential()) != ""
+				currentRenewal, _, previousRenewal, _ := a.recoveryTokenSnapshot()
+				metrics["auth_has_renewal_token"] = strings.TrimSpace(currentRenewal) != ""
+				metrics["auth_has_previous_renewal_token"] = strings.TrimSpace(previousRenewal) != ""
+				metrics["auth_last_recovery_method"] = recoveryMethod
+				metrics["auth_recovery_failures"] = recoveryFailures
+				if !credExp.IsZero() {
+					metrics["auth_credential_expires_at"] = credExp.Format(time.RFC3339)
+					metrics["auth_credential_seconds_remaining"] = int64(time.Until(credExp).Seconds())
+				}
+				if !renewalExp.IsZero() {
+					metrics["auth_renewal_expires_at"] = renewalExp.Format(time.RFC3339)
+					metrics["auth_renewal_seconds_remaining"] = int64(time.Until(renewalExp).Seconds())
+				}
+				if !nextRetryAt.IsZero() {
+					metrics["auth_next_recovery_retry_at"] = nextRetryAt.Format(time.RFC3339)
 				}
 				if a.runtime != nil {
 					metrics["config_hash"] = a.runtime.Hash()
@@ -944,7 +1089,7 @@ func (a *Agent) startControlPlane(rootCtx context.Context) {
 						"agent_id": a.cfg.AgentID,
 						"error":    err.Error(),
 					})
-					a.maybeReEnroll(rootCtx, err.Error(), 0)
+					a.maybeRecoverIdentity(rootCtx, "controlplane_heartbeat", err.Error(), 0)
 				}
 			}
 		}
@@ -979,7 +1124,7 @@ func (a *Agent) startControlPlane(rootCtx context.Context) {
 						"agent_id": a.cfg.AgentID,
 						"error":    err.Error(),
 					})
-					a.maybeReEnroll(rootCtx, err.Error(), 0)
+					a.maybeRecoverIdentity(rootCtx, "controlplane_config", err.Error(), 0)
 					continue
 				}
 				if a.runtime != nil && len(cfg) > 0 {
@@ -1012,7 +1157,7 @@ func (a *Agent) startControlPlane(rootCtx context.Context) {
 				"agent_id": a.cfg.AgentID,
 				"error":    err.Error(),
 			})
-			a.maybeReEnroll(rootCtx, err.Error(), 0)
+			a.maybeRecoverIdentity(rootCtx, "response_actions_poll", err.Error(), 0)
 		},
 		OnStaged: func(fetched int, result responseactions.StageResult) {
 			if result.Added > 0 || result.Dropped > 0 {
@@ -1038,10 +1183,23 @@ func (a *Agent) startControlPlane(rootCtx context.Context) {
 			case <-rootCtx.Done():
 				return
 			case <-t.C:
-				a.credMu.RLock()
-				exp := a.credExp
-				a.credMu.RUnlock()
-				if exp.IsZero() || time.Until(exp) > a.cfg.CredentialRotateBefore {
+				credExp, renewalExp, _, _, _ := a.authStateSnapshot()
+				renewalRotateBefore := a.cfg.CredentialRotateBefore
+				if renewalRotateBefore < 12*time.Hour {
+					renewalRotateBefore = 12 * time.Hour
+				}
+				needsRotate := false
+				if !credExp.IsZero() && time.Until(credExp) <= a.cfg.CredentialRotateBefore {
+					needsRotate = true
+				}
+				if !renewalExp.IsZero() && time.Until(renewalExp) <= renewalRotateBefore {
+					needsRotate = true
+				}
+				if !needsRotate {
+					continue
+				}
+				if strings.TrimSpace(a.currentCredential()) == "" {
+					_ = a.recoverIdentity(rootCtx, "rotation_missing_credential", false)
 					continue
 				}
 				ctx, cancel := context.WithTimeout(rootCtx, a.cfg.ControlEnrollTimeout)
@@ -1052,81 +1210,188 @@ func (a *Agent) startControlPlane(rootCtx context.Context) {
 						"agent_id": a.cfg.AgentID,
 						"error":    err.Error(),
 					})
+					a.maybeRecoverIdentity(rootCtx, "credential_rotate_failed", err.Error(), 0)
 					continue
 				}
-				a.setCredential(rot.Credential, rot.ExpiresAt)
+				if err := a.applyCredentialUpdate(rot, "credential_rotation"); err != nil {
+					logJSON(LevelWarn, "agent_credential_rotate_persist_failed", map[string]interface{}{
+						"agent_id": a.cfg.AgentID,
+						"error":    err.Error(),
+					})
+					continue
+				}
 				logJSON(LevelInfo, "agent_credential_rotated", map[string]interface{}{
-					"agent_id": a.cfg.AgentID,
+					"agent_id":              a.cfg.AgentID,
+					"credential_expires_at": strings.TrimSpace(rot.ExpiresAt),
+					"renewal_expires_at":    strings.TrimSpace(rot.RenewalTokenExpiresAt),
 				})
 			}
 		}
 	}()
 }
 
-func (a *Agent) maybeReEnroll(rootCtx context.Context, errText string, status int) {
+func (a *Agent) shouldAttemptIdentityRecovery(errText string, status int) bool {
 	if !a.cfg.ForceEnrollOnStart {
-		return
+		return false
 	}
 	et := strings.ToLower(strings.TrimSpace(errText))
-	should := status == 401 ||
-		strings.Contains(et, "status=401") ||
-		strings.Contains(et, "unknown or revoked agent") ||
+	if status == 401 {
+		return true
+	}
+	if strings.Contains(et, "status=401") {
+		return true
+	}
+	return strings.Contains(et, "unknown or revoked agent") ||
 		strings.Contains(et, "invalid agent credential") ||
 		strings.Contains(et, "credential expired") ||
 		strings.Contains(et, "credential exhausted")
-	if !should {
+}
+
+func (a *Agent) nextRecoveryBackoff(failures int) time.Duration {
+	if failures < 1 {
+		failures = 1
+	}
+	wait := 5 * time.Second
+	for i := 1; i < failures; i++ {
+		wait *= 2
+		if wait >= 5*time.Minute {
+			wait = 5 * time.Minute
+			break
+		}
+	}
+	jitterMax := wait / 3
+	if jitterMax > 30*time.Second {
+		jitterMax = 30 * time.Second
+	}
+	return wait + stableJitter(a.cfg.AgentID, fmt.Sprintf("auth.recovery.%d", failures), jitterMax)
+}
+
+func (a *Agent) maybeRecoverIdentity(rootCtx context.Context, trigger string, errText string, status int) {
+	if !a.shouldAttemptIdentityRecovery(errText, status) {
 		return
+	}
+	_ = a.recoverIdentity(rootCtx, trigger, false)
+}
+
+func (a *Agent) recoverIdentity(rootCtx context.Context, trigger string, force bool) error {
+	if !a.cfg.ForceEnrollOnStart {
+		return fmt.Errorf("identity recovery disabled")
 	}
 
 	now := time.Now().UTC()
 	a.enrollMu.Lock()
-	if !a.nextEnrollRetryAt.IsZero() && now.Before(a.nextEnrollRetryAt) {
+	if !force && !a.nextEnrollRetryAt.IsZero() && now.Before(a.nextEnrollRetryAt) {
+		next := a.nextEnrollRetryAt
 		a.enrollMu.Unlock()
-		return
+		return fmt.Errorf("identity recovery backed off until %s", next.Format(time.RFC3339))
 	}
-	// Keep retries bounded to avoid noisy loops under persistent auth failures.
-	a.nextEnrollRetryAt = now.Add(30 * time.Second)
+	a.nextEnrollRetryAt = time.Time{}
 	a.enrollMu.Unlock()
 
-	bootstrapToken := strings.TrimSpace(a.cfg.BootstrapToken)
-	if bootstrapToken == "" {
-		logJSON(LevelWarn, "agent_reenroll_skipped", map[string]interface{}{
-			"agent_id": a.cfg.AgentID,
-			"reason":   "missing_bootstrap_token",
-		})
-		return
+	bootstrapToken := strings.TrimSpace(a.currentBootstrapToken())
+	currentRenewal, renewalExp, previousRenewal, previousRenewalExp := a.recoveryTokenSnapshot()
+	_, _, _, failures, _ := a.authStateSnapshot()
+	renewalToken := strings.TrimSpace(currentRenewal)
+	if !renewalExp.IsZero() && now.After(renewalExp) {
+		renewalToken = ""
+	}
+	previousRenewalToken := strings.TrimSpace(previousRenewal)
+	if previousRenewalToken == renewalToken {
+		previousRenewalToken = ""
+	}
+	if !previousRenewalExp.IsZero() && now.After(previousRenewalExp) {
+		previousRenewalToken = ""
 	}
 
 	hostname, _ := os.Hostname()
-	ctx, cancel := context.WithTimeout(rootCtx, a.cfg.ControlEnrollTimeout)
-	resp, err := a.cp.Enroll(ctx, controlplane.EnrollRequest{
-		AgentID:        a.cfg.AgentID,
-		Hostname:       hostname,
-		OS:             runtime.GOOS,
-		Version:        "0.1.0",
-		BootstrapToken: bootstrapToken,
-	})
-	cancel()
-	if err != nil {
-		logJSON(LevelWarn, "agent_reenroll_failed", map[string]interface{}{
-			"agent_id": a.cfg.AgentID,
-			"error":    err.Error(),
-		})
-		return
+	type recoveryMethod struct {
+		name            string
+		token           string
+		consumeFilePath string
 	}
-	a.setCredential(resp.Credential.Credential, resp.Credential.ExpiresAt)
+	methods := make([]recoveryMethod, 0, 2)
+	if renewalToken != "" {
+		methods = append(methods, recoveryMethod{name: "renewal", token: renewalToken})
+	}
+	if previousRenewalToken != "" {
+		methods = append(methods, recoveryMethod{name: "renewal_previous", token: previousRenewalToken})
+	}
+	if bootstrapToken != "" {
+		methods = append(methods, recoveryMethod{name: "bootstrap", token: bootstrapToken, consumeFilePath: a.cfg.BootstrapTokenFile})
+	}
+	if len(methods) == 0 {
+		a.enrollMu.Lock()
+		a.recoveryFailures = failures + 1
+		a.nextEnrollRetryAt = now.Add(a.nextRecoveryBackoff(a.recoveryFailures))
+		next := a.nextEnrollRetryAt
+		a.enrollMu.Unlock()
+		return fmt.Errorf("no recovery token or bootstrap token available; next retry at %s", next.Format(time.RFC3339))
+	}
 
-	if a.cfg.AgentConfigFile != "" && len(resp.Config) > 0 {
-		if b, mErr := json.Marshal(resp.Config); mErr == nil {
-			_ = atomicWriteFile(a.cfg.AgentConfigFile, b, 0o600)
+	var lastErr error
+	for _, method := range methods {
+		ctx, cancel := context.WithTimeout(rootCtx, a.cfg.ControlEnrollTimeout)
+		resp, err := a.cp.Enroll(ctx, controlplane.EnrollRequest{
+			AgentID:        a.cfg.AgentID,
+			Hostname:       hostname,
+			OS:             runtime.GOOS,
+			Version:        "0.1.0",
+			BootstrapToken: method.token,
+		})
+		cancel()
+		if err != nil {
+			lastErr = err
+			logJSON(LevelWarn, "agent_identity_recovery_attempt_failed", map[string]interface{}{
+				"agent_id": a.cfg.AgentID,
+				"trigger":  trigger,
+				"method":   method.name,
+				"error":    err.Error(),
+			})
+			continue
 		}
+		if err := a.applyCredentialUpdate(resp.Credential, method.name); err != nil {
+			lastErr = err
+			logJSON(LevelWarn, "agent_identity_recovery_persist_failed", map[string]interface{}{
+				"agent_id": a.cfg.AgentID,
+				"trigger":  trigger,
+				"method":   method.name,
+				"error":    err.Error(),
+			})
+			continue
+		}
+		if a.runtime != nil && len(resp.Config) > 0 {
+			changed, _ := a.runtime.Apply(resp.Config)
+			if changed {
+				logJSON(LevelInfo, "controlplane_config_applied", map[string]interface{}{
+					"agent_id":    a.cfg.AgentID,
+					"config_hash": a.runtime.Hash(),
+					"config_keys": len(resp.Config),
+				})
+			}
+		}
+		a.persistRemoteConfig(resp.Config)
+		if method.consumeFilePath != "" {
+			consumeBootstrapTokenFile(method.consumeFilePath, a.cfg.AgentID)
+		}
+		logJSON(LevelInfo, "agent_identity_recovered", map[string]interface{}{
+			"agent_id":              a.cfg.AgentID,
+			"trigger":               trigger,
+			"method":                method.name,
+			"credential_expires_at": strings.TrimSpace(resp.Credential.ExpiresAt),
+			"renewal_expires_at":    strings.TrimSpace(resp.Credential.RenewalTokenExpiresAt),
+		})
+		return nil
 	}
-	if a.cfg.BootstrapTokenFile != "" {
-		consumeBootstrapTokenFile(a.cfg.BootstrapTokenFile, a.cfg.AgentID)
+
+	if lastErr == nil {
+		lastErr = fmt.Errorf("identity recovery failed")
 	}
-	logJSON(LevelInfo, "agent_reenroll_succeeded", map[string]interface{}{
-		"agent_id": a.cfg.AgentID,
-	})
+	a.enrollMu.Lock()
+	a.recoveryFailures = failures + 1
+	a.nextEnrollRetryAt = now.Add(a.nextRecoveryBackoff(a.recoveryFailures))
+	next := a.nextEnrollRetryAt
+	a.enrollMu.Unlock()
+	return fmt.Errorf("%w; next retry at %s", lastErr, next.Format(time.RFC3339))
 }
 
 func (a *Agent) runAndLog(rootCtx context.Context) {
@@ -1135,7 +1400,7 @@ func (a *Agent) runAndLog(rootCtx context.Context) {
 		return
 	}
 	if res.SendAttempted {
-		a.maybeReEnroll(rootCtx, res.Error, res.Status)
+		a.maybeRecoverIdentity(rootCtx, "event_ingest", res.Error, res.Status)
 	}
 
 	a.applyToSummary(res)
@@ -1526,12 +1791,38 @@ func loadConfig() Config {
 	senderMaxBatch := parseInt(getEnv("SEAGULL_SENDER_MAX_BATCH", "300"), 300)
 
 	agentConfigFile := getEnv("SEAGULL_AGENT_CONFIG_FILE", "/var/lib/seagull/agent.config.json")
+	agentIdentityStateFile := getEnv("SEAGULL_AGENT_IDENTITY_STATE_FILE", "/var/lib/seagull/agent.identity.json")
 	bootstrapToken, bootstrapTokenFile, err := loadBootstrapTokenValue()
 	if err != nil {
 		log.Fatalf("[AGENT] bootstrap token config error: %v", err)
 	}
 	credentialFile := strings.TrimSpace(getEnv("SEAGULL_AGENT_CREDENTIAL_FILE", "/var/lib/seagull/agent.credential"))
 	agentCredential := strings.TrimSpace(getSecretEnv("SEAGULL_AGENT_CREDENTIAL", ""))
+	agentCredentialExpiresAt := ""
+	renewalToken := ""
+	renewalTokenExpiresAt := ""
+	previousRenewalToken := ""
+	previousRenewalTokenExpiresAt := ""
+
+	if state, err := loadIdentityState(agentIdentityStateFile, agentID); err != nil {
+		logJSON(LevelWarn, "identity_state_load_failed", map[string]interface{}{
+			"agent_id": agentID,
+			"path":     agentIdentityStateFile,
+			"error":    err.Error(),
+		})
+	} else {
+		if agentCredential == "" {
+			agentCredential = strings.TrimSpace(state.Credential)
+		}
+		if agentCredentialExpiresAt == "" {
+			agentCredentialExpiresAt = strings.TrimSpace(state.CredentialExpiresAt)
+		}
+		renewalToken = strings.TrimSpace(state.RenewalToken)
+		renewalTokenExpiresAt = strings.TrimSpace(state.RenewalTokenExpiresAt)
+		previousRenewalToken = strings.TrimSpace(state.PreviousRenewalToken)
+		previousRenewalTokenExpiresAt = strings.TrimSpace(state.PreviousRenewalTokenExpiresAt)
+	}
+
 	if agentCredential == "" && credentialFile != "" {
 		agentCredential = strings.TrimSpace(readTextFile(credentialFile))
 	}
@@ -1682,12 +1973,17 @@ func loadConfig() Config {
 		HTTPTimeout:    httpTimeout,
 		SenderMaxBatch: senderMaxBatch,
 
-		AgentConfigFile:          agentConfigFile,
-		BootstrapToken:           bootstrapToken,
-		BootstrapTokenFile:       bootstrapTokenFile,
-		AgentCredential:          agentCredential,
-		AgentCredentialExpiresAt: "",
-		CredentialFile:           credentialFile,
+		AgentConfigFile:               agentConfigFile,
+		AgentIdentityStateFile:        agentIdentityStateFile,
+		BootstrapToken:                bootstrapToken,
+		BootstrapTokenFile:            bootstrapTokenFile,
+		AgentCredential:               agentCredential,
+		AgentCredentialExpiresAt:      agentCredentialExpiresAt,
+		CredentialFile:                credentialFile,
+		RenewalToken:                  renewalToken,
+		RenewalTokenExpiresAt:         renewalTokenExpiresAt,
+		PreviousRenewalToken:          previousRenewalToken,
+		PreviousRenewalTokenExpiresAt: previousRenewalTokenExpiresAt,
 
 		TLSCAFile:     tlsCAFile,
 		TLSCertFile:   tlsCertFile,
@@ -2168,6 +2464,14 @@ func consumeBootstrapTokenFile(path string, agentID string) {
 	}
 	if err := os.Remove(path); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			return
+		}
+		if errors.Is(err, syscall.EROFS) || os.IsPermission(err) {
+			logJSON(LevelInfo, "agent_bootstrap_token_file_preserved", map[string]interface{}{
+				"agent_id": agentID,
+				"path":     path,
+				"reason":   "externally_managed_or_read_only",
+			})
 			return
 		}
 		logJSON(LevelWarn, "agent_bootstrap_token_file_delete_failed", map[string]interface{}{
