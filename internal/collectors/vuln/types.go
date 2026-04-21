@@ -3,16 +3,24 @@ package vuln
 import "time"
 
 type ScanMeta struct {
-	ScanUUID    string                 `json:"scan_uuid,omitempty"`
-	Target      string                 `json:"target,omitempty"`
-	Tool        string                 `json:"tool"`
-	ToolVersion string                 `json:"tool_version,omitempty"`
-	Status      string                 `json:"status"`
-	StartedAt   *time.Time             `json:"started_at,omitempty"`
-	FinishedAt  *time.Time             `json:"finished_at,omitempty"`
-	Scope       map[string]interface{} `json:"scope,omitempty"`
-	Config      map[string]interface{} `json:"config,omitempty"`
-	Stats       map[string]interface{} `json:"stats,omitempty"`
+	ScanUUID        string                 `json:"scan_uuid,omitempty"`
+	Target          string                 `json:"target,omitempty"`
+	Tool            string                 `json:"tool"`
+	ToolVersion     string                 `json:"tool_version,omitempty"`
+	Status          string                 `json:"status,omitempty"`
+	LifecycleState  string                 `json:"lifecycle_state,omitempty"`
+	CurrentPhase    string                 `json:"current_phase,omitempty"`
+	QueuedAt        *time.Time             `json:"queued_at,omitempty"`
+	AcknowledgedAt  *time.Time             `json:"acknowledged_at,omitempty"`
+	StartedAt       *time.Time             `json:"started_at,omitempty"`
+	FinishedAt      *time.Time             `json:"finished_at,omitempty"`
+	LastProgressAt  *time.Time             `json:"last_progress_at,omitempty"`
+	TriggerSource   string                 `json:"trigger_source,omitempty"`
+	ErrorSummary    string                 `json:"error_summary,omitempty"`
+	Scope           map[string]interface{} `json:"scope,omitempty"`
+	Config          map[string]interface{} `json:"config,omitempty"`
+	Stats           map[string]interface{} `json:"stats,omitempty"`
+	PhaseTimestamps map[string]string      `json:"phase_timestamps,omitempty"`
 }
 
 type Finding struct {

@@ -23,6 +23,56 @@ type VulnScannerStatus struct {
 	LastScanUUID     string
 }
 
+func cloneAnyMap(in map[string]interface{}) map[string]interface{} {
+	if len(in) == 0 {
+		return map[string]interface{}{}
+	}
+	out := make(map[string]interface{}, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return map[string]string{}
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func recordScanPhaseTimestamp(phaseTimestamps map[string]string, phase string, at time.Time) {
+	phase = strings.TrimSpace(strings.ToLower(phase))
+	if phase == "" || at.IsZero() {
+		return
+	}
+	if _, exists := phaseTimestamps[phase]; exists {
+		return
+	}
+	phaseTimestamps[phase] = at.UTC().Format(time.RFC3339Nano)
+}
+
+func (a *Agent) sendVulnScanUpdate(ctx context.Context, timeout time.Duration, meta vuln.ScanMeta) error {
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	payload, err := json.Marshal(vuln.IngestBatch{
+		Scan:     &meta,
+		Findings: []vuln.Finding{},
+	})
+	if err != nil {
+		return fmt.Errorf("marshal scan update: %w", err)
+	}
+	ctxSend, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	_, _, err = a.sender.SendVulnIngest(ctxSend, payload)
+	return err
+}
+
 func (a *Agent) startVulnScanner(ctx context.Context) {
 	if a == nil || a.runtime == nil || a.sender == nil {
 		return
@@ -73,7 +123,6 @@ func (a *Agent) startVulnScanner(ctx context.Context) {
 				t.Stop()
 				continue
 			case <-t.C:
-				// proceed
 			}
 
 			if !cfg.Enabled {
@@ -102,26 +151,107 @@ func (a *Agent) runVulnOnce(ctx context.Context, cfg VulnScannerConfig, forceSca
 		httpTimeout = 60 * time.Second
 	}
 
-	// Collect packages (best-effort host-root if configured).
+	scanUUID := newUUIDv4()
+	if forceScan {
+		if tok := strings.TrimSpace(cfg.ScanNowToken); len(tok) >= 8 && len(tok) <= 36 {
+			scanUUID = tok
+		}
+	}
+	triggerSource := "scheduled"
+	if forceScan {
+		triggerSource = "manual"
+	}
+	queuedAt := start
+	var acknowledgedAt *time.Time
+	phaseTimestamps := map[string]string{}
+	recordScanPhaseTimestamp(phaseTimestamps, "queued", queuedAt)
+
+	baseScope := map[string]interface{}{
+		"type":             "host_packages_inventory",
+		"host_root":        strings.TrimSpace(cfg.HostRoot),
+		"analysis_profile": cfg.AnalysisProfile,
+		"manual_trigger":   forceScan,
+		"scan_now_token":   strings.TrimSpace(cfg.ScanNowToken),
+	}
+	baseConfig := map[string]interface{}{
+		"min_severity":     cfg.MinSeverity,
+		"query_batch_size": cfg.QueryBatchSize,
+		"osv_url":          cfg.OSVURL,
+		"analysis_profile": cfg.AnalysisProfile,
+		"exposure_enabled": cfg.ExposureEnabled,
+		"manual_trigger":   forceScan,
+	}
+	baseStats := map[string]interface{}{}
+
+	buildMeta := func(state, phase string, progressAt time.Time, acknowledgedAt, startedAt, finishedAt *time.Time, errSummary string) vuln.ScanMeta {
+		meta := vuln.ScanMeta{
+			ScanUUID:        scanUUID,
+			Target:          hostnameOrFallback(),
+			Tool:            "osv-wazuh-like",
+			ToolVersion:     "1",
+			Status:          state,
+			LifecycleState:  state,
+			CurrentPhase:    phase,
+			QueuedAt:        &queuedAt,
+			AcknowledgedAt:  acknowledgedAt,
+			StartedAt:       startedAt,
+			FinishedAt:      finishedAt,
+			LastProgressAt:  &progressAt,
+			TriggerSource:   triggerSource,
+			ErrorSummary:    errSummary,
+			Scope:           cloneAnyMap(baseScope),
+			Config:          cloneAnyMap(baseConfig),
+			Stats:           cloneAnyMap(baseStats),
+			PhaseTimestamps: cloneStringMap(phaseTimestamps),
+		}
+		return meta
+	}
+
+	if forceScan {
+		ack := time.Now().UTC()
+		acknowledgedAt = &ack
+		recordScanPhaseTimestamp(phaseTimestamps, "acknowledged", ack)
+		_ = a.sendVulnScanUpdate(
+			ctx,
+			httpTimeout,
+			buildMeta("acknowledged", "acknowledged", ack, acknowledgedAt, nil, nil, ""),
+		)
+	}
+
+	startedAt := time.Now().UTC()
+	recordScanPhaseTimestamp(phaseTimestamps, "running", startedAt)
+	recordScanPhaseTimestamp(phaseTimestamps, "collecting_inventory", startedAt)
+	_ = a.sendVulnScanUpdate(
+		ctx,
+		httpTimeout,
+		buildMeta("running", "collecting_inventory", startedAt, acknowledgedAt, &startedAt, nil, ""),
+	)
+
+	a.vulnMu.Lock()
+	a.vulnStatus.LastRunAt = startedAt
+	a.vulnMu.Unlock()
+
 	res, err := syscollector.Collect(ctx, syscollector.Options{
 		CmdTimeout:     cfg.CmdTimeout,
 		MaxOutputBytes: cfg.MaxOutputBytes,
 		MaxPackages:    cfg.MaxPackages,
 		HostRoot:       cfg.HostRoot,
 	})
-
-	a.vulnMu.Lock()
-	a.vulnStatus.LastRunAt = time.Now().UTC()
-	a.vulnMu.Unlock()
-
 	if err != nil {
+		finishedAt := time.Now().UTC()
+		recordScanPhaseTimestamp(phaseTimestamps, "failed", finishedAt)
+		_ = a.sendVulnScanUpdate(
+			ctx,
+			httpTimeout,
+			buildMeta("failed", "failed", finishedAt, acknowledgedAt, &startedAt, &finishedAt, err.Error()),
+		)
 		a.vulnMu.Lock()
 		a.vulnStatus.LastError = err.Error()
+		a.vulnStatus.LastScanUUID = scanUUID
 		a.vulnMu.Unlock()
 		return
 	}
 
-	// Skip package OSV query when unchanged since the last successful send.
 	a.vulnMu.RLock()
 	lastPkgHash := a.vulnStatus.LastPackagesHash
 	lastSent := a.vulnStatus.LastSentAt
@@ -135,11 +265,27 @@ func (a *Agent) runVulnOnce(ctx context.Context, cfg VulnScannerConfig, forceSca
 	ecosystem := vuln.InferEcosystem(res.Snapshot.Manager, res.Snapshot.OS)
 	if strings.TrimSpace(cfg.OSVURL) == "" {
 		cfg.OSVURL = "https://api.osv.dev"
+		baseConfig["osv_url"] = cfg.OSVURL
 	}
+
+	baseScope["package_manager"] = res.Snapshot.Manager
+	baseScope["ecosystem"] = ecosystem
+	baseScope["packages_hash"] = res.Snapshot.PackagesHash
+	baseStats["inventory_packages"] = len(res.Snapshot.Packages)
 
 	assetKey := "self"
 	assetAgentID := a.cfg.AgentID
 	targetLabel := hostnameOrFallback()
+
+	progressAt := time.Now().UTC()
+	if cfg.ExposureEnabled {
+		recordScanPhaseTimestamp(phaseTimestamps, "analyzing_exposure", progressAt)
+		_ = a.sendVulnScanUpdate(
+			ctx,
+			httpTimeout,
+			buildMeta("running", "analyzing_exposure", progressAt, acknowledgedAt, &startedAt, nil, ""),
+		)
+	}
 
 	findings := make([]vuln.Finding, 0, 512)
 	var stats vuln.OSVStats
@@ -150,10 +296,24 @@ func (a *Agent) runVulnOnce(ctx context.Context, cfg VulnScannerConfig, forceSca
 			MaxPorts: 512,
 		}); exErr == nil {
 			exposure = &prof
+		} else {
+			baseStats["exposure_collection_error"] = exErr.Error()
 		}
+	}
+	if exposure != nil {
+		baseScope["exposure"] = exposure.ToEvidence()
+		baseStats["exposure_surface_score"] = exposure.SurfaceScore
+		baseStats["exposed_ports"] = len(exposure.ExposedPorts)
 	}
 
 	if doPkg {
+		progressAt = time.Now().UTC()
+		recordScanPhaseTimestamp(phaseTimestamps, "querying_source", progressAt)
+		_ = a.sendVulnScanUpdate(
+			ctx,
+			httpTimeout,
+			buildMeta("running", "querying_source", progressAt, acknowledgedAt, &startedAt, nil, ""),
+		)
 		pkgFindings, pkgStats, qErr := vuln.QueryOSV(ctx, res.Snapshot.Packages, vuln.OSVOptions{
 			BaseURL:         cfg.OSVURL,
 			Ecosystem:       ecosystem,
@@ -169,97 +329,105 @@ func (a *Agent) runVulnOnce(ctx context.Context, cfg VulnScannerConfig, forceSca
 			PackageManager:  res.Snapshot.Manager,
 		})
 		if qErr != nil {
+			finishedAt := time.Now().UTC()
+			recordScanPhaseTimestamp(phaseTimestamps, "failed", finishedAt)
+			_ = a.sendVulnScanUpdate(
+				ctx,
+				httpTimeout,
+				buildMeta("failed", "failed", finishedAt, acknowledgedAt, &startedAt, &finishedAt, qErr.Error()),
+			)
 			a.vulnMu.Lock()
 			a.vulnStatus.LastError = qErr.Error()
+			a.vulnStatus.LastScanUUID = scanUUID
 			a.vulnMu.Unlock()
 			return
 		}
 		findings = append(findings, pkgFindings...)
 		stats = pkgStats
+		baseStats["queried_packages"] = stats.QueriedPackages
+		baseStats["received_vulns"] = stats.ReceivedVulns
+		baseStats["emitted_findings"] = stats.EmittedFindings
+	} else {
+		baseStats["inventory_unchanged"] = true
+		baseStats["query_skipped"] = true
+		baseStats["query_skip_reason"] = "packages_unchanged"
+		baseStats["queried_packages"] = 0
+		baseStats["received_vulns"] = 0
+		baseStats["emitted_findings"] = 0
 	}
 
-	// If unchanged since the last successful send, avoid sending anything.
-	if !doPkg {
-		a.vulnMu.Lock()
-		a.vulnStatus.LastError = ""
-		a.vulnMu.Unlock()
-		return
-	}
+	progressAt = time.Now().UTC()
+	recordScanPhaseTimestamp(phaseTimestamps, "normalizing_findings", progressAt)
+	_ = a.sendVulnScanUpdate(
+		ctx,
+		httpTimeout,
+		buildMeta("running", "normalizing_findings", progressAt, acknowledgedAt, &startedAt, nil, ""),
+	)
 
-	// Build ingest payload.
-	scanUUID := newUUIDv4()
-	if forceScan {
-		tok := strings.TrimSpace(cfg.ScanNowToken)
-		if len(tok) >= 8 && len(tok) <= 36 {
-			scanUUID = tok
-		}
-	}
-	now := time.Now().UTC()
-	finished := now
-	started := start
+	progressAt = time.Now().UTC()
+	recordScanPhaseTimestamp(phaseTimestamps, "ingesting_results", progressAt)
+	_ = a.sendVulnScanUpdate(
+		ctx,
+		httpTimeout,
+		buildMeta("running", "ingesting_results", progressAt, acknowledgedAt, &startedAt, nil, ""),
+	)
+
+	finishedAt := time.Now().UTC()
+	recordScanPhaseTimestamp(phaseTimestamps, "completed", finishedAt)
 	batch := vuln.IngestBatch{
 		Scan: &vuln.ScanMeta{
-			ScanUUID:    scanUUID,
-			Target:      targetLabel,
-			Tool:        "osv-wazuh-like",
-			ToolVersion: "1",
-			Status:      "finished",
-			StartedAt:   &started,
-			FinishedAt:  &finished,
-			Scope: map[string]interface{}{
-				"type":             "host_packages_inventory",
-				"host_root":        strings.TrimSpace(cfg.HostRoot),
-				"package_manager":  res.Snapshot.Manager,
-				"ecosystem":        ecosystem,
-				"packages_hash":    res.Snapshot.PackagesHash,
-				"analysis_profile": cfg.AnalysisProfile,
-				"manual_trigger":   forceScan,
-				"scan_now_token":   strings.TrimSpace(cfg.ScanNowToken),
-			},
-			Config: map[string]interface{}{
-				"min_severity":     cfg.MinSeverity,
-				"query_batch_size": cfg.QueryBatchSize,
-				"osv_url":          cfg.OSVURL,
-				"analysis_profile": cfg.AnalysisProfile,
-				"exposure_enabled": cfg.ExposureEnabled,
-				"manual_trigger":   forceScan,
-			},
-			Stats: map[string]interface{}{
-				"queried_packages": stats.QueriedPackages,
-				"received_vulns":   stats.ReceivedVulns,
-				"emitted_findings": stats.EmittedFindings,
-			},
+			ScanUUID:        scanUUID,
+			Target:          targetLabel,
+			Tool:            "osv-wazuh-like",
+			ToolVersion:     "1",
+			Status:          "completed",
+			LifecycleState:  "completed",
+			CurrentPhase:    "completed",
+			QueuedAt:        &queuedAt,
+			AcknowledgedAt:  acknowledgedAt,
+			StartedAt:       &startedAt,
+			FinishedAt:      &finishedAt,
+			LastProgressAt:  &finishedAt,
+			TriggerSource:   triggerSource,
+			Scope:           cloneAnyMap(baseScope),
+			Config:          cloneAnyMap(baseConfig),
+			Stats:           cloneAnyMap(baseStats),
+			PhaseTimestamps: cloneStringMap(phaseTimestamps),
 		},
 		Findings: findings,
-	}
-	if exposure != nil && batch.Scan != nil {
-		if batch.Scan.Scope == nil {
-			batch.Scan.Scope = map[string]interface{}{}
-		}
-		if batch.Scan.Stats == nil {
-			batch.Scan.Stats = map[string]interface{}{}
-		}
-		batch.Scan.Scope["exposure"] = exposure.ToEvidence()
-		batch.Scan.Stats["exposure_surface_score"] = exposure.SurfaceScore
-		batch.Scan.Stats["exposed_ports"] = len(exposure.ExposedPorts)
 	}
 
 	payload, mErr := json.Marshal(batch)
 	if mErr != nil {
+		errMsg := fmt.Sprintf("marshal ingest: %s", mErr.Error())
+		failedAt := time.Now().UTC()
+		recordScanPhaseTimestamp(phaseTimestamps, "failed", failedAt)
+		_ = a.sendVulnScanUpdate(
+			ctx,
+			httpTimeout,
+			buildMeta("failed", "failed", failedAt, acknowledgedAt, &startedAt, &failedAt, errMsg),
+		)
 		a.vulnMu.Lock()
-		a.vulnStatus.LastError = fmt.Sprintf("marshal ingest: %s", mErr.Error())
+		a.vulnStatus.LastError = errMsg
+		a.vulnStatus.LastScanUUID = scanUUID
 		a.vulnMu.Unlock()
 		return
 	}
 
 	ctxSend, cancel := context.WithTimeout(ctx, httpTimeout)
-	status, respBody, sendErr := a.sender.SendVulnIngest(ctxSend, payload)
+	statusCode, respBody, sendErr := a.sender.SendVulnIngest(ctxSend, payload)
 	cancel()
-	_ = status
+	_ = statusCode
 
 	stored := parseStoredFindings(respBody)
-
 	if sendErr != nil {
+		failedAt := time.Now().UTC()
+		recordScanPhaseTimestamp(phaseTimestamps, "failed", failedAt)
+		_ = a.sendVulnScanUpdate(
+			ctx,
+			httpTimeout,
+			buildMeta("failed", "failed", failedAt, acknowledgedAt, &startedAt, &failedAt, sendErr.Error()),
+		)
 		a.vulnMu.Lock()
 		a.vulnStatus.LastError = sendErr.Error()
 		a.vulnStatus.LastSentAt = time.Time{}
@@ -277,12 +445,11 @@ func (a *Agent) runVulnOnce(ctx context.Context, cfg VulnScannerConfig, forceSca
 	a.vulnStatus.LastScanUUID = scanUUID
 	a.vulnMu.Unlock()
 
-	// Optional: emit a single summary event for visibility in the events timeline.
 	if a.cfg.VulnEmitSummaryEvent {
 		ev := model.NetEvent{
 			AgentID:       a.cfg.AgentID,
 			SchemaVersion: 1,
-			Timestamp:     now,
+			Timestamp:     finishedAt,
 			EventType:     "vuln_scan",
 			SrcIP:         "",
 			DstIP:         "",
@@ -291,18 +458,19 @@ func (a *Agent) runVulnOnce(ctx context.Context, cfg VulnScannerConfig, forceSca
 			Proto:         "",
 			Bytes:         0,
 			Extra: map[string]interface{}{
-				"scan_uuid":        scanUUID,
-				"tool":             "osv",
-				"package_manager":  res.Snapshot.Manager,
-				"ecosystem":        ecosystem,
-				"queried_packages": stats.QueriedPackages,
-				"emitted_findings": stats.EmittedFindings,
-				"stored_findings":  stored,
-				"analysis_profile": cfg.AnalysisProfile,
-				"exposure_enabled": cfg.ExposureEnabled,
-				"exposure_score":   mapExposureScore(exposure),
-				"manual_trigger":   forceScan,
-				"duration_ms":      time.Since(start).Milliseconds(),
+				"scan_uuid":           scanUUID,
+				"tool":                "osv",
+				"package_manager":     res.Snapshot.Manager,
+				"ecosystem":           ecosystem,
+				"queried_packages":    baseStats["queried_packages"],
+				"emitted_findings":    baseStats["emitted_findings"],
+				"stored_findings":     stored,
+				"analysis_profile":    cfg.AnalysisProfile,
+				"exposure_enabled":    cfg.ExposureEnabled,
+				"exposure_score":      mapExposureScore(exposure),
+				"manual_trigger":      forceScan,
+				"inventory_unchanged": !doPkg,
+				"duration_ms":         time.Since(start).Milliseconds(),
 			},
 		}
 		ctxEv, cancelEv := context.WithTimeout(ctx, a.cfg.HTTPTimeout)
