@@ -8,7 +8,7 @@ RUN go mod download
 
 COPY . .
 ENV CGO_ENABLED=1
-RUN go build -o /bin/seagull-agent ./cmd/agent
+RUN go build -buildvcs=false -o /bin/seagull-agent ./cmd/agent
 
 FROM alpine:3.20
 
