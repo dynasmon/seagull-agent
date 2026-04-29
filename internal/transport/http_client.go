@@ -1,4 +1,4 @@
-package netutil
+package transport
 
 import (
 	"crypto/tls"
