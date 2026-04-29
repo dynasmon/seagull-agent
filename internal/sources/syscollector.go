@@ -1,10 +1,11 @@
-package main
+package sources
 
 import (
 	"context"
 	"time"
 
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/syscollector"
+	agentcfg "gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/config"
 )
 
 type SyscollectorStatus struct {
@@ -15,28 +16,28 @@ type SyscollectorStatus struct {
 	LastPkgCount int
 }
 
-func (a *Agent) startSyscollector(ctx context.Context) {
-	if a == nil || a.runtime == nil {
+func (m *Manager) StartSyscollector(ctx context.Context) {
+	if m == nil || m.runtime == nil {
 		return
 	}
-	if !contains(a.cfg.Sources, "syscollector") {
+	if !agentcfg.Contains(m.cfg.Sources, "syscollector") {
 		return
 	}
 
 	go func() {
 		startupDelayed := false
 		for {
-			cfg := a.runtime.Syscollector()
-			a.sysMu.RLock()
-			lastRun := a.sysStatus.LastRunAt
-			a.sysMu.RUnlock()
+			cfg := m.runtime.Syscollector()
+			m.sysMu.RLock()
+			lastRun := m.sysStatus.LastRunAt
+			m.sysMu.RUnlock()
 
 			nextIn := 30 * time.Second
 			if cfg.Enabled {
 				if lastRun.IsZero() {
 					nextIn = 0
 					if !startupDelayed {
-						nextIn = stableJitter(a.cfg.AgentID, "syscollector.startup", a.cfg.SyscollectStartupJitter)
+						nextIn = stableJitter(m.cfg.AgentID, "syscollector.startup", m.cfg.SyscollectStartupJitter)
 						startupDelayed = true
 					}
 				} else {
@@ -54,7 +55,7 @@ func (a *Agent) startSyscollector(ctx context.Context) {
 			case <-ctx.Done():
 				t.Stop()
 				return
-			case <-a.runtime.Changed():
+			case <-m.runtime.Changed():
 				t.Stop()
 				continue
 			case <-t.C:
@@ -64,18 +65,18 @@ func (a *Agent) startSyscollector(ctx context.Context) {
 			if !cfg.Enabled {
 				continue
 			}
-			if a.sender == nil {
+			if m.sender == nil {
 				continue
 			}
 
 			ctxRun, cancel := context.WithTimeout(ctx, cfg.CmdTimeout+5*time.Second)
-			a.runSyscollectorOnce(ctxRun, cfg)
+			m.runSyscollectorOnce(ctxRun, cfg)
 			cancel()
 		}
 	}()
 }
 
-func (a *Agent) runSyscollectorOnce(ctx context.Context, cfg SyscollectorConfig) {
+func (m *Manager) runSyscollectorOnce(ctx context.Context, cfg SyscollectorConfig) {
 	res, err := syscollector.Collect(ctx, syscollector.Options{
 		CmdTimeout:     cfg.CmdTimeout,
 		MaxOutputBytes: cfg.MaxOutputBytes,
@@ -83,44 +84,44 @@ func (a *Agent) runSyscollectorOnce(ctx context.Context, cfg SyscollectorConfig)
 		HostRoot:       cfg.HostRoot,
 	})
 
-	a.sysMu.Lock()
-	a.sysStatus.LastRunAt = time.Now().UTC()
-	a.sysMu.Unlock()
+	m.sysMu.Lock()
+	m.sysStatus.LastRunAt = time.Now().UTC()
+	m.sysMu.Unlock()
 	if err != nil {
-		a.sysMu.Lock()
-		a.sysStatus.LastError = err.Error()
-		a.sysMu.Unlock()
+		m.sysMu.Lock()
+		m.sysStatus.LastError = err.Error()
+		m.sysMu.Unlock()
 		return
 	}
 
 	// Best-effort: avoid emitting identical snapshots.
-	a.sysMu.RLock()
-	lastHash := a.sysStatus.LastHash
-	a.sysMu.RUnlock()
+	m.sysMu.RLock()
+	lastHash := m.sysStatus.LastHash
+	m.sysMu.RUnlock()
 	if res.Snapshot.PackagesHash != "" && res.Snapshot.PackagesHash == lastHash {
-		a.sysMu.Lock()
-		a.sysStatus.LastError = ""
-		a.sysMu.Unlock()
+		m.sysMu.Lock()
+		m.sysStatus.LastError = ""
+		m.sysMu.Unlock()
 		return
 	}
 
-	ctxSend, cancel := context.WithTimeout(ctx, a.cfg.HTTPTimeout)
-	status, sendErr := a.sender.SendInventorySnapshot(ctxSend, res.Snapshot)
+	ctxSend, cancel := context.WithTimeout(ctx, m.cfg.HTTPTimeout)
+	status, sendErr := m.sender.SendInventorySnapshot(ctxSend, res.Snapshot)
 	cancel()
 
 	if sendErr != nil {
-		a.sysMu.Lock()
-		a.sysStatus.LastError = sendErr.Error()
-		a.sysStatus.LastSentAt = time.Time{}
-		a.sysMu.Unlock()
+		m.sysMu.Lock()
+		m.sysStatus.LastError = sendErr.Error()
+		m.sysStatus.LastSentAt = time.Time{}
+		m.sysMu.Unlock()
 		_ = status
 		return
 	}
 
-	a.sysMu.Lock()
-	a.sysStatus.LastError = ""
-	a.sysStatus.LastSentAt = time.Now().UTC()
-	a.sysStatus.LastHash = res.Snapshot.PackagesHash
-	a.sysStatus.LastPkgCount = res.Snapshot.PackagesCount
-	a.sysMu.Unlock()
+	m.sysMu.Lock()
+	m.sysStatus.LastError = ""
+	m.sysStatus.LastSentAt = time.Now().UTC()
+	m.sysStatus.LastHash = res.Snapshot.PackagesHash
+	m.sysStatus.LastPkgCount = res.Snapshot.PackagesCount
+	m.sysMu.Unlock()
 }

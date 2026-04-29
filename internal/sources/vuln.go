@@ -1,4 +1,4 @@
-package main
+package sources
 
 import (
 	"context"
@@ -56,7 +56,7 @@ func recordScanPhaseTimestamp(phaseTimestamps map[string]string, phase string, a
 	phaseTimestamps[phase] = at.UTC().Format(time.RFC3339Nano)
 }
 
-func (a *Agent) sendVulnScanUpdate(ctx context.Context, timeout time.Duration, meta vuln.ScanMeta) error {
+func (m *Manager) sendVulnScanUpdate(ctx context.Context, timeout time.Duration, meta vuln.ScanMeta) error {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
@@ -69,12 +69,12 @@ func (a *Agent) sendVulnScanUpdate(ctx context.Context, timeout time.Duration, m
 	}
 	ctxSend, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	_, _, err = a.sender.SendVulnIngest(ctxSend, payload)
+	_, _, err = m.sender.SendVulnIngest(ctxSend, payload)
 	return err
 }
 
-func (a *Agent) startVulnScanner(ctx context.Context) {
-	if a == nil || a.runtime == nil || a.sender == nil {
+func (m *Manager) StartVulnScanner(ctx context.Context) {
+	if m == nil || m.runtime == nil || m.sender == nil {
 		return
 	}
 
@@ -82,10 +82,10 @@ func (a *Agent) startVulnScanner(ctx context.Context) {
 		lastTriggerToken := ""
 		startupDelayed := false
 		for {
-			cfg := a.runtime.VulnScanner()
-			a.vulnMu.RLock()
-			lastRun := a.vulnStatus.LastRunAt
-			a.vulnMu.RUnlock()
+			cfg := m.runtime.VulnScanner()
+			m.vulnMu.RLock()
+			lastRun := m.vulnStatus.LastRunAt
+			m.vulnMu.RUnlock()
 
 			forceScanNow := false
 			triggerToken := strings.TrimSpace(cfg.ScanNowToken)
@@ -101,7 +101,7 @@ func (a *Agent) startVulnScanner(ctx context.Context) {
 				} else if lastRun.IsZero() {
 					nextIn = 0
 					if !startupDelayed {
-						nextIn = stableJitter(a.cfg.AgentID, "vuln.startup", a.cfg.VulnStartupJitter)
+						nextIn = stableJitter(m.cfg.AgentID, "vuln.startup", m.cfg.VulnStartupJitter)
 						startupDelayed = true
 					}
 				} else {
@@ -119,7 +119,7 @@ func (a *Agent) startVulnScanner(ctx context.Context) {
 			case <-ctx.Done():
 				t.Stop()
 				return
-			case <-a.runtime.Changed():
+			case <-m.runtime.Changed():
 				t.Stop()
 				continue
 			case <-t.C:
@@ -138,13 +138,13 @@ func (a *Agent) startVulnScanner(ctx context.Context) {
 				scanTimeout = 60 * time.Second
 			}
 			ctxRun, cancel := context.WithTimeout(ctx, scanTimeout)
-			a.runVulnOnce(ctxRun, cfg, forceScanNow)
+			m.runVulnOnce(ctxRun, cfg, forceScanNow)
 			cancel()
 		}
 	}()
 }
 
-func (a *Agent) runVulnOnce(ctx context.Context, cfg VulnScannerConfig, forceScan bool) {
+func (m *Manager) runVulnOnce(ctx context.Context, cfg VulnScannerConfig, forceScan bool) {
 	start := time.Now().UTC()
 	httpTimeout := cfg.HTTPTimeout
 	if httpTimeout <= 0 {
@@ -211,7 +211,7 @@ func (a *Agent) runVulnOnce(ctx context.Context, cfg VulnScannerConfig, forceSca
 		ack := time.Now().UTC()
 		acknowledgedAt = &ack
 		recordScanPhaseTimestamp(phaseTimestamps, "acknowledged", ack)
-		_ = a.sendVulnScanUpdate(
+		_ = m.sendVulnScanUpdate(
 			ctx,
 			httpTimeout,
 			buildMeta("acknowledged", "acknowledged", ack, acknowledgedAt, nil, nil, ""),
@@ -221,15 +221,15 @@ func (a *Agent) runVulnOnce(ctx context.Context, cfg VulnScannerConfig, forceSca
 	startedAt := time.Now().UTC()
 	recordScanPhaseTimestamp(phaseTimestamps, "running", startedAt)
 	recordScanPhaseTimestamp(phaseTimestamps, "collecting_inventory", startedAt)
-	_ = a.sendVulnScanUpdate(
+	_ = m.sendVulnScanUpdate(
 		ctx,
 		httpTimeout,
 		buildMeta("running", "collecting_inventory", startedAt, acknowledgedAt, &startedAt, nil, ""),
 	)
 
-	a.vulnMu.Lock()
-	a.vulnStatus.LastRunAt = startedAt
-	a.vulnMu.Unlock()
+	m.vulnMu.Lock()
+	m.vulnStatus.LastRunAt = startedAt
+	m.vulnMu.Unlock()
 
 	res, err := syscollector.Collect(ctx, syscollector.Options{
 		CmdTimeout:     cfg.CmdTimeout,
@@ -240,22 +240,22 @@ func (a *Agent) runVulnOnce(ctx context.Context, cfg VulnScannerConfig, forceSca
 	if err != nil {
 		finishedAt := time.Now().UTC()
 		recordScanPhaseTimestamp(phaseTimestamps, "failed", finishedAt)
-		_ = a.sendVulnScanUpdate(
+		_ = m.sendVulnScanUpdate(
 			ctx,
 			httpTimeout,
 			buildMeta("failed", "failed", finishedAt, acknowledgedAt, &startedAt, &finishedAt, err.Error()),
 		)
-		a.vulnMu.Lock()
-		a.vulnStatus.LastError = err.Error()
-		a.vulnStatus.LastScanUUID = scanUUID
-		a.vulnMu.Unlock()
+		m.vulnMu.Lock()
+		m.vulnStatus.LastError = err.Error()
+		m.vulnStatus.LastScanUUID = scanUUID
+		m.vulnMu.Unlock()
 		return
 	}
 
-	a.vulnMu.RLock()
-	lastPkgHash := a.vulnStatus.LastPackagesHash
-	lastSent := a.vulnStatus.LastSentAt
-	a.vulnMu.RUnlock()
+	m.vulnMu.RLock()
+	lastPkgHash := m.vulnStatus.LastPackagesHash
+	lastSent := m.vulnStatus.LastSentAt
+	m.vulnMu.RUnlock()
 
 	doPkg := true
 	if !forceScan && res.Snapshot.PackagesHash != "" && res.Snapshot.PackagesHash == lastPkgHash && !lastSent.IsZero() {
@@ -274,13 +274,13 @@ func (a *Agent) runVulnOnce(ctx context.Context, cfg VulnScannerConfig, forceSca
 	baseStats["inventory_packages"] = len(res.Snapshot.Packages)
 
 	assetKey := "self"
-	assetAgentID := a.cfg.AgentID
+	assetAgentID := m.cfg.AgentID
 	targetLabel := hostnameOrFallback()
 
 	progressAt := time.Now().UTC()
 	if cfg.ExposureEnabled {
 		recordScanPhaseTimestamp(phaseTimestamps, "analyzing_exposure", progressAt)
-		_ = a.sendVulnScanUpdate(
+		_ = m.sendVulnScanUpdate(
 			ctx,
 			httpTimeout,
 			buildMeta("running", "analyzing_exposure", progressAt, acknowledgedAt, &startedAt, nil, ""),
@@ -309,7 +309,7 @@ func (a *Agent) runVulnOnce(ctx context.Context, cfg VulnScannerConfig, forceSca
 	if doPkg {
 		progressAt = time.Now().UTC()
 		recordScanPhaseTimestamp(phaseTimestamps, "querying_source", progressAt)
-		_ = a.sendVulnScanUpdate(
+		_ = m.sendVulnScanUpdate(
 			ctx,
 			httpTimeout,
 			buildMeta("running", "querying_source", progressAt, acknowledgedAt, &startedAt, nil, ""),
@@ -331,15 +331,15 @@ func (a *Agent) runVulnOnce(ctx context.Context, cfg VulnScannerConfig, forceSca
 		if qErr != nil {
 			finishedAt := time.Now().UTC()
 			recordScanPhaseTimestamp(phaseTimestamps, "failed", finishedAt)
-			_ = a.sendVulnScanUpdate(
+			_ = m.sendVulnScanUpdate(
 				ctx,
 				httpTimeout,
 				buildMeta("failed", "failed", finishedAt, acknowledgedAt, &startedAt, &finishedAt, qErr.Error()),
 			)
-			a.vulnMu.Lock()
-			a.vulnStatus.LastError = qErr.Error()
-			a.vulnStatus.LastScanUUID = scanUUID
-			a.vulnMu.Unlock()
+			m.vulnMu.Lock()
+			m.vulnStatus.LastError = qErr.Error()
+			m.vulnStatus.LastScanUUID = scanUUID
+			m.vulnMu.Unlock()
 			return
 		}
 		findings = append(findings, pkgFindings...)
@@ -358,7 +358,7 @@ func (a *Agent) runVulnOnce(ctx context.Context, cfg VulnScannerConfig, forceSca
 
 	progressAt = time.Now().UTC()
 	recordScanPhaseTimestamp(phaseTimestamps, "normalizing_findings", progressAt)
-	_ = a.sendVulnScanUpdate(
+	_ = m.sendVulnScanUpdate(
 		ctx,
 		httpTimeout,
 		buildMeta("running", "normalizing_findings", progressAt, acknowledgedAt, &startedAt, nil, ""),
@@ -366,7 +366,7 @@ func (a *Agent) runVulnOnce(ctx context.Context, cfg VulnScannerConfig, forceSca
 
 	progressAt = time.Now().UTC()
 	recordScanPhaseTimestamp(phaseTimestamps, "ingesting_results", progressAt)
-	_ = a.sendVulnScanUpdate(
+	_ = m.sendVulnScanUpdate(
 		ctx,
 		httpTimeout,
 		buildMeta("running", "ingesting_results", progressAt, acknowledgedAt, &startedAt, nil, ""),
@@ -402,20 +402,20 @@ func (a *Agent) runVulnOnce(ctx context.Context, cfg VulnScannerConfig, forceSca
 		errMsg := fmt.Sprintf("marshal ingest: %s", mErr.Error())
 		failedAt := time.Now().UTC()
 		recordScanPhaseTimestamp(phaseTimestamps, "failed", failedAt)
-		_ = a.sendVulnScanUpdate(
+		_ = m.sendVulnScanUpdate(
 			ctx,
 			httpTimeout,
 			buildMeta("failed", "failed", failedAt, acknowledgedAt, &startedAt, &failedAt, errMsg),
 		)
-		a.vulnMu.Lock()
-		a.vulnStatus.LastError = errMsg
-		a.vulnStatus.LastScanUUID = scanUUID
-		a.vulnMu.Unlock()
+		m.vulnMu.Lock()
+		m.vulnStatus.LastError = errMsg
+		m.vulnStatus.LastScanUUID = scanUUID
+		m.vulnMu.Unlock()
 		return
 	}
 
 	ctxSend, cancel := context.WithTimeout(ctx, httpTimeout)
-	statusCode, respBody, sendErr := a.sender.SendVulnIngest(ctxSend, payload)
+	statusCode, respBody, sendErr := m.sender.SendVulnIngest(ctxSend, payload)
 	cancel()
 	_ = statusCode
 
@@ -423,31 +423,31 @@ func (a *Agent) runVulnOnce(ctx context.Context, cfg VulnScannerConfig, forceSca
 	if sendErr != nil {
 		failedAt := time.Now().UTC()
 		recordScanPhaseTimestamp(phaseTimestamps, "failed", failedAt)
-		_ = a.sendVulnScanUpdate(
+		_ = m.sendVulnScanUpdate(
 			ctx,
 			httpTimeout,
 			buildMeta("failed", "failed", failedAt, acknowledgedAt, &startedAt, &failedAt, sendErr.Error()),
 		)
-		a.vulnMu.Lock()
-		a.vulnStatus.LastError = sendErr.Error()
-		a.vulnStatus.LastSentAt = time.Time{}
-		a.vulnStatus.LastScanUUID = scanUUID
-		a.vulnMu.Unlock()
+		m.vulnMu.Lock()
+		m.vulnStatus.LastError = sendErr.Error()
+		m.vulnStatus.LastSentAt = time.Time{}
+		m.vulnStatus.LastScanUUID = scanUUID
+		m.vulnMu.Unlock()
 		return
 	}
 
-	a.vulnMu.Lock()
-	a.vulnStatus.LastError = ""
-	a.vulnStatus.LastSentAt = time.Now().UTC()
-	a.vulnStatus.LastPackagesHash = res.Snapshot.PackagesHash
-	a.vulnStatus.LastFindingCount = len(findings)
-	a.vulnStatus.LastStoredCount = stored
-	a.vulnStatus.LastScanUUID = scanUUID
-	a.vulnMu.Unlock()
+	m.vulnMu.Lock()
+	m.vulnStatus.LastError = ""
+	m.vulnStatus.LastSentAt = time.Now().UTC()
+	m.vulnStatus.LastPackagesHash = res.Snapshot.PackagesHash
+	m.vulnStatus.LastFindingCount = len(findings)
+	m.vulnStatus.LastStoredCount = stored
+	m.vulnStatus.LastScanUUID = scanUUID
+	m.vulnMu.Unlock()
 
-	if a.cfg.VulnEmitSummaryEvent {
+	if m.cfg.VulnEmitSummaryEvent {
 		ev := model.NetEvent{
-			AgentID:       a.cfg.AgentID,
+			AgentID:       m.cfg.AgentID,
 			SchemaVersion: 1,
 			Timestamp:     finishedAt,
 			EventType:     "vuln_scan",
@@ -473,8 +473,8 @@ func (a *Agent) runVulnOnce(ctx context.Context, cfg VulnScannerConfig, forceSca
 				"duration_ms":         time.Since(start).Milliseconds(),
 			},
 		}
-		ctxEv, cancelEv := context.WithTimeout(ctx, a.cfg.HTTPTimeout)
-		_, _ = a.sender.SendEvents(ctxEv, []model.NetEvent{ev})
+		ctxEv, cancelEv := context.WithTimeout(ctx, m.cfg.HTTPTimeout)
+		_, _ = m.sender.SendEvents(ctxEv, []model.NetEvent{ev})
 		cancelEv()
 	}
 }
