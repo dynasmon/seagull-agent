@@ -84,11 +84,13 @@ func ParseOptionalRFC3339(raw string) time.Time {
 	if text == "" {
 		return time.Time{}
 	}
-	ts, err := time.Parse(time.RFC3339, text)
-	if err != nil {
-		return time.Time{}
+	for _, candidate := range []string{text, text + "Z"} {
+		ts, err := time.Parse(time.RFC3339Nano, candidate)
+		if err == nil {
+			return ts.UTC()
+		}
 	}
-	return ts.UTC()
+	return time.Time{}
 }
 
 func FormatOptionalTime(ts time.Time) string {
