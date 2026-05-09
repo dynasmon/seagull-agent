@@ -14,6 +14,7 @@ import (
 	"github.com/google/gopacket/pcap"
 
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/netcontext"
 )
 
 type PcapLateralOptions struct {
@@ -37,7 +38,7 @@ type PcapLateralCapturer struct {
 	agentID string
 	opts    PcapLateralOptions
 
-	localIPs map[string]bool
+	netCtx *netcontext.NetworkContext
 
 	mu          sync.Mutex
 	buf         []model.NetEvent
@@ -52,18 +53,18 @@ func NewPcapLateralCapturer(agentID string, opts PcapLateralOptions) (*PcapLater
 		return nil, fmt.Errorf("lateral pcap: ports set is empty")
 	}
 
-	localIPs, err := collectLocalIPs()
+	nc, err := netcontext.Collect()
 	if err != nil {
 		return nil, err
 	}
-	if len(localIPs) == 0 {
+	if len(nc.LocalIPs) == 0 {
 		return nil, fmt.Errorf("lateral pcap: no local IPs detected")
 	}
 
 	return &PcapLateralCapturer{
-		agentID:     agentID,
-		opts:        opts,
-		localIPs:    localIPs,
+		agentID: agentID,
+		opts:    opts,
+		netCtx:  nc,
 		buf:         make([]model.NetEvent, 0, 2048),
 		cache:       make(map[string]time.Time, 8192),
 		lastCleanup: time.Now().UTC(),
@@ -156,6 +157,11 @@ func (c *PcapLateralCapturer) Drain() []model.NetEvent {
 func (c *PcapLateralCapturer) push(ev model.NetEvent) {
 	now := time.Now().UTC()
 
+	if ev.Extra == nil {
+		ev.Extra = map[string]interface{}{}
+	}
+	c.netCtx.EnrichEndpoints(ev.Extra, ev.SrcIP, ev.DstIP)
+
 	key := fmt.Sprintf("%s|%s|%s|%d",
 		ev.Proto, ev.SrcIP, ev.DstIP, ev.DstPort,
 	)
@@ -208,7 +214,7 @@ func (c *PcapLateralCapturer) packetToEvent(pkt gopacket.Packet, iface string) *
 	}
 
 	// Only inbound-to-host attempts
-	if !c.localIPs[dstIP] {
+	if !c.netCtx.LocalIPs[dstIP] {
 		return nil
 	}
 	if c.shouldDrop(srcIP, dstIP) {

@@ -14,6 +14,7 @@ import (
 	"github.com/google/gopacket/pcap"
 
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/netcontext"
 )
 
 type PcapDDoSOptions struct {
@@ -79,7 +80,7 @@ type PcapDDoSCapturer struct {
 	agentID string
 	opts    PcapDDoSOptions
 
-	localIPs map[string]bool
+	netCtx *netcontext.NetworkContext
 
 	mu  sync.Mutex
 	buf []model.NetEvent
@@ -140,18 +141,18 @@ type hostPortState struct {
 func NewPcapDDoSCapturer(agentID string, opts PcapDDoSOptions) (*PcapDDoSCapturer, error) {
 	applyDDoSDefaults(&opts)
 
-	localIPs, err := collectLocalIPs()
+	nc, err := netcontext.Collect()
 	if err != nil {
 		return nil, err
 	}
-	if len(localIPs) == 0 {
+	if len(nc.LocalIPs) == 0 {
 		return nil, fmt.Errorf("no local IPs detected")
 	}
 
 	return &PcapDDoSCapturer{
-		agentID:     agentID,
-		opts:        opts,
-		localIPs:    localIPs,
+		agentID: agentID,
+		opts:    opts,
+		netCtx:  nc,
 		buf:         make([]model.NetEvent, 0, 1024),
 		windowStart: time.Now().UTC(),
 		aggs:        make(map[aggKey]*agg, 256),
@@ -384,10 +385,10 @@ func (c *PcapDDoSCapturer) onPacket(pkt gopacket.Packet) {
 	srcS := srcIP.String()
 	dstS := dstIP.String()
 
-	if !c.localIPs[dstS] {
+	if !c.netCtx.LocalIPs[dstS] {
 		return
 	}
-	if c.localIPs[srcS] {
+	if c.netCtx.LocalIPs[srcS] {
 		return
 	}
 
@@ -680,6 +681,7 @@ func (c *PcapDDoSCapturer) rotateIfNeeded(now time.Time) {
 					"collector_bp_dropped_packets": backpressureDropped,
 				},
 			}
+			c.netCtx.EnrichEndpoints(ev.Extra, "", ev.DstIP)
 			c.push(ev)
 			a.lastAlertAt = now
 		}

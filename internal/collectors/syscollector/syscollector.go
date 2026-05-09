@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/netcontext"
 )
 
 type Options struct {
@@ -75,6 +76,10 @@ func Collect(ctx context.Context, opts Options) (Result, error) {
 
 	if len(warns) > 0 {
 		snap.Extra["warnings"] = warns
+	}
+
+	if nc, err := netcontext.Collect(); err == nil {
+		snap.Extra["network_context"] = nc.ToInventoryMap()
 	}
 
 	return Result{Snapshot: snap, Warnings: warns}, nil

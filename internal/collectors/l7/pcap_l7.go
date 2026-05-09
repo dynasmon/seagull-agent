@@ -14,6 +14,7 @@ import (
 	"github.com/google/gopacket/pcap"
 
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/netcontext"
 )
 
 type PcapL7Options struct {
@@ -40,7 +41,7 @@ type PcapL7Capturer struct {
 	agentID string
 	opts    PcapL7Options
 
-	localIPs map[string]bool
+	netCtx *netcontext.NetworkContext
 
 	mu          sync.Mutex
 	buf         []model.NetEvent
@@ -51,18 +52,18 @@ type PcapL7Capturer struct {
 func NewPcapL7Capturer(agentID string, opts PcapL7Options) (*PcapL7Capturer, error) {
 	applyDefaults(&opts)
 
-	localIPs, err := collectLocalIPs()
+	nc, err := netcontext.Collect()
 	if err != nil {
 		return nil, err
 	}
-	if len(localIPs) == 0 {
+	if len(nc.LocalIPs) == 0 {
 		return nil, fmt.Errorf("l7 pcap: no local IPs detected")
 	}
 
 	return &PcapL7Capturer{
-		agentID:     strings.TrimSpace(agentID),
-		opts:        opts,
-		localIPs:    localIPs,
+		agentID: strings.TrimSpace(agentID),
+		opts:    opts,
+		netCtx:  nc,
 		buf:         make([]model.NetEvent, 0, opts.MaxBatchSize),
 		cache:       make(map[string]dedupEntry, 4096),
 		lastCleanup: time.Now().UTC(),
@@ -212,8 +213,8 @@ func (c *PcapL7Capturer) packetToEvent(pkt gopacket.Packet) *model.NetEvent {
 
 	srcS := srcIP.String()
 	dstS := dstIP.String()
-	srcLocal := c.localIPs[srcS]
-	dstLocal := c.localIPs[dstS]
+	srcLocal := c.netCtx.LocalIPs[srcS]
+	dstLocal := c.netCtx.LocalIPs[dstS]
 	if srcLocal == dstLocal {
 		// Keep only local<->remote traffic.
 		return nil
@@ -277,6 +278,23 @@ func (c *PcapL7Capturer) packetToEvent(pkt gopacket.Packet) *model.NetEvent {
 	evidence["ip_version"] = ipVersion
 	evidence["l7_protocol"] = kind
 	evidence["app_proto"] = kind
+
+	evidence["src_is_local_endpoint"] = srcLocal
+	evidence["dst_is_local_endpoint"] = dstLocal
+	evidence["src_in_agent_network"] = c.netCtx.FindCIDR(srcIP) != ""
+	evidence["dst_in_agent_network"] = c.netCtx.FindCIDR(dstIP) != ""
+	evidence["network_context_source"] = string(c.netCtx.Source)
+	if c.netCtx.Source != netcontext.SourceUnknown {
+		var localCIDR string
+		if srcLocal {
+			localCIDR = c.netCtx.FindCIDR(srcIP)
+		} else {
+			localCIDR = c.netCtx.FindCIDR(dstIP)
+		}
+		if localCIDR != "" {
+			evidence["local_network_cidr"] = localCIDR
+		}
+	}
 
 	return &model.NetEvent{
 		AgentID:   c.agentID,
@@ -732,38 +750,6 @@ func looksLikeQUICInitial(payload []byte) bool {
 	// Long header bit set and fixed bit set (RFC 9000).
 	first := payload[0]
 	return (first&0x80) == 0x80 && (first&0x40) == 0x40
-}
-
-func collectLocalIPs() (map[string]bool, error) {
-	out := map[string]bool{}
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return nil, err
-	}
-	for _, iface := range ifaces {
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-		for _, addr := range addrs {
-			var ip net.IP
-			switch v := addr.(type) {
-			case *net.IPNet:
-				ip = v.IP
-			case *net.IPAddr:
-				ip = v.IP
-			}
-			if ip == nil {
-				continue
-			}
-			ip = ip.To16()
-			if ip == nil {
-				continue
-			}
-			out[ip.String()] = true
-		}
-	}
-	return out, nil
 }
 
 func asMap(v interface{}) map[string]interface{} {

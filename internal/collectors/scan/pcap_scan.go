@@ -13,6 +13,7 @@ import (
 	"github.com/google/gopacket/pcap"
 
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/netcontext"
 )
 
 type PcapScanOptions struct {
@@ -45,7 +46,7 @@ type PcapScanCapturer struct {
 	agentID string
 	opts    PcapScanOptions
 
-	localIPs map[string]bool
+	netCtx *netcontext.NetworkContext
 
 	mu          sync.Mutex
 	buf         []model.NetEvent
@@ -56,18 +57,18 @@ type PcapScanCapturer struct {
 func NewPcapScanCapturer(agentID string, opts PcapScanOptions) (*PcapScanCapturer, error) {
 	applyPcapDefaults(&opts)
 
-	localIPs, err := collectLocalIPs()
+	nc, err := netcontext.Collect()
 	if err != nil {
 		return nil, err
 	}
-	if len(localIPs) == 0 {
+	if len(nc.LocalIPs) == 0 {
 		return nil, fmt.Errorf("no local IPs detected")
 	}
 
 	return &PcapScanCapturer{
-		agentID:     agentID,
-		opts:        opts,
-		localIPs:    localIPs,
+		agentID: agentID,
+		opts:    opts,
+		netCtx:  nc,
 		buf:         make([]model.NetEvent, 0, 2048),
 		cache:       make(map[string]time.Time, 8192),
 		lastCleanup: time.Now().UTC(),
@@ -177,11 +178,14 @@ func (c *PcapScanCapturer) Drain() []model.NetEvent {
 func (c *PcapScanCapturer) push(ev model.NetEvent) {
 	now := time.Now().UTC()
 
+	if ev.Extra == nil {
+		ev.Extra = map[string]interface{}{}
+	}
+	c.netCtx.EnrichEndpoints(ev.Extra, ev.SrcIP, ev.DstIP)
+
 	scanType := ""
-	if ev.Extra != nil {
-		if st, ok := ev.Extra["scan_type"].(string); ok {
-			scanType = st
-		}
+	if st, ok := ev.Extra["scan_type"].(string); ok {
+		scanType = st
 	}
 
 	key := fmt.Sprintf("%s|%s|%s|%d|%d|%s",
@@ -241,7 +245,7 @@ func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *mod
 			src := net.IP(arp.SourceProtAddress).String()
 			dst := net.IP(arp.DstProtAddress).String()
 
-			if !c.localIPs[dst] {
+			if !c.netCtx.LocalIPs[dst] {
 				return nil
 			}
 			if c.shouldDrop(src, dst, 0, 0) {
@@ -272,7 +276,7 @@ func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *mod
 	}
 
 	// Only inbound-to-host signals (dst is one of our local IPs)
-	if !c.localIPs[dstIP] {
+	if !c.netCtx.LocalIPs[dstIP] {
 		return nil
 	}
 	if c.shouldDrop(srcIP, dstIP, 0, 0) {
