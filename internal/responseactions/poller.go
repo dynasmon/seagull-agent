@@ -2,10 +2,10 @@ package responseactions
 
 import (
 	"context"
-	"hash/fnv"
 	"time"
 
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/controlplane"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/jitter"
 )
 
 type PollerConfig struct {
@@ -36,7 +36,7 @@ func StartPolling(ctx context.Context, cfg PollerConfig, deps PollerDeps) {
 	}
 
 	go func() {
-		initialDelay := stableJitter(cfg.AgentID, "control.response_actions", cfg.Jitter)
+		initialDelay := jitter.Stable(cfg.AgentID, "control.response_actions", cfg.Jitter)
 		if initialDelay > 0 {
 			t := time.NewTimer(initialDelay)
 			select {
@@ -75,16 +75,4 @@ func StartPolling(ctx context.Context, cfg PollerConfig, deps PollerDeps) {
 			}
 		}
 	}()
-}
-
-func stableJitter(agentID, scope string, max time.Duration) time.Duration {
-	if max <= 0 {
-		return 0
-	}
-	h := fnv.New64a()
-	_, _ = h.Write([]byte(agentID))
-	_, _ = h.Write([]byte("|"))
-	_, _ = h.Write([]byte(scope))
-	n := h.Sum64()
-	return time.Duration(n % uint64(max))
 }

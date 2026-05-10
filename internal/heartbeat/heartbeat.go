@@ -2,10 +2,10 @@ package heartbeat
 
 import (
 	"context"
-	"hash/fnv"
 	"time"
 
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/controlplane"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/jitter"
 )
 
 type Config struct {
@@ -36,7 +36,7 @@ func Start(ctx context.Context, cfg Config, deps Deps) {
 	}
 
 	go func() {
-		initialDelay := stableJitter(cfg.AgentID, "control.heartbeat", cfg.Jitter)
+		initialDelay := jitter.Stable(cfg.AgentID, "control.heartbeat", cfg.Jitter)
 		if initialDelay > 0 {
 			t := time.NewTimer(initialDelay)
 			select {
@@ -64,15 +64,4 @@ func Start(ctx context.Context, cfg Config, deps Deps) {
 			}
 		}
 	}()
-}
-
-func stableJitter(agentID, scope string, max time.Duration) time.Duration {
-	if max <= 0 {
-		return 0
-	}
-	h := fnv.New64a()
-	_, _ = h.Write([]byte(agentID))
-	_, _ = h.Write([]byte("|"))
-	_, _ = h.Write([]byte(scope))
-	return time.Duration(h.Sum64() % uint64(max))
 }

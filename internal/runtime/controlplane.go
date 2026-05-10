@@ -2,13 +2,13 @@ package runtime
 
 import (
 	"context"
-	"hash/fnv"
 	"strings"
 	"time"
 
 	agentcfg "gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/config"
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/controlplane"
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/heartbeat"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/jitter"
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/responseactions"
 )
 
@@ -145,7 +145,7 @@ func (s *Service) startControlPlane(rootCtx context.Context) {
 	}
 
 	go func() {
-		delay := stableJitter(s.cfg.AgentID, "control.identity_refresh", 90*time.Second)
+		delay := jitter.Stable(s.cfg.AgentID, "control.identity_refresh", 90*time.Second)
 		if delay > 0 {
 			t := time.NewTimer(delay)
 			select {
@@ -209,7 +209,7 @@ func (s *Service) startControlPlane(rootCtx context.Context) {
 	})
 
 	go func() {
-		initialDelay := stableJitter(s.cfg.AgentID, "control.config", s.cfg.ControlConfigJitter)
+		initialDelay := jitter.Stable(s.cfg.AgentID, "control.config", s.cfg.ControlConfigJitter)
 		if initialDelay > 0 {
 			t := time.NewTimer(initialDelay)
 			select {
@@ -398,15 +398,4 @@ func (s *Service) buildHeartbeatRequest() controlplane.HeartbeatRequest {
 		},
 		Metrics: metrics,
 	}
-}
-
-func stableJitter(agentID, scope string, max time.Duration) time.Duration {
-	if max <= 0 {
-		return 0
-	}
-	h := fnv.New64a()
-	_, _ = h.Write([]byte(agentID))
-	_, _ = h.Write([]byte("|"))
-	_, _ = h.Write([]byte(scope))
-	return time.Duration(h.Sum64() % uint64(max))
 }

@@ -13,16 +13,17 @@ import (
 	"syscall"
 	"time"
 
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/agentauth"
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
 )
 
 type Sender struct {
-	baseURL         string
-	client          *http.Client
-	maxBatch        int
-	retries         int
-	agentID         string
-	credentialFunc  func() string
+	baseURL        string
+	client         *http.Client
+	maxBatch       int
+	retries        int
+	agentID        string
+	credentialFunc func() string
 }
 
 func New(baseURL string, timeout time.Duration, maxBatch int, agentID string, credentialFunc func() string, httpClient *http.Client) *Sender {
@@ -46,18 +47,6 @@ func New(baseURL string, timeout time.Duration, maxBatch int, agentID string, cr
 		retries:        3,
 		agentID:        strings.TrimSpace(agentID),
 		credentialFunc: credentialFunc,
-	}
-}
-
-func (s *Sender) applyAuthHeaders(req *http.Request) {
-	if s.agentID != "" {
-		req.Header.Set("X-Agent-ID", s.agentID)
-	}
-	if s.credentialFunc == nil {
-		return
-	}
-	if cred := strings.TrimSpace(s.credentialFunc()); cred != "" {
-		req.Header.Set("X-Agent-Credential", cred)
 	}
 }
 
@@ -155,7 +144,7 @@ func (s *Sender) postOnce(ctx context.Context, url string, payload []byte) (int,
 		return 0, fmt.Errorf("new request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	s.applyAuthHeaders(req)
+	agentauth.ApplyCredentialHeaders(req, s.agentID, s.credentialFunc)
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -178,7 +167,7 @@ func (s *Sender) postOnceRead(ctx context.Context, url string, payload []byte) (
 		return 0, nil, fmt.Errorf("new request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	s.applyAuthHeaders(req)
+	agentauth.ApplyCredentialHeaders(req, s.agentID, s.credentialFunc)
 
 	resp, err := s.client.Do(req)
 	if err != nil {

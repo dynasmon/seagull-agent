@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/agentauth"
 )
 
 type Client struct {
@@ -59,18 +61,6 @@ type EnrollResponse struct {
 	Credential Credential             `json:"credential"`
 }
 
-func (c *Client) applyAuthHeaders(req *http.Request) {
-	if c.agentID != "" {
-		req.Header.Set("X-Agent-ID", c.agentID)
-	}
-	if c.credentialFunc == nil {
-		return
-	}
-	if cred := strings.TrimSpace(c.credentialFunc()); cred != "" {
-		req.Header.Set("X-Agent-Credential", cred)
-	}
-}
-
 func (c *Client) Enroll(ctx context.Context, req EnrollRequest) (EnrollResponse, error) {
 	var out EnrollResponse
 	if c.baseURL == "" {
@@ -88,9 +78,9 @@ func (c *Client) Enroll(ctx context.Context, req EnrollRequest) (EnrollResponse,
 		return out, fmt.Errorf("new enroll request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("X-Agent-ID", strings.TrimSpace(req.AgentID))
+	httpReq.Header.Set(agentauth.HeaderAgentID, strings.TrimSpace(req.AgentID))
 	if bootstrapToken := strings.TrimSpace(req.BootstrapToken); bootstrapToken != "" {
-		httpReq.Header.Set("X-Agent-Bootstrap-Token", bootstrapToken)
+		httpReq.Header.Set(agentauth.HeaderBootstrapToken, bootstrapToken)
 	}
 
 	resp, err := c.http.Do(httpReq)
@@ -134,7 +124,7 @@ func (c *Client) Heartbeat(ctx context.Context, hb HeartbeatRequest) error {
 		return fmt.Errorf("new heartbeat request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	c.applyAuthHeaders(httpReq)
+	agentauth.ApplyCredentialHeaders(httpReq, c.agentID, c.credentialFunc)
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
@@ -159,7 +149,7 @@ func (c *Client) GetConfig(ctx context.Context) (map[string]interface{}, error) 
 	if err != nil {
 		return nil, fmt.Errorf("new config request: %w", err)
 	}
-	c.applyAuthHeaders(httpReq)
+	agentauth.ApplyCredentialHeaders(httpReq, c.agentID, c.credentialFunc)
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
@@ -196,7 +186,7 @@ func (c *Client) RotateCredential(ctx context.Context) (Credential, error) {
 	if err != nil {
 		return out, fmt.Errorf("new rotate request: %w", err)
 	}
-	c.applyAuthHeaders(httpReq)
+	agentauth.ApplyCredentialHeaders(httpReq, c.agentID, c.credentialFunc)
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
@@ -274,7 +264,7 @@ func (c *Client) listPendingResponseActionsPath(ctx context.Context, path string
 	if err != nil {
 		return nil, fmt.Errorf("new response actions request: %w", err)
 	}
-	c.applyAuthHeaders(httpReq)
+	agentauth.ApplyCredentialHeaders(httpReq, c.agentID, c.credentialFunc)
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
@@ -393,7 +383,7 @@ func (c *Client) ReportResponseActionResult(ctx context.Context, in ResponseActi
 			return fmt.Errorf("new response action result request: %w", err)
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
-		c.applyAuthHeaders(httpReq)
+		agentauth.ApplyCredentialHeaders(httpReq, c.agentID, c.credentialFunc)
 
 		resp, err := c.http.Do(httpReq)
 		if err != nil {
