@@ -1,4 +1,4 @@
-FROM golang:1.22-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 RUN apk add --no-cache gcc musl-dev libpcap-dev
 
@@ -10,7 +10,7 @@ COPY . .
 ENV CGO_ENABLED=1
 RUN go build -buildvcs=false -o /bin/seagull-agent ./cmd/agent
 
-FROM alpine:3.20
+FROM alpine:3.22
 
 RUN apk add --no-cache libpcap ca-certificates rpm
 
