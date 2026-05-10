@@ -61,9 +61,9 @@ func NewPcapL7Capturer(agentID string, opts PcapL7Options) (*PcapL7Capturer, err
 	}
 
 	return &PcapL7Capturer{
-		agentID: strings.TrimSpace(agentID),
-		opts:    opts,
-		netCtx:  nc,
+		agentID:     strings.TrimSpace(agentID),
+		opts:        opts,
+		netCtx:      nc,
 		buf:         make([]model.NetEvent, 0, opts.MaxBatchSize),
 		cache:       make(map[string]dedupEntry, 4096),
 		lastCleanup: time.Now().UTC(),
@@ -279,22 +279,7 @@ func (c *PcapL7Capturer) packetToEvent(pkt gopacket.Packet) *model.NetEvent {
 	evidence["l7_protocol"] = kind
 	evidence["app_proto"] = kind
 
-	evidence["src_is_local_endpoint"] = srcLocal
-	evidence["dst_is_local_endpoint"] = dstLocal
-	evidence["src_in_agent_network"] = c.netCtx.FindCIDR(srcIP) != ""
-	evidence["dst_in_agent_network"] = c.netCtx.FindCIDR(dstIP) != ""
-	evidence["network_context_source"] = string(c.netCtx.Source)
-	if c.netCtx.Source != netcontext.SourceUnknown {
-		var localCIDR string
-		if srcLocal {
-			localCIDR = c.netCtx.FindCIDR(srcIP)
-		} else {
-			localCIDR = c.netCtx.FindCIDR(dstIP)
-		}
-		if localCIDR != "" {
-			evidence["local_network_cidr"] = localCIDR
-		}
-	}
+	c.netCtx.EnrichEndpoints(evidence, srcS, dstS)
 
 	return &model.NetEvent{
 		AgentID:   c.agentID,
