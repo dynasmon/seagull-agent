@@ -10,6 +10,7 @@ import (
 
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/syscollector"
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/vuln"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/jitter"
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
 )
 
@@ -101,7 +102,7 @@ func (m *Manager) StartVulnScanner(ctx context.Context) {
 				} else if lastRun.IsZero() {
 					nextIn = 0
 					if !startupDelayed {
-						nextIn = stableJitter(m.cfg.AgentID, "vuln.startup", m.cfg.VulnStartupJitter)
+						nextIn = jitter.Stable(m.cfg.AgentID, "vuln.startup", m.cfg.VulnStartupJitter)
 						startupDelayed = true
 					}
 				} else {

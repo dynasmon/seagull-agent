@@ -6,6 +6,7 @@ import (
 
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/syscollector"
 	agentcfg "gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/config"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/jitter"
 )
 
 type SyscollectorStatus struct {
@@ -37,7 +38,7 @@ func (m *Manager) StartSyscollector(ctx context.Context) {
 				if lastRun.IsZero() {
 					nextIn = 0
 					if !startupDelayed {
-						nextIn = stableJitter(m.cfg.AgentID, "syscollector.startup", m.cfg.SyscollectStartupJitter)
+						nextIn = jitter.Stable(m.cfg.AgentID, "syscollector.startup", m.cfg.SyscollectStartupJitter)
 						startupDelayed = true
 					}
 				} else {
