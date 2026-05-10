@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/netcontext"
 )
 
 var (
@@ -344,43 +345,7 @@ func detectPrimaryIP() string {
 		}
 	}
 
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return ""
-	}
-	for _, iface := range ifaces {
-		if iface.Flags&net.FlagUp == 0 {
-			continue
-		}
-		if iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-		for _, a := range addrs {
-			var ip net.IP
-			switch v := a.(type) {
-			case *net.IPNet:
-				ip = v.IP
-			case *net.IPAddr:
-				ip = v.IP
-			}
-			if ip == nil {
-				continue
-			}
-			ip4 := ip.To4()
-			if ip4 == nil {
-				continue
-			}
-			if ip4.IsLoopback() {
-				continue
-			}
-			return ip4.String()
-		}
-	}
-	return ""
+	return netcontext.PrimaryIPv4()
 }
 
 func normalizeIP(s string) string {

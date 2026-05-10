@@ -56,6 +56,38 @@ func Collect() (*NetworkContext, error) {
 	return buildFromIfaceData(data, detectSource("/")), nil
 }
 
+// PrimaryIPv4 returns the first non-loopback IPv4 address on an up interface.
+func PrimaryIPv4() string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		if iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			ip := ipFromAddr(addr)
+			if ip == nil {
+				continue
+			}
+			ip4 := ip.To4()
+			if ip4 == nil || ip4.IsLoopback() {
+				continue
+			}
+			return ip4.String()
+		}
+	}
+	return ""
+}
+
 // FindCIDR returns the network-prefix CIDR string (e.g. "192.168.1.0/24") for
 // the first local CIDR that contains ip, or "" if none match.
 func (nc *NetworkContext) FindCIDR(ip net.IP) string {
@@ -72,6 +104,17 @@ func (nc *NetworkContext) FindCIDR(ip net.IP) string {
 		}
 	}
 	return ""
+}
+
+func ipFromAddr(addr net.Addr) net.IP {
+	switch v := addr.(type) {
+	case *net.IPNet:
+		return v.IP
+	case *net.IPAddr:
+		return v.IP
+	default:
+		return nil
+	}
 }
 
 // ToInventoryMap serializes the context for embedding in inventory snapshots
@@ -143,12 +186,11 @@ func buildFromIfaceData(data []ifaceData, src Source) *NetworkContext {
 		info := InterfaceInfo{Name: d.name}
 
 		for _, addr := range d.addrs {
-			var ip net.IP
 			var ipnet *net.IPNet
+			ip := ipFromAddr(addr)
 
 			switch v := addr.(type) {
 			case *net.IPNet:
-				ip = v.IP
 				ipnet = v
 			case *net.IPAddr:
 				raw := v.IP

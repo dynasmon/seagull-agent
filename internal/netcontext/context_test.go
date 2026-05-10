@@ -130,6 +130,22 @@ func TestBuildFromIfaceData_IPAddrType(t *testing.T) {
 	}
 }
 
+func TestIPFromAddr(t *testing.T) {
+	ipnet := buildTestIPNet("192.168.1.5/24")
+	if got := ipFromAddr(ipnet).String(); got != "192.168.1.5" {
+		t.Errorf("expected IPNet host IP, got %q", got)
+	}
+
+	ipAddr := &net.IPAddr{IP: net.ParseIP("10.0.0.1").To4()}
+	if got := ipFromAddr(ipAddr).String(); got != "10.0.0.1" {
+		t.Errorf("expected IPAddr IP, got %q", got)
+	}
+
+	if got := ipFromAddr(unknownAddr{}); got != nil {
+		t.Errorf("expected nil for unknown addr, got %v", got)
+	}
+}
+
 func TestBuildFromIfaceData_ContainerSource(t *testing.T) {
 	ipnet := buildTestIPNet("172.17.0.2/16")
 	data := []ifaceData{
