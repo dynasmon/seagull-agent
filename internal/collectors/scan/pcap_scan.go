@@ -57,7 +57,7 @@ type PcapScanCapturer struct {
 func NewPcapScanCapturer(agentID string, opts PcapScanOptions) (*PcapScanCapturer, error) {
 	applyPcapDefaults(&opts)
 
-	nc, err := netcontext.Collect()
+	nc, err := netcontext.Collect(netcontext.Caps{})
 	if err != nil {
 		return nil, err
 	}

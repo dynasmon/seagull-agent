@@ -53,7 +53,7 @@ func NewPcapLateralCapturer(agentID string, opts PcapLateralOptions) (*PcapLater
 		return nil, fmt.Errorf("lateral pcap: ports set is empty")
 	}
 
-	nc, err := netcontext.Collect()
+	nc, err := netcontext.Collect(netcontext.Caps{})
 	if err != nil {
 		return nil, err
 	}
