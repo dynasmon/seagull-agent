@@ -25,6 +25,7 @@ type Options struct {
 	MaxOutputBytes int64
 	MaxPackages    int
 	HostRoot       string
+	NetCtxCaps     netcontext.Caps
 }
 
 type Result struct {
@@ -78,7 +79,7 @@ func Collect(ctx context.Context, opts Options) (Result, error) {
 		snap.Extra["warnings"] = warns
 	}
 
-	if nc, err := netcontext.Collect(); err == nil {
+	if nc, err := netcontext.Collect(opts.NetCtxCaps); err == nil {
 		snap.Extra["network_context"] = nc.ToInventoryMap()
 	}
 
