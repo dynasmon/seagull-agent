@@ -72,6 +72,11 @@ func New(ctx context.Context, cfg agentcfg.Config, stop context.CancelFunc, http
 			MaxOutputBytes: cfg.SyscollectMaxOutputBytes,
 			MaxPackages:    cfg.SyscollectMaxPackages,
 			HostRoot:       cfg.SyscollectHostRoot,
+
+			NetCtxMaxIfaces:    cfg.NetCtxMaxInterfaces,
+			NetCtxMaxNeighbors: cfg.NetCtxMaxNeighbors,
+			NetCtxMaxRoutes:    cfg.NetCtxMaxRoutes,
+			NetCtxMaxResolvers: cfg.NetCtxMaxResolvers,
 		},
 		sources.VulnScannerConfig{
 			Enabled:         agentcfg.Contains(cfg.Sources, "vuln"),

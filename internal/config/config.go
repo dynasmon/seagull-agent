@@ -169,6 +169,11 @@ type Config struct {
 	DDoSBackpressureHighWM      int
 	DDoSBackpressureSampleEvery int
 
+	NetCtxMaxInterfaces int
+	NetCtxMaxNeighbors  int
+	NetCtxMaxRoutes     int
+	NetCtxMaxResolvers  int
+
 	LogLevel          LogLevel
 	LogSummaryEvery   time.Duration
 	LogHeartbeatEvery time.Duration
@@ -356,6 +361,11 @@ func LoadConfig() Config {
 	ddosBpHighWM := parseInt(getEnv("SEAGULL_DDOS_BACKPRESSURE_HIGH_WATERMARK", "160"), 160)
 	ddosBpSampleEvery := parseInt(getEnv("SEAGULL_DDOS_BACKPRESSURE_SAMPLE_EVERY", "4"), 4)
 
+	netCtxMaxIfaces := parseInt(getEnv("SEAGULL_NETCTX_MAX_INTERFACES", "64"), 64)
+	netCtxMaxNeighbors := parseInt(getEnv("SEAGULL_NETCTX_MAX_NEIGHBORS", "512"), 512)
+	netCtxMaxRoutes := parseInt(getEnv("SEAGULL_NETCTX_MAX_ROUTES", "256"), 256)
+	netCtxMaxResolvers := parseInt(getEnv("SEAGULL_NETCTX_MAX_RESOLVERS", "8"), 8)
+
 	levelStr := getEnv("SEAGULL_LOG_LEVEL", "info")
 	logLevel := ParseLogLevel(levelStr)
 
@@ -510,6 +520,11 @@ func LoadConfig() Config {
 		DDoSMaxBatch:                ddosMaxBatch,
 		DDoSBackpressureHighWM:      ddosBpHighWM,
 		DDoSBackpressureSampleEvery: ddosBpSampleEvery,
+
+		NetCtxMaxInterfaces: netCtxMaxIfaces,
+		NetCtxMaxNeighbors:  netCtxMaxNeighbors,
+		NetCtxMaxRoutes:     netCtxMaxRoutes,
+		NetCtxMaxResolvers:  netCtxMaxResolvers,
 
 		LogLevel:          logLevel,
 		LogSummaryEvery:   logSummaryEvery,
