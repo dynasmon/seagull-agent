@@ -7,6 +7,7 @@ import (
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/syscollector"
 	agentcfg "gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/config"
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/jitter"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/netcontext"
 )
 
 type SyscollectorStatus struct {
@@ -83,6 +84,12 @@ func (m *Manager) runSyscollectorOnce(ctx context.Context, cfg SyscollectorConfi
 		MaxOutputBytes: cfg.MaxOutputBytes,
 		MaxPackages:    cfg.MaxPackages,
 		HostRoot:       cfg.HostRoot,
+		NetCtxCaps: netcontext.Caps{
+			MaxInterfaces: cfg.NetCtxMaxIfaces,
+			MaxNeighbors:  cfg.NetCtxMaxNeighbors,
+			MaxRoutes:     cfg.NetCtxMaxRoutes,
+			MaxResolvers:  cfg.NetCtxMaxResolvers,
+		},
 	})
 
 	m.sysMu.Lock()

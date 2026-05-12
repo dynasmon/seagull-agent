@@ -20,6 +20,11 @@ type SyscollectorConfig struct {
 	MaxOutputBytes int64
 	MaxPackages    int
 	HostRoot       string
+
+	NetCtxMaxIfaces    int
+	NetCtxMaxNeighbors int
+	NetCtxMaxRoutes    int
+	NetCtxMaxResolvers int
 }
 
 type VulnScannerConfig struct {
