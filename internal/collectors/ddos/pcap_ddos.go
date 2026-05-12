@@ -141,7 +141,7 @@ type hostPortState struct {
 func NewPcapDDoSCapturer(agentID string, opts PcapDDoSOptions) (*PcapDDoSCapturer, error) {
 	applyDDoSDefaults(&opts)
 
-	nc, err := netcontext.Collect()
+	nc, err := netcontext.Collect(netcontext.Caps{})
 	if err != nil {
 		return nil, err
 	}

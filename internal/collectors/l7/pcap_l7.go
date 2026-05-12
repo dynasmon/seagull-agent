@@ -52,7 +52,7 @@ type PcapL7Capturer struct {
 func NewPcapL7Capturer(agentID string, opts PcapL7Options) (*PcapL7Capturer, error) {
 	applyDefaults(&opts)
 
-	nc, err := netcontext.Collect()
+	nc, err := netcontext.Collect(netcontext.Caps{})
 	if err != nil {
 		return nil, err
 	}
