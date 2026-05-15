@@ -44,7 +44,7 @@ func TestRecoverIdentitySerializesConcurrentAttempts(t *testing.T) {
 	defer server.Close()
 
 	tempDir := t.TempDir()
-	runtimeConfig := sources.NewRuntimeConfig("", sources.SyscollectorConfig{}, sources.VulnScannerConfig{})
+	runtimeConfig := sources.NewRuntimeConfig("", sources.SyscollectorConfig{}, sources.VulnScannerConfig{}, sources.TopologyDiscoveryConfig{})
 	mgr := NewManager(agentcfg.Config{
 		AgentID:                "agent-1",
 		ForceEnrollOnStart:     true,
