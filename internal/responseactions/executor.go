@@ -18,14 +18,15 @@ import (
 )
 
 type ExecuteOptions struct {
-	ExpectedAgentID string
-	AgentID         string
-	BuildVersion    string
-	EffectiveConfig map[string]interface{}
-	ModuleStates    map[string]interface{}
+	ExpectedAgentID      string
+	AgentID              string
+	BuildVersion         string
+	EffectiveConfig      map[string]interface{}
+	ModuleStates         map[string]interface{}
 	RefreshRuntimeConfig func() (changed bool, configKeys int, configHash string, err error)
-	AgentStartedAt  time.Time
-	Now             time.Time
+	RunTopologyDiscovery func() (map[string]interface{}, error)
+	AgentStartedAt       time.Time
+	Now                  time.Time
 }
 
 type ExecuteResult struct {
@@ -122,10 +123,36 @@ func Execute(action controlplane.ResponseAction, opts ExecuteOptions) ExecuteRes
 		out.Result = result
 		out.Error = ""
 		return out
+	case "trigger_topology_discovery":
+		result, err := runTopologyDiscovery(action, opts, now)
+		if err != nil {
+			out.Error = err.Error()
+			return out
+		}
+		out.Status = "success"
+		out.Result = result
+		out.Error = ""
+		return out
 	default:
 		out.Error = fmt.Sprintf("unsupported action_type: %s", strings.TrimSpace(action.ActionType))
 		return out
 	}
+}
+
+func runTopologyDiscovery(action controlplane.ResponseAction, opts ExecuteOptions, now time.Time) (map[string]interface{}, error) {
+	if opts.RunTopologyDiscovery == nil {
+		return nil, fmt.Errorf("trigger_topology_discovery is not available")
+	}
+	result, err := opts.RunTopologyDiscovery()
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		result = map[string]interface{}{}
+	}
+	result["action"] = actionMeta(action)
+	result["requested_at"] = now.UTC().Format(time.RFC3339)
+	return result, nil
 }
 
 func runRefreshRuntimeConfig(action controlplane.ResponseAction, opts ExecuteOptions, now time.Time) (map[string]interface{}, error) {
@@ -232,12 +259,12 @@ func buildTriageBundle(action controlplane.ResponseAction, opts ExecuteOptions, 
 	interfaces, _ := net.Interfaces()
 
 	runtimeMeta := map[string]interface{}{
-		"pid":         os.Getpid(),
-		"goos":        runtime.GOOS,
-		"goarch":      runtime.GOARCH,
-		"go_version":  runtime.Version(),
-		"gomaxprocs":  runtime.GOMAXPROCS(0),
-		"num_cpu":     runtime.NumCPU(),
+		"pid":           os.Getpid(),
+		"goos":          runtime.GOOS,
+		"goarch":        runtime.GOARCH,
+		"go_version":    runtime.Version(),
+		"gomaxprocs":    runtime.GOMAXPROCS(0),
+		"num_cpu":       runtime.NumCPU(),
 		"num_goroutine": runtime.NumGoroutine(),
 	}
 

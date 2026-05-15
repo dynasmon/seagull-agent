@@ -92,6 +92,15 @@ func New(ctx context.Context, cfg agentcfg.Config, stop context.CancelFunc, http
 			MaxPackages:     cfg.VulnMaxPackages,
 			HostRoot:        cfg.VulnHostRoot,
 		},
+		sources.TopologyDiscoveryConfig{
+			Enabled:     cfg.TopologyActiveDiscoveryEnabled,
+			CIDRs:       cfg.TopologyActiveDiscoveryCIDRs,
+			AllowPublic: cfg.TopologyActiveDiscoveryAllowPublic,
+			Every:       cfg.TopologyActiveDiscoveryInterval,
+			MaxHosts:    cfg.TopologyActiveDiscoveryMaxHosts,
+			RateLimit:   cfg.TopologyActiveDiscoveryRateLimit,
+			Timeout:     cfg.TopologyActiveDiscoveryTimeout,
+		},
 	)
 
 	enrollMgr := enrollment.NewManager(cfg, runtimeConfig)
@@ -147,6 +156,7 @@ func (s *Service) Run(rootCtx context.Context) error {
 	s.startControlPlane(rootCtx)
 	s.sources.StartSyscollector(rootCtx)
 	s.sources.StartVulnScanner(rootCtx)
+	s.sources.StartTopologyActiveDiscovery(rootCtx)
 	s.loop(rootCtx)
 	return nil
 }

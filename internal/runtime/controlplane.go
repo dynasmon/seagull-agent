@@ -10,6 +10,7 @@ import (
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/heartbeat"
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/jitter"
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/responseactions"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/sources"
 )
 
 func (s *Service) stageResponseActions(actions []controlplane.ResponseAction) responseactions.StageResult {
@@ -99,6 +100,9 @@ func (s *Service) startResponseActionExecutor(rootCtx context.Context) {
 						ModuleStates:    modules,
 						RefreshRuntimeConfig: func() (bool, int, string, error) {
 							return s.refreshRuntimeConfig(rootCtx)
+						},
+						RunTopologyDiscovery: func() (map[string]interface{}, error) {
+							return s.sources.RunTopologyDiscoveryNow(rootCtx)
 						},
 						AgentStartedAt: s.state.StartedAt,
 						Now:            now,
@@ -388,6 +392,30 @@ func (s *Service) buildHeartbeatRequest() controlplane.HeartbeatRequest {
 		metrics["syscollector_last_error"] = status.LastError
 		metrics["syscollector_last_hash"] = status.LastHash
 		metrics["syscollector_last_packages_count"] = status.LastPkgCount
+	}
+
+	if s.runtimeConfig != nil {
+		discCfg, discErr := s.runtimeConfig.TopologyDiscovery()
+		discStatus := s.sources.TopologyDiscoveryStatus()
+		metrics["topology_active_discovery_mode"] = "passive_only"
+		metrics["topology_active_discovery_enabled"] = false
+		if discErr != nil {
+			metrics["topology_active_discovery_config_error"] = discErr.Error()
+		} else {
+			metrics["topology_active_discovery_mode"] = sources.TopologyDiscoveryMode(discCfg.Enabled)
+			metrics["topology_active_discovery_enabled"] = discCfg.Enabled
+			metrics["topology_active_discovery_allowed_cidrs"] = sources.TopologyDiscoveryCIDRs(discCfg, discStatus)
+		}
+		metrics["topology_active_discovery_last_run_at"] = discStatus.LastRunAt
+		metrics["topology_active_discovery_last_sent_at"] = discStatus.LastSentAt
+		metrics["topology_active_discovery_last_error"] = discStatus.LastError
+		metrics["topology_active_discovery_last_warnings"] = discStatus.LastWarnings
+		metrics["topology_active_discovery_last_warning_text"] = sources.TopologyDiscoveryWarningText(discStatus.LastWarnings)
+		metrics["topology_active_discovery_last_discovered_hosts"] = discStatus.LastDiscoveredIPs
+		metrics["topology_active_discovery_last_observed_hosts"] = discStatus.LastObservedIPs
+		metrics["topology_active_discovery_last_target_count"] = discStatus.LastTargetCount
+		metrics["topology_active_discovery_last_attempted_hosts"] = discStatus.LastAttemptedHosts
+		metrics["topology_active_discovery_last_trigger"] = discStatus.LastTrigger
 	}
 
 	return controlplane.HeartbeatRequest{

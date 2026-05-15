@@ -190,3 +190,47 @@ func TestExecuteTriggerInventorySnapshotSuccess(t *testing.T) {
 		t.Fatalf("expected network in inventory snapshot")
 	}
 }
+
+func TestExecuteTriggerTopologyDiscoverySuccess(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	action := controlplane.ResponseAction{
+		ID:          97,
+		ActionType:  "trigger_topology_discovery",
+		AgentID:     "agent-1",
+		Status:      "delivered",
+		RequestedAt: now,
+	}
+	out := Execute(action, ExecuteOptions{
+		ExpectedAgentID: "agent-1",
+		AgentID:         "agent-1",
+		RunTopologyDiscovery: func() (map[string]interface{}, error) {
+			return map[string]interface{}{"discovered_hosts": []string{"10.0.0.2"}}, nil
+		},
+		Now: now,
+	})
+	if out.Status != "success" {
+		t.Fatalf("expected success status, got %q error=%q", out.Status, out.Error)
+	}
+	if _, ok := out.Result["action"]; !ok {
+		t.Fatalf("expected action metadata in result")
+	}
+}
+
+func TestExecuteTriggerTopologyDiscoveryUnavailable(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	action := controlplane.ResponseAction{
+		ID:          98,
+		ActionType:  "trigger_topology_discovery",
+		AgentID:     "agent-1",
+		Status:      "delivered",
+		RequestedAt: now,
+	}
+	out := Execute(action, ExecuteOptions{
+		ExpectedAgentID: "agent-1",
+		AgentID:         "agent-1",
+		Now:             now,
+	})
+	if out.Status != "failed" {
+		t.Fatalf("expected failed status, got %q", out.Status)
+	}
+}
