@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"sync"
@@ -43,6 +44,16 @@ type VulnScannerConfig struct {
 	HostRoot        string
 }
 
+type TopologyDiscoveryConfig struct {
+	Enabled     bool
+	CIDRs       []*net.IPNet
+	AllowPublic bool
+	Every       time.Duration
+	MaxHosts    int
+	RateLimit   int
+	Timeout     time.Duration
+}
+
 type RuntimeConfig struct {
 	mu       sync.RWMutex
 	raw      map[string]interface{}
@@ -50,15 +61,22 @@ type RuntimeConfig struct {
 	path     string
 	defaults SyscollectorConfig
 	vulnDef  VulnScannerConfig
+	topoDef  TopologyDiscoveryConfig
 	changed  chan struct{}
 }
 
-func NewRuntimeConfig(path string, defaults SyscollectorConfig, vulnDefaults VulnScannerConfig) *RuntimeConfig {
+func NewRuntimeConfig(
+	path string,
+	defaults SyscollectorConfig,
+	vulnDefaults VulnScannerConfig,
+	topologyDefaults TopologyDiscoveryConfig,
+) *RuntimeConfig {
 	rc := &RuntimeConfig{
 		raw:      map[string]interface{}{},
 		path:     path,
 		defaults: defaults,
 		vulnDef:  vulnDefaults,
+		topoDef:  topologyDefaults,
 		changed:  make(chan struct{}, 1),
 	}
 	_ = rc.loadFromFile()
@@ -233,6 +251,90 @@ func (r *RuntimeConfig) VulnScanner() VulnScannerConfig {
 	}
 
 	return cfg
+}
+
+func (r *RuntimeConfig) TopologyDiscovery() (TopologyDiscoveryConfig, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	cfg := r.topoDef
+
+	modules, _ := r.raw["modules"].(map[string]interface{})
+	if modules == nil {
+		return cfg, nil
+	}
+	v, _ := modules["topology_active_discovery"].(map[string]interface{})
+	if v == nil {
+		return cfg, nil
+	}
+
+	if b, ok := v["enabled"].(bool); ok {
+		cfg.Enabled = b
+	}
+	if b, ok := v["allow_public"].(bool); ok {
+		cfg.AllowPublic = b
+	}
+	if s, ok := v["every"].(string); ok {
+		if d, err := time.ParseDuration(s); err == nil && d > 0 {
+			cfg.Every = d
+		}
+	}
+	if n, ok := agentcfg.ToInt64(v["max_hosts"]); ok && n > 0 {
+		cfg.MaxHosts = int(n)
+	}
+	if n, ok := agentcfg.ToInt64(v["rate_limit"]); ok && n > 0 {
+		cfg.RateLimit = int(n)
+	}
+	if s, ok := v["timeout"].(string); ok {
+		if d, err := time.ParseDuration(s); err == nil && d > 0 {
+			cfg.Timeout = d
+		}
+	}
+	if vals := stringSliceValue(v["cidrs"]); len(vals) > 0 {
+		cidrs, err := agentcfg.ValidateActiveDiscoveryCIDRs(strings.Join(vals, ","), cfg.AllowPublic)
+		if err != nil {
+			return cfg, err
+		}
+		cfg.CIDRs = cidrs
+	}
+
+	return cfg, nil
+}
+
+func stringSliceValue(v interface{}) []string {
+	switch t := v.(type) {
+	case []string:
+		out := make([]string, 0, len(t))
+		for _, s := range t {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	case []interface{}:
+		out := make([]string, 0, len(t))
+		for _, item := range t {
+			s := strings.TrimSpace(fmt.Sprintf("%v", item))
+			if s == "" || s == "<nil>" {
+				continue
+			}
+			out = append(out, s)
+		}
+		return out
+	case string:
+		parts := strings.Split(t, ",")
+		out := make([]string, 0, len(parts))
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			if part != "" {
+				out = append(out, part)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func (r *RuntimeConfig) loadFromFile() error {

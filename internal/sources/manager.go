@@ -39,6 +39,9 @@ type Manager struct {
 
 	vulnMu     sync.RWMutex
 	vulnStatus VulnScannerStatus
+
+	topoMu     sync.RWMutex
+	topoStatus TopologyDiscoveryStatus
 }
 
 func NewManager(cfg agentcfg.Config, rootCtx context.Context, stop context.CancelFunc, sender *sender.Sender, runtimeCfg *RuntimeConfig) (*Manager, error) {
@@ -338,4 +341,10 @@ func (m *Manager) VulnScannerStatus() VulnScannerStatus {
 	m.vulnMu.RLock()
 	defer m.vulnMu.RUnlock()
 	return m.vulnStatus
+}
+
+func (m *Manager) TopologyDiscoveryStatus() TopologyDiscoveryStatus {
+	m.topoMu.RLock()
+	defer m.topoMu.RUnlock()
+	return m.topoStatus.Clone()
 }

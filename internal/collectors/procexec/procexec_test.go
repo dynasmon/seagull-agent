@@ -4,12 +4,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
 
 func TestParseProcStatLine(t *testing.T) {
-	line := "1234 (python3) S 10 1 11 34817 0 0 0 0 0 0 0 0 20 0 1 0 765432 0 0 0 0 0 0 0 0 0 0 0 0 0"
+	line := "1234 (python3) S 10 1 11 34817 0 0 0 0 0 0 0 0 0 0 20 0 1 0 765432 0 0 0 0 0 0 0 0 0 0 0 0 0"
 	out, err := parseProcStatLine(line)
 	if err != nil {
 		t.Fatalf("parseProcStatLine error: %v", err)
@@ -71,7 +72,7 @@ func TestCaptureSkipsInitialSnapshotByDefault(t *testing.T) {
 	writeFakeProc(t, procRoot, 1, 0, 1200, "systemd", "", "/usr/lib/systemd/systemd", "/")
 
 	c := New("agent-test", Options{
-		ProcRoot:       procRoot,
+		ProcRoot:        procRoot,
 		HashExecutables: false,
 	})
 
@@ -118,7 +119,13 @@ func writeFakeProc(t *testing.T, procRoot string, pid, ppid int, startTicks uint
 	}
 
 	// pid (comm) state ppid pgrp session tty_nr ... starttime ...
-	statLine := intToString(pid) + " (" + comm + ") S " + intToString(ppid) + " 1 1 0 0 0 0 0 0 0 0 0 0 20 0 1 0 " + uintToString(startTicks) + " 0 0 0 0 0 0 0 0 0 0 0 0 0\n"
+	statLine := strings.Join([]string{
+		intToString(pid), "(" + comm + ")", "S",
+		intToString(ppid), "1", "1", "0",
+		"0", "0", "0", "0", "0", "0", "0", "0", "0", "0",
+		"20", "0", "1", "0", uintToString(startTicks),
+		"0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0",
+	}, " ") + "\n"
 	if err := os.WriteFile(filepath.Join(pd, "stat"), []byte(statLine), 0o644); err != nil {
 		t.Fatalf("write stat: %v", err)
 	}

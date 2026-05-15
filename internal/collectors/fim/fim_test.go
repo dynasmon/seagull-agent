@@ -43,7 +43,7 @@ func TestDiffCreateModifyDelete(t *testing.T) {
 	if err := os.WriteFile(target, []byte("a=2\n"), 0o644); err != nil {
 		t.Fatalf("modify file: %v", err)
 	}
-	modified, err := c.Capture(now.Add(2 * time.Second))
+	modified, err := c.Capture(now.Add(31 * time.Second))
 	if err != nil {
 		t.Fatalf("second capture: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestDiffCreateModifyDelete(t *testing.T) {
 	if err := os.Remove(target); err != nil {
 		t.Fatalf("remove file: %v", err)
 	}
-	deleted, err := c.Capture(now.Add(4 * time.Second))
+	deleted, err := c.Capture(now.Add(62 * time.Second))
 	if err != nil {
 		t.Fatalf("third capture: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestDiffRenameIncludesPathFromTo(t *testing.T) {
 	if err := os.Rename(orig, next); err != nil {
 		t.Fatalf("rename file: %v", err)
 	}
-	evs, err := c.Capture(now.Add(2 * time.Second))
+	evs, err := c.Capture(now.Add(31 * time.Second))
 	if err != nil {
 		t.Fatalf("capture after rename: %v", err)
 	}

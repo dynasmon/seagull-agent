@@ -174,6 +174,14 @@ type Config struct {
 	NetCtxMaxRoutes     int
 	NetCtxMaxResolvers  int
 
+	TopologyActiveDiscoveryEnabled     bool
+	TopologyActiveDiscoveryCIDRs       []*net.IPNet
+	TopologyActiveDiscoveryAllowPublic bool
+	TopologyActiveDiscoveryInterval    time.Duration
+	TopologyActiveDiscoveryMaxHosts    int
+	TopologyActiveDiscoveryRateLimit   int
+	TopologyActiveDiscoveryTimeout     time.Duration
+
 	LogLevel          LogLevel
 	LogSummaryEvery   time.Duration
 	LogHeartbeatEvery time.Duration
@@ -366,6 +374,34 @@ func LoadConfig() Config {
 	netCtxMaxRoutes := parseInt(getEnv("SEAGULL_NETCTX_MAX_ROUTES", "256"), 256)
 	netCtxMaxResolvers := parseInt(getEnv("SEAGULL_NETCTX_MAX_RESOLVERS", "8"), 8)
 
+	topologyActiveDiscoveryEnabled := parseBool(getEnv("SEAGULL_TOPOLOGY_ACTIVE_DISCOVERY_ENABLED", "false"), false)
+	topologyActiveDiscoveryAllowPublic := parseBool(getEnv("SEAGULL_TOPOLOGY_ACTIVE_DISCOVERY_ALLOW_PUBLIC", "false"), false)
+	topologyActiveDiscoveryCIDRs, err := ValidateActiveDiscoveryCIDRs(
+		getEnv("SEAGULL_TOPOLOGY_ACTIVE_DISCOVERY_CIDRS", ""),
+		topologyActiveDiscoveryAllowPublic,
+	)
+	if err != nil {
+		log.Fatalf("[AGENT] topology active discovery config error: %v", err)
+	}
+	topologyActiveDiscoveryInterval := parseDuration(
+		getEnv("SEAGULL_TOPOLOGY_ACTIVE_DISCOVERY_INTERVAL", "30m"),
+		30*time.Minute,
+	)
+	topologyActiveDiscoveryMaxHosts := clampInt(
+		parseInt(getEnv("SEAGULL_TOPOLOGY_ACTIVE_DISCOVERY_MAX_HOSTS", "256"), 256),
+		1,
+		4096,
+	)
+	topologyActiveDiscoveryRateLimit := clampInt(
+		parseInt(getEnv("SEAGULL_TOPOLOGY_ACTIVE_DISCOVERY_RATE_LIMIT", "20"), 20),
+		1,
+		512,
+	)
+	topologyActiveDiscoveryTimeout := parseDuration(
+		getEnv("SEAGULL_TOPOLOGY_ACTIVE_DISCOVERY_TIMEOUT", "30s"),
+		30*time.Second,
+	)
+
 	levelStr := getEnv("SEAGULL_LOG_LEVEL", "info")
 	logLevel := ParseLogLevel(levelStr)
 
@@ -525,6 +561,14 @@ func LoadConfig() Config {
 		NetCtxMaxNeighbors:  netCtxMaxNeighbors,
 		NetCtxMaxRoutes:     netCtxMaxRoutes,
 		NetCtxMaxResolvers:  netCtxMaxResolvers,
+
+		TopologyActiveDiscoveryEnabled:     topologyActiveDiscoveryEnabled,
+		TopologyActiveDiscoveryCIDRs:       topologyActiveDiscoveryCIDRs,
+		TopologyActiveDiscoveryAllowPublic: topologyActiveDiscoveryAllowPublic,
+		TopologyActiveDiscoveryInterval:    topologyActiveDiscoveryInterval,
+		TopologyActiveDiscoveryMaxHosts:    topologyActiveDiscoveryMaxHosts,
+		TopologyActiveDiscoveryRateLimit:   topologyActiveDiscoveryRateLimit,
+		TopologyActiveDiscoveryTimeout:     topologyActiveDiscoveryTimeout,
 
 		LogLevel:          logLevel,
 		LogSummaryEvery:   logSummaryEvery,
@@ -733,6 +777,86 @@ func parseCIDRs(csv string) []*net.IPNet {
 		}
 	}
 	return out
+}
+
+func ParseStrictCIDRs(csv string) ([]*net.IPNet, error) {
+	parts := strings.Split(csv, ",")
+	out := make([]*net.IPNet, 0, len(parts))
+	for _, p := range parts {
+		raw := strings.TrimSpace(p)
+		if raw == "" {
+			continue
+		}
+		ip, n, err := net.ParseCIDR(raw)
+		if err != nil || n == nil || ip == nil {
+			return nil, fmt.Errorf("invalid CIDR %q", raw)
+		}
+		n.IP = ip.Mask(n.Mask)
+		out = append(out, n)
+	}
+	return out, nil
+}
+
+func ValidateActiveDiscoveryCIDRs(csv string, allowPublic bool) ([]*net.IPNet, error) {
+	cidrs, err := ParseStrictCIDRs(csv)
+	if err != nil {
+		return nil, err
+	}
+	for _, cidr := range cidrs {
+		if cidr == nil {
+			continue
+		}
+		if !allowPublic && !isPrivateOrInternalCIDR(cidr) {
+			return nil, fmt.Errorf("public CIDR %q requires SEAGULL_TOPOLOGY_ACTIVE_DISCOVERY_ALLOW_PUBLIC=true", cidr.String())
+		}
+	}
+	return cidrs, nil
+}
+
+func CIDRStrings(cidrs []*net.IPNet) []string {
+	out := make([]string, 0, len(cidrs))
+	for _, cidr := range cidrs {
+		if cidr == nil {
+			continue
+		}
+		out = append(out, cidr.String())
+	}
+	return out
+}
+
+func isPrivateOrInternalCIDR(cidr *net.IPNet) bool {
+	if cidr == nil || cidr.IP == nil {
+		return false
+	}
+	for _, raw := range []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"100.64.0.0/10",
+		"127.0.0.0/8",
+		"169.254.0.0/16",
+		"fc00::/7",
+		"fe80::/10",
+		"::1/128",
+	} {
+		_, parent, err := net.ParseCIDR(raw)
+		if err == nil && cidrContainedWithin(cidr, parent) {
+			return true
+		}
+	}
+	return false
+}
+
+func cidrContainedWithin(child, parent *net.IPNet) bool {
+	if child == nil || parent == nil || child.IP == nil || parent.IP == nil {
+		return false
+	}
+	childOnes, childBits := child.Mask.Size()
+	parentOnes, parentBits := parent.Mask.Size()
+	if childBits != parentBits || childOnes < parentOnes {
+		return false
+	}
+	return parent.Contains(child.IP)
 }
 
 func parseIntSet(csv string) map[int]bool {
