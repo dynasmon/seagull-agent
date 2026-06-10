@@ -37,6 +37,10 @@ type SummaryState struct {
 	ResponseActionPollErrorsTotal int
 	ResponseActionsStagedTotal    int
 
+	CertRenewalsTotal    int
+	CertRenewErrorsTotal int
+	CertLastRenewError   string
+
 	LastHTTPStatus int
 	LastError      string
 

@@ -204,6 +204,57 @@ func (c *Client) RotateCredential(ctx context.Context) (Credential, error) {
 	return out, nil
 }
 
+type CertificateRenewal struct {
+	AgentID        string `json:"agent_id"`
+	CertificatePEM string `json:"certificate_pem"`
+	CAPEM          string `json:"ca_pem"`
+	SerialHex      string `json:"serial_hex"`
+	NotBefore      string `json:"not_before"`
+	NotAfter       string `json:"not_after"`
+}
+
+type certificateRenewRequest struct {
+	CSRPEM string `json:"csr_pem"`
+}
+
+func (c *Client) RenewCertificate(ctx context.Context, csrPEM string) (CertificateRenewal, error) {
+	var out CertificateRenewal
+	if c.baseURL == "" {
+		return out, fmt.Errorf("controlplane baseURL is empty")
+	}
+
+	payload, err := json.Marshal(certificateRenewRequest{CSRPEM: csrPEM})
+	if err != nil {
+		return out, fmt.Errorf("marshal certificate renew request: %w", err)
+	}
+
+	u := c.baseURL + "/agents/certificate/renew"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(payload))
+	if err != nil {
+		return out, fmt.Errorf("new certificate renew request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	agentauth.ApplyCredentialHeaders(httpReq, c.agentID, c.credentialFunc)
+
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return out, fmt.Errorf("certificate renew request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return out, fmt.Errorf("certificate renew failed status=%d body=%s", resp.StatusCode, string(body))
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return out, fmt.Errorf("unmarshal certificate renew response: %w", err)
+	}
+	if strings.TrimSpace(out.CertificatePEM) == "" {
+		return out, fmt.Errorf("certificate renew response missing certificate")
+	}
+	return out, nil
+}
+
 var ErrInvalidResponseAction = errors.New("invalid response action")
 
 type ResponseAction struct {

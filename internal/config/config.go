@@ -56,6 +56,8 @@ type Config struct {
 	ForceEnrollOnStart        bool
 	CredentialRotateEvery     time.Duration
 	CredentialRotateBefore    time.Duration
+	CertRotateEvery           time.Duration
+	CertRotateBefore          time.Duration
 	ResponseActionStageMax    int
 
 	SyscollectEvery          time.Duration
@@ -256,6 +258,8 @@ func LoadConfig() Config {
 	forceEnrollOnStart := parseBool(getEnv("SEAGULL_FORCE_ENROLL_ON_START", "true"), true)
 	credentialRotateEvery := parseDuration(getEnv("SEAGULL_CONTROL_CREDENTIAL_ROTATE_EVERY", "5m"), 5*time.Minute)
 	credentialRotateBefore := parseDuration(getEnv("SEAGULL_CONTROL_CREDENTIAL_ROTATE_BEFORE", "24h"), 24*time.Hour)
+	certRotateEvery := parseDuration(getEnv("SEAGULL_CONTROL_CERT_ROTATE_EVERY", "1h"), time.Hour)
+	certRotateBefore := parseDuration(getEnv("SEAGULL_CONTROL_CERT_ROTATE_BEFORE", "720h"), 720*time.Hour)
 	responseActionStageMax := parseInt(getEnv("SEAGULL_RESPONSE_ACTION_STAGE_MAX", "512"), 512)
 
 	syscollectEvery := parseDuration(getEnv("SEAGULL_SYSCOLLECT_EVERY", "5m"), 5*time.Minute)
@@ -444,6 +448,8 @@ func LoadConfig() Config {
 		ForceEnrollOnStart:        forceEnrollOnStart,
 		CredentialRotateEvery:     credentialRotateEvery,
 		CredentialRotateBefore:    credentialRotateBefore,
+		CertRotateEvery:           certRotateEvery,
+		CertRotateBefore:          certRotateBefore,
 		ResponseActionStageMax:    responseActionStageMax,
 
 		SyscollectEvery:          syscollectEvery,

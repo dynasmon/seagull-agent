@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/certrenew"
 	agentcfg "gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/config"
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/controlplane"
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/heartbeat"
@@ -257,6 +258,8 @@ func (s *Service) startControlPlane(rootCtx context.Context) {
 		}
 	}()
 
+	s.startCertificateRotation(rootCtx)
+
 	responseactions.StartPolling(rootCtx, responseactions.PollerConfig{
 		AgentID: s.cfg.AgentID,
 		Every:   s.cfg.ControlResponsePollEvery,
@@ -376,6 +379,18 @@ func (s *Service) buildHeartbeatRequest() controlplane.HeartbeatRequest {
 	}
 	if !nextRetryAt.IsZero() {
 		metrics["auth_next_recovery_retry_at"] = nextRetryAt.Format(time.RFC3339)
+	}
+	if strings.TrimSpace(s.cfg.TLSCertFile) != "" {
+		metrics["tls_client_cert_renewals_total"] = s.state.CertRenewalsTotal
+		metrics["tls_client_cert_renew_errors_total"] = s.state.CertRenewErrorsTotal
+		if s.state.CertLastRenewError != "" {
+			metrics["tls_client_cert_last_renew_error"] = s.state.CertLastRenewError
+		}
+		if certStatus, err := certrenew.Inspect(s.cfg.TLSCertFile); err == nil {
+			metrics["tls_client_cert_serial"] = certStatus.SerialHex
+			metrics["tls_client_cert_not_after"] = certStatus.NotAfter.Format(time.RFC3339)
+			metrics["tls_client_cert_seconds_remaining"] = int64(time.Until(certStatus.NotAfter).Seconds())
+		}
 	}
 	if s.runtimeConfig != nil {
 		metrics["config_hash"] = s.runtimeConfig.Hash()

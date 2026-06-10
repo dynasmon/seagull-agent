@@ -148,11 +148,11 @@ func (m *reloadingTLSMaterial) rootCAs() (*x509.CertPool, error) {
 func (m *reloadingTLSMaterial) clientCertificate() (*tls.Certificate, error) {
 	certStamp, err := statFile(m.certFile, "TLS client certificate")
 	if err != nil {
-		return nil, err
+		return m.cachedClientOr(err)
 	}
 	keyStamp, err := statFile(m.keyFile, "TLS client key")
 	if err != nil {
-		return nil, err
+		return m.cachedClientOr(err)
 	}
 	m.mu.RLock()
 	if m.cachedClient != nil && certStamp == m.cachedCertStamp && keyStamp == m.cachedKeyStamp {
@@ -163,7 +163,7 @@ func (m *reloadingTLSMaterial) clientCertificate() (*tls.Certificate, error) {
 	m.mu.RUnlock()
 	crt, err := tls.LoadX509KeyPair(m.certFile, m.keyFile)
 	if err != nil {
-		return nil, fmt.Errorf("load TLS client certificate: %w", err)
+		return m.cachedClientOr(fmt.Errorf("load TLS client certificate: %w", err))
 	}
 	m.mu.Lock()
 	m.cachedClient = &crt
@@ -171,6 +171,16 @@ func (m *reloadingTLSMaterial) clientCertificate() (*tls.Certificate, error) {
 	m.cachedKeyStamp = keyStamp
 	m.mu.Unlock()
 	return &crt, nil
+}
+
+func (m *reloadingTLSMaterial) cachedClientOr(err error) (*tls.Certificate, error) {
+	m.mu.RLock()
+	cached := m.cachedClient
+	m.mu.RUnlock()
+	if cached != nil {
+		return cached, nil
+	}
+	return nil, err
 }
 
 func (m *reloadingTLSMaterial) verifyServerConnection(cs tls.ConnectionState, serverName string) error {
