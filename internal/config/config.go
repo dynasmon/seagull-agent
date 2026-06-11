@@ -59,6 +59,7 @@ type Config struct {
 	CertRotateEvery           time.Duration
 	CertRotateBefore          time.Duration
 	ResponseActionStageMax    int
+	AllowShellExec            bool
 
 	SyscollectEvery          time.Duration
 	SyscollectStartupJitter  time.Duration
@@ -261,6 +262,7 @@ func LoadConfig() Config {
 	certRotateEvery := parseDuration(getEnv("SEAGULL_CONTROL_CERT_ROTATE_EVERY", "1h"), time.Hour)
 	certRotateBefore := parseDuration(getEnv("SEAGULL_CONTROL_CERT_ROTATE_BEFORE", "720h"), 720*time.Hour)
 	responseActionStageMax := parseInt(getEnv("SEAGULL_RESPONSE_ACTION_STAGE_MAX", "512"), 512)
+	allowShellExec := parseBool(getEnv("SEAGULL_RESPONSE_ALLOW_SHELL_EXEC", "false"), false)
 
 	syscollectEvery := parseDuration(getEnv("SEAGULL_SYSCOLLECT_EVERY", "5m"), 5*time.Minute)
 	syscollectStartupJitter := parseDuration(getEnv("SEAGULL_SYSCOLLECT_STARTUP_JITTER", "45s"), 45*time.Second)
@@ -451,6 +453,7 @@ func LoadConfig() Config {
 		CertRotateEvery:           certRotateEvery,
 		CertRotateBefore:          certRotateBefore,
 		ResponseActionStageMax:    responseActionStageMax,
+		AllowShellExec:            allowShellExec,
 
 		SyscollectEvery:          syscollectEvery,
 		SyscollectStartupJitter:  syscollectStartupJitter,
