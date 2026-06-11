@@ -60,6 +60,7 @@ type Service struct {
 	enrollment    *enrollment.Manager
 	sources       *sources.Manager
 	responseStage *responseactions.Stage
+	firewallTool  string
 	state         SummaryState
 	stop          context.CancelFunc
 }
@@ -134,6 +135,7 @@ func New(ctx context.Context, cfg agentcfg.Config, stop context.CancelFunc, http
 		enrollment:    enrollMgr,
 		sources:       sourceMgr,
 		responseStage: responseactions.NewStage(cfg.ResponseActionStageMax),
+		firewallTool:  responseactions.DetectFirewallTool(),
 		state: SummaryState{
 			StartedAt:                now,
 			LastSummaryAt:            now,

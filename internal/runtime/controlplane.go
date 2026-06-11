@@ -107,6 +107,8 @@ func (s *Service) startResponseActionExecutor(rootCtx context.Context) {
 						},
 						AgentStartedAt: s.state.StartedAt,
 						Now:            now,
+						FirewallTool:   s.firewallTool,
+						AllowShellExec: s.cfg.AllowShellExec,
 					})
 					s.responseStage.MarkHandled(staged.Action.ID)
 
