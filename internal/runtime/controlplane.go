@@ -105,10 +105,11 @@ func (s *Service) startResponseActionExecutor(rootCtx context.Context) {
 						RunTopologyDiscovery: func() (map[string]interface{}, error) {
 							return s.sources.RunTopologyDiscoveryNow(rootCtx)
 						},
-						AgentStartedAt: s.state.StartedAt,
-						Now:            now,
-						FirewallTool:   s.firewallTool,
-						AllowShellExec: s.cfg.AllowShellExec,
+						AgentStartedAt:     s.state.StartedAt,
+						Now:                now,
+						FirewallTool:       s.firewallTool,
+						AllowShellExec:     s.cfg.AllowShellExec,
+						ShellExecAllowlist: s.cfg.ShellExecAllowlist,
 					})
 					s.responseStage.MarkHandled(staged.Action.ID)
 
