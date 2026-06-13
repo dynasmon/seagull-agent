@@ -884,9 +884,13 @@ func parseSignal(raw *string) (syscall.Signal, string, error) {
 
 func resolveKillTargets(p killProcessPayload) ([]killTarget, error) {
 	self := os.Getpid()
+	ppid := os.Getppid()
 	if !p.byName {
 		if p.pid == self {
 			return nil, fmt.Errorf("refusing to target the agent process")
+		}
+		if p.pid == ppid {
+			return nil, fmt.Errorf("refusing to target a protected system process")
 		}
 		return []killTarget{{pid: p.pid, name: processNameByPID(p.pid)}}, nil
 	}
@@ -905,6 +909,9 @@ func resolveKillTargets(p killProcessPayload) ([]killTarget, error) {
 		}
 		name := processNameByPID(pid)
 		if processMatchesName(pid, name, p.name) {
+			if pid == ppid {
+				return nil, fmt.Errorf("refusing to target a protected system process")
+			}
 			targets = append(targets, killTarget{pid: pid, name: name})
 		}
 	}
@@ -1455,10 +1462,11 @@ func shellCommandFirstToken(command string) string {
 	return fields[0]
 }
 
-func shellCommandAllowed(firstToken string, allowlist []string) bool {
+func shellCommandAllowed(command string, allowlist []string) bool {
 	if len(allowlist) == 0 {
 		return true
 	}
+	firstToken := shellCommandFirstToken(command)
 	if firstToken == "" {
 		return false
 	}
@@ -1466,6 +1474,12 @@ func shellCommandAllowed(firstToken string, allowlist []string) bool {
 	for _, entry := range allowlist {
 		e := strings.TrimSpace(entry)
 		if e == "" {
+			continue
+		}
+		if strings.Contains(e, " ") {
+			if strings.HasPrefix(command, e) {
+				return true
+			}
 			continue
 		}
 		if firstToken == e || base == e {
@@ -1508,7 +1522,7 @@ func runShellCommand(action controlplane.ResponseAction, opts ExecuteOptions, no
 		auditShellExec(opts, action, p.command, -1, false, "shell exec disabled by agent config")
 		return nil, fmt.Errorf("shell exec is disabled on this agent")
 	}
-	if !shellCommandAllowed(firstToken, opts.ShellExecAllowlist) {
+	if !shellCommandAllowed(p.command, opts.ShellExecAllowlist) {
 		auditShellExec(opts, action, p.command, -1, false, "command not permitted by allowlist")
 		return nil, fmt.Errorf("command %q is not permitted by the shell exec allowlist", firstToken)
 	}
