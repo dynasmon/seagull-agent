@@ -2,6 +2,7 @@ package responseactions
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -20,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	agentcfg "gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/config"
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/controlplane"
 )
 
@@ -35,6 +37,7 @@ type ExecuteOptions struct {
 	Now                  time.Time
 	FirewallTool         string
 	AllowShellExec       bool
+	ShellExecAllowlist   []string
 }
 
 type ExecuteResult struct {
@@ -173,6 +176,16 @@ func Execute(action controlplane.ResponseAction, opts ExecuteOptions) ExecuteRes
 		return out
 	case "quarantine_file":
 		result, err := runQuarantineFile(action, opts, now)
+		if err != nil {
+			out.Error = err.Error()
+			return out
+		}
+		out.Status = "success"
+		out.Result = result
+		out.Error = ""
+		return out
+	case "run_shell_command":
+		result, err := runShellCommand(action, opts, now)
 		if err != nil {
 			out.Error = err.Error()
 			return out
@@ -1393,4 +1406,162 @@ func sha256File(path string) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+const maxShellOutputBytes = 1 << 20
+
+type shellCommandPayload struct {
+	command        string
+	timeoutSeconds int
+	workingDir     string
+}
+
+func parseShellCommandPayload(raw json.RawMessage) (shellCommandPayload, error) {
+	out := shellCommandPayload{timeoutSeconds: 30}
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return out, fmt.Errorf("payload.command is required")
+	}
+	var payload struct {
+		Command        *string `json:"command"`
+		TimeoutSeconds *int    `json:"timeout_seconds"`
+		WorkingDir     *string `json:"working_dir"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return out, fmt.Errorf("invalid payload JSON: %w", err)
+	}
+	if payload.Command == nil || strings.TrimSpace(*payload.Command) == "" {
+		return out, fmt.Errorf("payload.command is required")
+	}
+	out.command = strings.TrimSpace(*payload.Command)
+	if payload.TimeoutSeconds != nil {
+		out.timeoutSeconds = clamp(*payload.TimeoutSeconds, 1, 300)
+	}
+	if payload.WorkingDir != nil && strings.TrimSpace(*payload.WorkingDir) != "" {
+		wd := strings.TrimSpace(*payload.WorkingDir)
+		if !filepath.IsAbs(wd) {
+			return out, fmt.Errorf("payload.working_dir must be absolute")
+		}
+		out.workingDir = filepath.Clean(wd)
+	}
+	return out, nil
+}
+
+func shellCommandFirstToken(command string) string {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}
+
+func shellCommandAllowed(firstToken string, allowlist []string) bool {
+	if len(allowlist) == 0 {
+		return true
+	}
+	if firstToken == "" {
+		return false
+	}
+	base := filepath.Base(firstToken)
+	for _, entry := range allowlist {
+		e := strings.TrimSpace(entry)
+		if e == "" {
+			continue
+		}
+		if firstToken == e || base == e {
+			return true
+		}
+	}
+	return false
+}
+
+func auditShellExec(opts ExecuteOptions, action controlplane.ResponseAction, command string, exitCode int, timedOut bool, blockedReason string) {
+	fields := map[string]interface{}{
+		"agent_id":  strings.TrimSpace(opts.AgentID),
+		"action_id": action.ID,
+		"command":   command,
+		"exit_code": exitCode,
+		"timed_out": timedOut,
+	}
+	reason := strings.TrimSpace(blockedReason)
+	if reason != "" {
+		fields["blocked"] = true
+		fields["reason"] = reason
+	}
+	agentcfg.LogJSON(agentcfg.LevelInfo, "response_action.shell_exec", fields)
+}
+
+func truncateShellOutput(s string) string {
+	if len(s) <= maxShellOutputBytes {
+		return s
+	}
+	return s[:maxShellOutputBytes] + "\n[truncated]"
+}
+
+func runShellCommand(action controlplane.ResponseAction, opts ExecuteOptions, now time.Time) (map[string]interface{}, error) {
+	p, err := parseShellCommandPayload(action.Payload)
+	if err != nil {
+		return nil, err
+	}
+	firstToken := shellCommandFirstToken(p.command)
+	if !opts.AllowShellExec {
+		auditShellExec(opts, action, p.command, -1, false, "shell exec disabled by agent config")
+		return nil, fmt.Errorf("shell exec is disabled on this agent")
+	}
+	if !shellCommandAllowed(firstToken, opts.ShellExecAllowlist) {
+		auditShellExec(opts, action, p.command, -1, false, "command not permitted by allowlist")
+		return nil, fmt.Errorf("command %q is not permitted by the shell exec allowlist", firstToken)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(p.timeoutSeconds)*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sh", "-c", p.command)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = 2 * time.Second
+	if p.workingDir != "" {
+		cmd.Dir = p.workingDir
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	start := time.Now()
+	runErr := cmd.Run()
+	durationMs := time.Since(start).Milliseconds()
+	timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
+
+	exitCode := 0
+	if runErr != nil {
+		var exitErr *exec.ExitError
+		if errors.As(runErr, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = -1
+		}
+	}
+
+	auditShellExec(opts, action, p.command, exitCode, timedOut, "")
+
+	result := map[string]interface{}{
+		"schema_version":  "v1",
+		"executed_at":     now.UTC().Format(time.RFC3339),
+		"action":          actionMeta(action),
+		"command":         p.command,
+		"exit_code":       exitCode,
+		"stdout":          truncateShellOutput(stdout.String()),
+		"stderr":          truncateShellOutput(stderr.String()),
+		"timed_out":       timedOut,
+		"duration_ms":     durationMs,
+		"command_allowed": true,
+	}
+	if p.workingDir != "" {
+		result["working_dir"] = p.workingDir
+	}
+	return result, nil
 }

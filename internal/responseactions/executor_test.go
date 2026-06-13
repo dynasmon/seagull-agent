@@ -685,3 +685,138 @@ func TestDetectFirewallTool(t *testing.T) {
 		t.Fatalf("unexpected firewall tool")
 	}
 }
+
+func TestExecuteRunShellCommandAllowed(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	action := controlplane.ResponseAction{
+		ID:          150,
+		ActionType:  "run_shell_command",
+		AgentID:     "agent-1",
+		Status:      "pending",
+		RequestedAt: now,
+		Payload:     []byte(`{"command":"echo seagull-ok","timeout_seconds":10}`),
+	}
+	out := Execute(action, ExecuteOptions{ExpectedAgentID: "agent-1", AgentID: "agent-1", AllowShellExec: true, Now: now})
+	if out.Status != "success" {
+		t.Fatalf("expected success, got %q error=%q", out.Status, out.Error)
+	}
+	if code, _ := out.Result["exit_code"].(int); code != 0 {
+		t.Fatalf("expected exit_code 0, got %v", out.Result["exit_code"])
+	}
+	if allowed, _ := out.Result["command_allowed"].(bool); !allowed {
+		t.Fatalf("expected command_allowed true")
+	}
+	if timedOut, _ := out.Result["timed_out"].(bool); timedOut {
+		t.Fatalf("did not expect timeout")
+	}
+	if stdout, _ := out.Result["stdout"].(string); !strings.Contains(stdout, "seagull-ok") {
+		t.Fatalf("expected stdout to contain command output, got %q", stdout)
+	}
+}
+
+func TestExecuteRunShellCommandAllowlistMatch(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	action := controlplane.ResponseAction{
+		ID:          151,
+		ActionType:  "run_shell_command",
+		AgentID:     "agent-1",
+		Status:      "pending",
+		RequestedAt: now,
+		Payload:     []byte(`{"command":"echo allowlisted"}`),
+	}
+	out := Execute(action, ExecuteOptions{
+		ExpectedAgentID:    "agent-1",
+		AgentID:            "agent-1",
+		AllowShellExec:     true,
+		ShellExecAllowlist: []string{"echo", "ss"},
+		Now:                now,
+	})
+	if out.Status != "success" {
+		t.Fatalf("expected success, got %q error=%q", out.Status, out.Error)
+	}
+	if code, _ := out.Result["exit_code"].(int); code != 0 {
+		t.Fatalf("expected exit_code 0, got %v", out.Result["exit_code"])
+	}
+}
+
+func TestExecuteRunShellCommandBlockedByAllowlist(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	action := controlplane.ResponseAction{
+		ID:          152,
+		ActionType:  "run_shell_command",
+		AgentID:     "agent-1",
+		Status:      "pending",
+		RequestedAt: now,
+		Payload:     []byte(`{"command":"echo blocked"}`),
+	}
+	out := Execute(action, ExecuteOptions{
+		ExpectedAgentID:    "agent-1",
+		AgentID:            "agent-1",
+		AllowShellExec:     true,
+		ShellExecAllowlist: []string{"netstat", "ss"},
+		Now:                now,
+	})
+	if out.Status != "failed" {
+		t.Fatalf("expected failed status, got %q", out.Status)
+	}
+	if out.Error == "" {
+		t.Fatalf("expected error for blocked command")
+	}
+}
+
+func TestExecuteRunShellCommandDisabled(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	action := controlplane.ResponseAction{
+		ID:          153,
+		ActionType:  "run_shell_command",
+		AgentID:     "agent-1",
+		Status:      "pending",
+		RequestedAt: now,
+		Payload:     []byte(`{"command":"echo nope"}`),
+	}
+	out := Execute(action, ExecuteOptions{ExpectedAgentID: "agent-1", AgentID: "agent-1", AllowShellExec: false, Now: now})
+	if out.Status != "failed" {
+		t.Fatalf("expected failed status, got %q", out.Status)
+	}
+	if out.Error == "" {
+		t.Fatalf("expected error when shell exec disabled")
+	}
+}
+
+func TestExecuteRunShellCommandTimeout(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	action := controlplane.ResponseAction{
+		ID:          154,
+		ActionType:  "run_shell_command",
+		AgentID:     "agent-1",
+		Status:      "pending",
+		RequestedAt: now,
+		Payload:     []byte(`{"command":"sleep 5","timeout_seconds":1}`),
+	}
+	out := Execute(action, ExecuteOptions{ExpectedAgentID: "agent-1", AgentID: "agent-1", AllowShellExec: true, Now: now})
+	if out.Status != "success" {
+		t.Fatalf("expected success, got %q error=%q", out.Status, out.Error)
+	}
+	if timedOut, _ := out.Result["timed_out"].(bool); !timedOut {
+		t.Fatalf("expected timed_out true")
+	}
+	if code, _ := out.Result["exit_code"].(int); code == 0 {
+		t.Fatalf("expected non-zero exit code on timeout, got %v", out.Result["exit_code"])
+	}
+}
+
+func TestExecuteRunShellCommandRequiresCommand(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	action := controlplane.ResponseAction{
+		ID:          155,
+		ActionType:  "run_shell_command",
+		AgentID:     "agent-1",
+		Status:      "pending",
+		RequestedAt: now,
+		Payload:     []byte(`{"timeout_seconds":10}`),
+	}
+	out := Execute(action, ExecuteOptions{ExpectedAgentID: "agent-1", AgentID: "agent-1", AllowShellExec: true, Now: now})
+	if out.Status != "failed" {
+		t.Fatalf("expected failed status, got %q", out.Status)
+	}
+}
