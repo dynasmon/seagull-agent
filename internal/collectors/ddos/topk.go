@@ -89,12 +89,6 @@ func NewTopKInt(k int) *TopKInt {
 	return &TopKInt{k: k, items: make(map[int]int, k*2)}
 }
 
-func (t *TopKInt) Reset() {
-	for k := range t.items {
-		delete(t.items, k)
-	}
-}
-
 func (t *TopKInt) Add(key int, inc int) {
 	if key < 0 || inc <= 0 {
 		return

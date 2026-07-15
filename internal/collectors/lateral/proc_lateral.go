@@ -43,7 +43,7 @@ type ProcLateralCapturer struct {
 }
 
 func NewProcLateralCapturer(agentID, tcp4Path, tcp6Path string, procOpts proc.Options, o Options) *ProcLateralCapturer {
-	if o.Ports == nil || len(o.Ports) == 0 {
+	if len(o.Ports) == 0 {
 		o.Ports = defaultPorts()
 	}
 	if o.MaxBatchSize <= 0 {

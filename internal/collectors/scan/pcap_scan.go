@@ -66,9 +66,9 @@ func NewPcapScanCapturer(agentID string, opts PcapScanOptions) (*PcapScanCapture
 	}
 
 	return &PcapScanCapturer{
-		agentID: agentID,
-		opts:    opts,
-		netCtx:  nc,
+		agentID:     agentID,
+		opts:        opts,
+		netCtx:      nc,
 		buf:         make([]model.NetEvent, 0, 2048),
 		cache:       make(map[string]time.Time, 8192),
 		lastCleanup: time.Now().UTC(),
@@ -261,11 +261,11 @@ func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *mod
 				Proto:     "arp",
 				Bytes:     len(pkt.Data()),
 				Extra: map[string]interface{}{
-					"scan_type":  "arp_request",
-					"iface":      iface,
-					"ip_version": 0,
-					"collector":  "pcap_scan",
-					"signal_family": "scan",
+					"scan_type":       "arp_request",
+					"iface":           iface,
+					"ip_version":      0,
+					"collector":       "pcap_scan",
+					"signal_family":   "scan",
 					"scan_confidence": scanConfidenceForType("arp_request"),
 				},
 			}
@@ -308,17 +308,17 @@ func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *mod
 			DstPort:   dstPort,
 			Proto:     "tcp",
 			Bytes:     len(pkt.Data()),
-				Extra: map[string]interface{}{
-					"scan_type":  scanType,
-					"iface":      iface,
-					"ip_version": ipVersion,
-					"tcp_flags":  tcpFlagsString(tcp),
-					"collector":  "pcap_scan",
-					"signal_family": "scan",
-					"scan_confidence": scanConfidenceForTCP(scanType, srcPort, dstPort),
-					"syn_only": scanType == "tcp_syn",
-				},
-			}
+			Extra: map[string]interface{}{
+				"scan_type":       scanType,
+				"iface":           iface,
+				"ip_version":      ipVersion,
+				"tcp_flags":       tcpFlagsString(tcp),
+				"collector":       "pcap_scan",
+				"signal_family":   "scan",
+				"scan_confidence": scanConfidenceForTCP(scanType, srcPort, dstPort),
+				"syn_only":        scanType == "tcp_syn",
+			},
+		}
 	}
 
 	if udpL := pkt.Layer(layers.LayerTypeUDP); udpL != nil {
@@ -346,30 +346,30 @@ func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *mod
 			DstPort:   dstPort,
 			Proto:     "udp",
 			Bytes:     len(pkt.Data()),
-				Extra: map[string]interface{}{
-					"scan_type":  "udp_probe",
-					"iface":      iface,
-					"ip_version": ipVersion,
-					"collector":  "pcap_scan",
-					"signal_family": "scan",
-					"scan_confidence": func() int {
-						conf := scanConfidenceForType("udp_probe")
-						if srcPort >= 49152 {
-							conf += 3
-						}
-						switch dstPort {
-						case 53, 161, 1900:
-							conf -= 8
-						case 123:
-							conf -= 10
-						}
-						if conf < 20 {
-							conf = 20
-						}
-						return conf
-					}(),
-				},
-			}
+			Extra: map[string]interface{}{
+				"scan_type":     "udp_probe",
+				"iface":         iface,
+				"ip_version":    ipVersion,
+				"collector":     "pcap_scan",
+				"signal_family": "scan",
+				"scan_confidence": func() int {
+					conf := scanConfidenceForType("udp_probe")
+					if srcPort >= 49152 {
+						conf += 3
+					}
+					switch dstPort {
+					case 53, 161, 1900:
+						conf -= 8
+					case 123:
+						conf -= 10
+					}
+					if conf < 20 {
+						conf = 20
+					}
+					return conf
+				}(),
+			},
+		}
 	}
 
 	if c.opts.IncludeICMP {
@@ -388,13 +388,13 @@ func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *mod
 				Proto:     "icmp",
 				Bytes:     len(pkt.Data()),
 				Extra: map[string]interface{}{
-					"scan_type":  "icmp_echo",
-					"iface":      iface,
-					"ip_version": ipVersion,
-					"icmp_type":  int(icmp.TypeCode.Type()),
-					"icmp_code":  int(icmp.TypeCode.Code()),
-					"collector":  "pcap_scan",
-					"signal_family": "scan",
+					"scan_type":       "icmp_echo",
+					"iface":           iface,
+					"ip_version":      ipVersion,
+					"icmp_type":       int(icmp.TypeCode.Type()),
+					"icmp_code":       int(icmp.TypeCode.Code()),
+					"collector":       "pcap_scan",
+					"signal_family":   "scan",
 					"scan_confidence": scanConfidenceForType("icmp_echo"),
 				},
 			}
@@ -417,13 +417,13 @@ func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *mod
 				Proto:     "icmp6",
 				Bytes:     len(pkt.Data()),
 				Extra: map[string]interface{}{
-					"scan_type":  "icmp6_echo",
-					"iface":      iface,
-					"ip_version": ipVersion,
-					"icmp_type":  int(icmp.TypeCode.Type()),
-					"icmp_code":  int(icmp.TypeCode.Code()),
-					"collector":  "pcap_scan",
-					"signal_family": "scan",
+					"scan_type":       "icmp6_echo",
+					"iface":           iface,
+					"ip_version":      ipVersion,
+					"icmp_type":       int(icmp.TypeCode.Type()),
+					"icmp_code":       int(icmp.TypeCode.Code()),
+					"collector":       "pcap_scan",
+					"signal_family":   "scan",
 					"scan_confidence": scanConfidenceForType("icmp6_echo"),
 				},
 			}

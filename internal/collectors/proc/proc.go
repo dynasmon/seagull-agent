@@ -215,12 +215,12 @@ func (c *Capturer) captureProc4(ts time.Time) ([]model.NetEvent, error) {
 		}
 
 		extra := map[string]interface{}{
-			"flow_id":       uuid.NewString(),
-			"tcp_state_hex": stateHex,
+			"flow_id":        uuid.NewString(),
+			"tcp_state_hex":  stateHex,
 			"tcp_state_name": stateName(stateHex),
-			"ip_version":    4,
-			"collector":     "proc_net_tcp",
-			"signal_family": "flow",
+			"ip_version":     4,
+			"collector":      "proc_net_tcp",
+			"signal_family":  "flow",
 			"flow_direction": "inbound_to_local",
 
 			"local_ip":    localIP,
@@ -317,12 +317,12 @@ func (c *Capturer) captureProc6(ts time.Time) ([]model.NetEvent, error) {
 		}
 
 		extra := map[string]interface{}{
-			"flow_id":       uuid.NewString(),
-			"tcp_state_hex": stateHex,
+			"flow_id":        uuid.NewString(),
+			"tcp_state_hex":  stateHex,
 			"tcp_state_name": stateName(stateHex),
-			"ip_version":    6,
-			"collector":     "proc_net_tcp",
-			"signal_family": "flow",
+			"ip_version":     6,
+			"collector":      "proc_net_tcp",
+			"signal_family":  "flow",
 			"flow_direction": "inbound_to_local",
 
 			"local_ip":    localIP,
