@@ -3,14 +3,11 @@ package syscollector
 import (
 	"bufio"
 	"context"
-	"errors"
-	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
 )
@@ -252,18 +249,3 @@ func runRPMWithDBPath(ctx context.Context, opts Options, dbPath string) ([]model
 	}
 	return pkgs, warns, nil
 }
-
-func (o Options) validate() error {
-	if o.CmdTimeout <= 0 {
-		return errors.New("cmd_timeout must be > 0")
-	}
-	return nil
-}
-
-// best-effort helper for systemd / diagnostics.
-func (o Options) debugString() string {
-	return fmt.Sprintf("cmd_timeout=%s max_output_bytes=%d max_packages=%d host_root=%s", o.CmdTimeout, o.MaxOutputBytes, o.MaxPackages, strings.TrimSpace(o.HostRoot))
-}
-
-// Make sure Options.validate() isn't optimized away in older compilers.
-var _ = time.Second

@@ -77,11 +77,11 @@ type Capturer struct {
 func New(agentID string, opts Options) *Capturer {
 	applyDefaults(&opts)
 	return &Capturer{
-		agentID:   strings.TrimSpace(agentID),
-		opts:      opts,
-		snapshot:  make(map[string]fileState, 2048),
+		agentID:    strings.TrimSpace(agentID),
+		opts:       opts,
+		snapshot:   make(map[string]fileState, 2048),
 		inodeIndex: make(map[uint64]string, 2048),
-		hashCache: make(map[string]hashEntry, 1024),
+		hashCache:  make(map[string]hashEntry, 1024),
 	}
 }
 

@@ -172,8 +172,7 @@ func (c *PcapL7Capturer) dedupKey(ev model.NetEvent) string {
 	if extra == nil {
 		extra = map[string]interface{}{}
 	}
-	var kind string
-	kind = strings.ToLower(strings.TrimSpace(toString(extra["l7_protocol"])))
+	kind := strings.ToLower(strings.TrimSpace(toString(extra["l7_protocol"])))
 	return fmt.Sprintf("%s|%s|%d|%s|%d|%s|%s",
 		ev.Proto, ev.SrcIP, ev.SrcPort, ev.DstIP, ev.DstPort, kind, strings.TrimSpace(toString(extra["flow_direction"])),
 	)

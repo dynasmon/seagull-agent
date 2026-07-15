@@ -62,9 +62,9 @@ func NewPcapLateralCapturer(agentID string, opts PcapLateralOptions) (*PcapLater
 	}
 
 	return &PcapLateralCapturer{
-		agentID: agentID,
-		opts:    opts,
-		netCtx:  nc,
+		agentID:     agentID,
+		opts:        opts,
+		netCtx:      nc,
 		buf:         make([]model.NetEvent, 0, 2048),
 		cache:       make(map[string]time.Time, 8192),
 		lastCleanup: time.Now().UTC(),
@@ -259,13 +259,13 @@ func (c *PcapLateralCapturer) packetToEvent(pkt gopacket.Packet, iface string) *
 		Proto:     "tcp",
 		Bytes:     len(pkt.Data()),
 		Extra: map[string]interface{}{
-			"lateral_kind": "attempt",
-			"iface":        iface,
-			"ip_version":   ipVersion,
-			"tcp_flags":    tcpFlagsString(tcp),
-			"collector":    "pcap_lateral",
-			"signal_family": "lateral",
-			"syn_only":     synOnly,
+			"lateral_kind":       "attempt",
+			"iface":              iface,
+			"ip_version":         ipVersion,
+			"tcp_flags":          tcpFlagsString(tcp),
+			"collector":          "pcap_lateral",
+			"signal_family":      "lateral",
+			"syn_only":           synOnly,
 			"lateral_confidence": confidence,
 		},
 	}

@@ -411,11 +411,7 @@ func filepathJoinClean(root, p string) string {
 	if root == "" {
 		return p
 	}
-	// Ensure p is absolute-like within root.
-	if strings.HasPrefix(p, "/") {
-		p = p[1:]
-	}
-	return filepath.Clean(filepath.Join(root, p))
+	return filepath.Clean(filepath.Join(root, strings.TrimPrefix(p, "/")))
 }
 
 func fileExists(path string) bool {
