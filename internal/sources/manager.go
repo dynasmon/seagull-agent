@@ -327,20 +327,10 @@ func NewManager(cfg agentcfg.Config, rootCtx context.Context, stop context.Cance
 	return m, nil
 }
 
-func (m *Manager) RuntimeConfig() *RuntimeConfig {
-	return m.runtime
-}
-
 func (m *Manager) SyscollectorStatus() SyscollectorStatus {
 	m.sysMu.RLock()
 	defer m.sysMu.RUnlock()
 	return m.sysStatus
-}
-
-func (m *Manager) VulnScannerStatus() VulnScannerStatus {
-	m.vulnMu.RLock()
-	defer m.vulnMu.RUnlock()
-	return m.vulnStatus
 }
 
 func (m *Manager) TopologyDiscoveryStatus() TopologyDiscoveryStatus {

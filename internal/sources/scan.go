@@ -1,7 +1,6 @@
 package sources
 
 import (
-	"sort"
 	"time"
 
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
@@ -201,30 +200,4 @@ func buildScanSummaries(agentID string, scanEvents []model.NetEvent, window time
 
 func round2(v float64) float64 {
 	return float64(int(v*100)) / 100
-}
-
-func topNKeysInt(m map[int]bool, n int) []int {
-	out := make([]int, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Ints(out)
-	if n <= 0 || len(out) <= n {
-		return out
-	}
-	return out[:n]
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
