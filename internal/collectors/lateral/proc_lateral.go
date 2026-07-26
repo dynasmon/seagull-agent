@@ -145,10 +145,3 @@ func serviceForPort(p int) string {
 		return "admin"
 	}
 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
