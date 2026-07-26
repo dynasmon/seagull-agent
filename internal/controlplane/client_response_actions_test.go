@@ -1,4 +1,4 @@
-package controlplane
+package controlplane_test
 
 import (
 	"context"
@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/controlplane"
 )
 
 func TestListPendingResponseActionsOK(t *testing.T) {
@@ -27,7 +29,7 @@ func TestListPendingResponseActionsOK(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := New(ts.URL, 5*time.Second, "agent-1", func() string { return "cred-1" }, ts.Client())
+	c := controlplane.New(ts.URL, 5*time.Second, "agent-1", func() string { return "cred-1" }, ts.Client())
 	out, err := c.ListPendingResponseActions(context.Background())
 	if err != nil {
 		t.Fatalf("ListPendingResponseActions error: %v", err)
@@ -53,7 +55,7 @@ func TestListPendingResponseActionsEmpty(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := New(ts.URL, 5*time.Second, "agent-1", nil, ts.Client())
+	c := controlplane.New(ts.URL, 5*time.Second, "agent-1", nil, ts.Client())
 	out, err := c.ListPendingResponseActions(context.Background())
 	if err != nil {
 		t.Fatalf("ListPendingResponseActions error: %v", err)
@@ -75,7 +77,7 @@ func TestListPendingResponseActionsRejectsMalformedAction(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := New(ts.URL, 5*time.Second, "agent-1", nil, ts.Client())
+	c := controlplane.New(ts.URL, 5*time.Second, "agent-1", nil, ts.Client())
 	_, err := c.ListPendingResponseActions(context.Background())
 	if err == nil {
 		t.Fatalf("expected validation error")
@@ -98,9 +100,9 @@ func TestReportResponseActionResultOK(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := New(ts.URL, 5*time.Second, "agent-1", func() string { return "cred-1" }, ts.Client())
+	c := controlplane.New(ts.URL, 5*time.Second, "agent-1", func() string { return "cred-1" }, ts.Client())
 	now := time.Now().UTC().Truncate(time.Second)
-	err := c.ReportResponseActionResult(context.Background(), ResponseActionExecutionResult{
+	err := c.ReportResponseActionResult(context.Background(), controlplane.ResponseActionExecutionResult{
 		ResponseActionID: 12,
 		AgentID:          "agent-1",
 		Status:           "success",
@@ -129,8 +131,8 @@ func TestReportResponseActionResultFallbackPath(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := New(ts.URL, 5*time.Second, "agent-1", nil, ts.Client())
-	err := c.ReportResponseActionResult(context.Background(), ResponseActionExecutionResult{
+	c := controlplane.New(ts.URL, 5*time.Second, "agent-1", nil, ts.Client())
+	err := c.ReportResponseActionResult(context.Background(), controlplane.ResponseActionExecutionResult{
 		ResponseActionID: 13,
 		Status:           "failed",
 		Error:            "x",

@@ -38,6 +38,33 @@ func New(baseURL string, timeout time.Duration, agentID string, credentialFunc f
 	}
 }
 
+func (c *Client) do(ctx context.Context, method, path, name string, body []byte) (int, []byte, error) {
+	if c.baseURL == "" {
+		return 0, nil, fmt.Errorf("controlplane baseURL is empty")
+	}
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reader)
+	if err != nil {
+		return 0, nil, fmt.Errorf("new %s request: %w", name, err)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	agentauth.ApplyCredentialHeaders(req, c.agentID, c.credentialFunc)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("%s request: %w", name, err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, respBody, nil
+}
+
 type EnrollRequest struct {
 	AgentID        string `json:"agent_id"`
 	Hostname       string `json:"hostname,omitempty"`
@@ -109,63 +136,32 @@ type HeartbeatRequest struct {
 }
 
 func (c *Client) Heartbeat(ctx context.Context, hb HeartbeatRequest) error {
-	if c.baseURL == "" {
-		return fmt.Errorf("controlplane baseURL is empty")
-	}
-
 	payload, err := json.Marshal(hb)
 	if err != nil {
 		return fmt.Errorf("marshal heartbeat: %w", err)
 	}
-
-	u := c.baseURL + "/agents/heartbeat"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(payload))
+	status, _, err := c.do(ctx, http.MethodPost, "/agents/heartbeat", "heartbeat", payload)
 	if err != nil {
-		return fmt.Errorf("new heartbeat request: %w", err)
+		return err
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	agentauth.ApplyCredentialHeaders(httpReq, c.agentID, c.credentialFunc)
-
-	resp, err := c.http.Do(httpReq)
-	if err != nil {
-		return fmt.Errorf("heartbeat request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	_, _ = io.Copy(io.Discard, resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("heartbeat failed status=%d", resp.StatusCode)
+	if status < 200 || status >= 300 {
+		return fmt.Errorf("heartbeat failed status=%d", status)
 	}
 	return nil
 }
 
 func (c *Client) GetConfig(ctx context.Context) (map[string]interface{}, error) {
-	if c.baseURL == "" {
-		return nil, fmt.Errorf("controlplane baseURL is empty")
-	}
-
-	u := c.baseURL + "/agents/config"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	status, body, err := c.do(ctx, http.MethodGet, "/agents/config", "config", nil)
 	if err != nil {
-		return nil, fmt.Errorf("new config request: %w", err)
+		return nil, err
 	}
-	agentauth.ApplyCredentialHeaders(httpReq, c.agentID, c.credentialFunc)
-
-	resp, err := c.http.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("config request: %w", err)
+	if status < 200 || status >= 300 {
+		return nil, fmt.Errorf("config failed status=%d body=%s", status, string(body))
 	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("config failed status=%d body=%s", resp.StatusCode, string(body))
-	}
-
-	var out map[string]interface{}
 	if len(body) == 0 {
 		return map[string]interface{}{}, nil
 	}
+	var out map[string]interface{}
 	if err := json.Unmarshal(body, &out); err != nil {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
 	}
@@ -177,26 +173,12 @@ func (c *Client) GetConfig(ctx context.Context) (map[string]interface{}, error) 
 
 func (c *Client) RotateCredential(ctx context.Context) (Credential, error) {
 	var out Credential
-	if c.baseURL == "" {
-		return out, fmt.Errorf("controlplane baseURL is empty")
-	}
-
-	u := c.baseURL + "/agents/credential/rotate"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, u, nil)
+	status, body, err := c.do(ctx, http.MethodPost, "/agents/credential/rotate", "rotate credential", nil)
 	if err != nil {
-		return out, fmt.Errorf("new rotate request: %w", err)
+		return out, err
 	}
-	agentauth.ApplyCredentialHeaders(httpReq, c.agentID, c.credentialFunc)
-
-	resp, err := c.http.Do(httpReq)
-	if err != nil {
-		return out, fmt.Errorf("rotate credential request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return out, fmt.Errorf("rotate credential failed status=%d body=%s", resp.StatusCode, string(body))
+	if status < 200 || status >= 300 {
+		return out, fmt.Errorf("rotate credential failed status=%d body=%s", status, string(body))
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
 		return out, fmt.Errorf("unmarshal rotate response: %w", err)
@@ -219,32 +201,16 @@ type certificateRenewRequest struct {
 
 func (c *Client) RenewCertificate(ctx context.Context, csrPEM string) (CertificateRenewal, error) {
 	var out CertificateRenewal
-	if c.baseURL == "" {
-		return out, fmt.Errorf("controlplane baseURL is empty")
-	}
-
 	payload, err := json.Marshal(certificateRenewRequest{CSRPEM: csrPEM})
 	if err != nil {
 		return out, fmt.Errorf("marshal certificate renew request: %w", err)
 	}
-
-	u := c.baseURL + "/agents/certificate/renew"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(payload))
+	status, body, err := c.do(ctx, http.MethodPost, "/agents/certificate/renew", "certificate renew", payload)
 	if err != nil {
-		return out, fmt.Errorf("new certificate renew request: %w", err)
+		return out, err
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	agentauth.ApplyCredentialHeaders(httpReq, c.agentID, c.credentialFunc)
-
-	resp, err := c.http.Do(httpReq)
-	if err != nil {
-		return out, fmt.Errorf("certificate renew request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return out, fmt.Errorf("certificate renew failed status=%d body=%s", resp.StatusCode, string(body))
+	if status < 200 || status >= 300 {
+		return out, fmt.Errorf("certificate renew failed status=%d body=%s", status, string(body))
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
 		return out, fmt.Errorf("unmarshal certificate renew response: %w", err)
@@ -310,25 +276,15 @@ func (c *Client) ListPendingResponseActions(ctx context.Context) ([]ResponseActi
 }
 
 func (c *Client) listPendingResponseActionsPath(ctx context.Context, path string) ([]ResponseAction, error) {
-	u := c.baseURL + path
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	status, body, err := c.do(ctx, http.MethodGet, path, "response actions", nil)
 	if err != nil {
-		return nil, fmt.Errorf("new response actions request: %w", err)
+		return nil, err
 	}
-	agentauth.ApplyCredentialHeaders(httpReq, c.agentID, c.credentialFunc)
-
-	resp, err := c.http.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("response actions request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode == http.StatusNoContent {
+	if status == http.StatusNoContent {
 		return []ResponseAction{}, nil
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("response actions failed status=%d body=%s", resp.StatusCode, string(body))
+	if status < 200 || status >= 300 {
+		return nil, fmt.Errorf("response actions failed status=%d body=%s", status, string(body))
 	}
 	if len(bytes.TrimSpace(body)) == 0 {
 		return []ResponseAction{}, nil
@@ -428,26 +384,15 @@ func (c *Client) ReportResponseActionResult(ctx context.Context, in ResponseActi
 	}
 	var lastErr error
 	for _, path := range paths {
-		u := c.baseURL + path
-		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(payload))
+		status, body, err := c.do(ctx, http.MethodPost, path, "response action result", payload)
 		if err != nil {
-			return fmt.Errorf("new response action result request: %w", err)
+			return err
 		}
-		httpReq.Header.Set("Content-Type", "application/json")
-		agentauth.ApplyCredentialHeaders(httpReq, c.agentID, c.credentialFunc)
-
-		resp, err := c.http.Do(httpReq)
-		if err != nil {
-			return fmt.Errorf("response action result request: %w", err)
-		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		if status >= 200 && status < 300 {
 			return nil
 		}
-		err = fmt.Errorf("response action result failed status=%d body=%s", resp.StatusCode, string(body))
-		if resp.StatusCode == http.StatusNotFound {
+		err = fmt.Errorf("response action result failed status=%d body=%s", status, string(body))
+		if status == http.StatusNotFound {
 			lastErr = err
 			continue
 		}
