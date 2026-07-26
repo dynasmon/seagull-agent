@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"net"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/pcapx"
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/netcontext"
 )
@@ -33,20 +33,13 @@ type PcapL7Options struct {
 	SkipLinkLocal bool
 }
 
-type dedupEntry struct {
-	at time.Time
-}
-
 type PcapL7Capturer struct {
 	agentID string
 	opts    PcapL7Options
 
 	netCtx *netcontext.NetworkContext
 
-	mu          sync.Mutex
-	buf         []model.NetEvent
-	cache       map[string]dedupEntry
-	lastCleanup time.Time
+	buffer *pcapx.Buffer
 }
 
 func NewPcapL7Capturer(agentID string, opts PcapL7Options) (*PcapL7Capturer, error) {
@@ -61,12 +54,10 @@ func NewPcapL7Capturer(agentID string, opts PcapL7Options) (*PcapL7Capturer, err
 	}
 
 	return &PcapL7Capturer{
-		agentID:     strings.TrimSpace(agentID),
-		opts:        opts,
-		netCtx:      nc,
-		buf:         make([]model.NetEvent, 0, opts.MaxBatchSize),
-		cache:       make(map[string]dedupEntry, 4096),
-		lastCleanup: time.Now().UTC(),
+		agentID: strings.TrimSpace(agentID),
+		opts:    opts,
+		netCtx:  nc,
+		buffer:  pcapx.NewBuffer(opts.DedupTTL, opts.MaxBatchSize),
 	}, nil
 }
 
@@ -124,47 +115,11 @@ func (c *PcapL7Capturer) Start(ctx context.Context) error {
 }
 
 func (c *PcapL7Capturer) Drain() []model.NetEvent {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if len(c.buf) == 0 {
-		return nil
-	}
-	out := make([]model.NetEvent, len(c.buf))
-	copy(out, c.buf)
-	c.buf = c.buf[:0]
-	return out
+	return c.buffer.Drain()
 }
 
 func (c *PcapL7Capturer) push(ev model.NetEvent) {
-	now := time.Now().UTC()
-	key := c.dedupKey(ev)
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if old, ok := c.cache[key]; ok && now.Sub(old.at) < c.opts.DedupTTL {
-		return
-	}
-	if len(c.buf) >= c.opts.MaxBatchSize {
-		return
-	}
-	c.cache[key] = dedupEntry{at: now}
-	c.buf = append(c.buf, ev)
-	c.cleanupLocked(now)
-}
-
-func (c *PcapL7Capturer) cleanupLocked(now time.Time) {
-	if now.Sub(c.lastCleanup) < c.opts.DedupTTL {
-		return
-	}
-	cut := now.Add(-2 * c.opts.DedupTTL)
-	for k, v := range c.cache {
-		if v.at.Before(cut) {
-			delete(c.cache, k)
-		}
-	}
-	c.lastCleanup = now
+	c.buffer.Push(c.dedupKey(ev), ev)
 }
 
 func (c *PcapL7Capturer) dedupKey(ev model.NetEvent) string {
@@ -665,13 +620,6 @@ func parseTLSALPN(ext []byte) string {
 		return ""
 	}
 	return strings.ToLower(strings.TrimSpace(string(ext[i : i+firstLen])))
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 func tlsVersionHint(v uint16) string {
