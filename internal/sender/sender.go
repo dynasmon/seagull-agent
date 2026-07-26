@@ -72,7 +72,7 @@ func (s *Sender) SendEvents(ctx context.Context, events []model.NetEvent) (int, 
 			return lastStatus, fmt.Errorf("marshal events: %w", err)
 		}
 
-		status, err := s.postWithRetry(ctx, endpoint, payload)
+		status, _, err := s.postWithRetry(ctx, endpoint, payload)
 		lastStatus = status
 		if err != nil {
 			return lastStatus, err
@@ -82,34 +82,7 @@ func (s *Sender) SendEvents(ctx context.Context, events []model.NetEvent) (int, 
 	return lastStatus, nil
 }
 
-func (s *Sender) postWithRetry(ctx context.Context, url string, payload []byte) (int, error) {
-	var lastErr error
-	lastStatus := 0
-
-	for attempt := 0; attempt <= s.retries; attempt++ {
-		if attempt > 0 {
-			if err := sleepBackoff(ctx, attempt); err != nil {
-				return lastStatus, err
-			}
-		}
-
-		status, err := s.postOnce(ctx, url, payload)
-		lastStatus = status
-
-		if err == nil {
-			return status, nil
-		}
-
-		lastErr = err
-		if !isRetryable(err, status) {
-			return status, err
-		}
-	}
-
-	return lastStatus, lastErr
-}
-
-func (s *Sender) postWithRetryRead(ctx context.Context, url string, payload []byte) (int, []byte, error) {
+func (s *Sender) postWithRetry(ctx context.Context, url string, payload []byte) (int, []byte, error) {
 	var lastErr error
 	lastStatus := 0
 	var lastBody []byte
@@ -121,7 +94,7 @@ func (s *Sender) postWithRetryRead(ctx context.Context, url string, payload []by
 			}
 		}
 
-		status, body, err := s.postOnceRead(ctx, url, payload)
+		status, body, err := s.postOnce(ctx, url, payload)
 		lastStatus = status
 		lastBody = body
 
@@ -138,30 +111,7 @@ func (s *Sender) postWithRetryRead(ctx context.Context, url string, payload []by
 	return lastStatus, lastBody, lastErr
 }
 
-func (s *Sender) postOnce(ctx context.Context, url string, payload []byte) (int, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
-	if err != nil {
-		return 0, fmt.Errorf("new request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	agentauth.ApplyCredentialHeaders(req, s.agentID, s.credentialFunc)
-
-	resp, err := s.client.Do(req)
-	if err != nil {
-		return 0, fmt.Errorf("post ingest: %w", err)
-	}
-	defer resp.Body.Close()
-
-	_, _ = io.Copy(io.Discard, resp.Body)
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return resp.StatusCode, fmt.Errorf("ingest returned status=%d", resp.StatusCode)
-	}
-
-	return resp.StatusCode, nil
-}
-
-func (s *Sender) postOnceRead(ctx context.Context, url string, payload []byte) (int, []byte, error) {
+func (s *Sender) postOnce(ctx context.Context, url string, payload []byte) (int, []byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
 		return 0, nil, fmt.Errorf("new request: %w", err)
@@ -175,7 +125,9 @@ func (s *Sender) postOnceRead(ctx context.Context, url string, payload []byte) (
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MiB cap
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	_, _ = io.Copy(io.Discard, resp.Body)
+
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return resp.StatusCode, body, fmt.Errorf("ingest returned status=%d", resp.StatusCode)
 	}
@@ -208,7 +160,8 @@ func (s *Sender) SendInventorySnapshot(ctx context.Context, snap model.Inventory
 	}
 
 	endpoint := s.baseURL + "/inventory"
-	return s.postWithRetry(ctx, endpoint, payload)
+	status, _, err := s.postWithRetry(ctx, endpoint, payload)
+	return status, err
 }
 
 func (s *Sender) SendVulnIngest(ctx context.Context, payload []byte) (int, []byte, error) {
@@ -220,7 +173,7 @@ func (s *Sender) SendVulnIngest(ctx context.Context, payload []byte) (int, []byt
 	}
 
 	endpoint := s.baseURL + "/vuln/ingest"
-	return s.postWithRetryRead(ctx, endpoint, payload)
+	return s.postWithRetry(ctx, endpoint, payload)
 }
 
 func isRetryable(err error, status int) bool {
@@ -257,11 +210,4 @@ func sleepBackoff(ctx context.Context, attempt int) error {
 	case <-t.C:
 		return nil
 	}
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
