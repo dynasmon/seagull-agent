@@ -6,13 +6,13 @@ import (
 	"net"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/pcapx"
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/netcontext"
 )
@@ -40,10 +40,7 @@ type PcapLateralCapturer struct {
 
 	netCtx *netcontext.NetworkContext
 
-	mu          sync.Mutex
-	buf         []model.NetEvent
-	cache       map[string]time.Time
-	lastCleanup time.Time
+	buffer *pcapx.Buffer
 }
 
 func NewPcapLateralCapturer(agentID string, opts PcapLateralOptions) (*PcapLateralCapturer, error) {
@@ -62,12 +59,10 @@ func NewPcapLateralCapturer(agentID string, opts PcapLateralOptions) (*PcapLater
 	}
 
 	return &PcapLateralCapturer{
-		agentID:     agentID,
-		opts:        opts,
-		netCtx:      nc,
-		buf:         make([]model.NetEvent, 0, 2048),
-		cache:       make(map[string]time.Time, 8192),
-		lastCleanup: time.Now().UTC(),
+		agentID: agentID,
+		opts:    opts,
+		netCtx:  nc,
+		buffer:  pcapx.NewBuffer(opts.DedupTTL, opts.MaxBatchSize),
 	}, nil
 }
 
@@ -142,21 +137,10 @@ func (c *PcapLateralCapturer) buildBPF() string {
 }
 
 func (c *PcapLateralCapturer) Drain() []model.NetEvent {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if len(c.buf) == 0 {
-		return nil
-	}
-	out := make([]model.NetEvent, len(c.buf))
-	copy(out, c.buf)
-	c.buf = c.buf[:0]
-	return out
+	return c.buffer.Drain()
 }
 
 func (c *PcapLateralCapturer) push(ev model.NetEvent) {
-	now := time.Now().UTC()
-
 	if ev.Extra == nil {
 		ev.Extra = map[string]interface{}{}
 	}
@@ -166,33 +150,7 @@ func (c *PcapLateralCapturer) push(ev model.NetEvent) {
 		ev.Proto, ev.SrcIP, ev.DstIP, ev.DstPort,
 	)
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if t, ok := c.cache[key]; ok && now.Sub(t) < c.opts.DedupTTL {
-		return
-	}
-	if len(c.buf) >= c.opts.MaxBatchSize {
-		return
-	}
-
-	c.cache[key] = now
-	c.buf = append(c.buf, ev)
-
-	c.cleanupLocked(now)
-}
-
-func (c *PcapLateralCapturer) cleanupLocked(now time.Time) {
-	if now.Sub(c.lastCleanup) < c.opts.DedupTTL {
-		return
-	}
-	cutoff := now.Add(-2 * c.opts.DedupTTL)
-	for k, t := range c.cache {
-		if t.Before(cutoff) {
-			delete(c.cache, k)
-		}
-	}
-	c.lastCleanup = now
+	c.buffer.Push(key, ev)
 }
 
 func (c *PcapLateralCapturer) packetToEvent(pkt gopacket.Packet, iface string) *model.NetEvent {
@@ -262,7 +220,7 @@ func (c *PcapLateralCapturer) packetToEvent(pkt gopacket.Packet, iface string) *
 			"lateral_kind":       "attempt",
 			"iface":              iface,
 			"ip_version":         ipVersion,
-			"tcp_flags":          tcpFlagsString(tcp),
+			"tcp_flags":          pcapx.TCPFlags(tcp),
 			"collector":          "pcap_lateral",
 			"signal_family":      "lateral",
 			"syn_only":           synOnly,
@@ -272,47 +230,5 @@ func (c *PcapLateralCapturer) packetToEvent(pkt gopacket.Packet, iface string) *
 }
 
 func (c *PcapLateralCapturer) shouldDrop(srcIP, dstIP string) bool {
-	sip := net.ParseIP(srcIP)
-	dip := net.ParseIP(dstIP)
-	if sip == nil || dip == nil {
-		return true
-	}
-
-	if c.opts.SkipLoopback && (sip.IsLoopback() || dip.IsLoopback()) {
-		return true
-	}
-	if c.opts.SkipLinkLocal && (sip.IsLinkLocalUnicast() || dip.IsLinkLocalUnicast()) {
-		return true
-	}
-
-	for _, n := range c.opts.DenyCIDRs {
-		if n.Contains(sip) || n.Contains(dip) {
-			return true
-		}
-	}
-
-	return false
-}
-
-func tcpFlagsString(t *layers.TCP) string {
-	flags := make([]string, 0, 6)
-	if t.SYN {
-		flags = append(flags, "SYN")
-	}
-	if t.ACK {
-		flags = append(flags, "ACK")
-	}
-	if t.FIN {
-		flags = append(flags, "FIN")
-	}
-	if t.RST {
-		flags = append(flags, "RST")
-	}
-	if t.PSH {
-		flags = append(flags, "PSH")
-	}
-	if t.URG {
-		flags = append(flags, "URG")
-	}
-	return strings.Join(flags, "|")
+	return pcapx.DropByIP(srcIP, dstIP, c.opts.SkipLoopback, c.opts.SkipLinkLocal, false, c.opts.DenyCIDRs)
 }
