@@ -432,10 +432,10 @@ func normalizeText(s string, max int) string {
 
 func computeSurfaceScore(h HostExposure) int {
 	score := 0
-	score += minInt(len(h.ExposedPorts)*6, 36)
-	score += minInt(len(h.HighRiskPorts)*10, 40)
+	score += min(len(h.ExposedPorts)*6, 36)
+	score += min(len(h.HighRiskPorts)*10, 40)
 	if len(h.ServiceHints) > 0 {
-		score += minInt(len(h.ServiceHints)*4, 16)
+		score += min(len(h.ServiceHints)*4, 16)
 	}
 	if h.HasExposedPorts {
 		score += 8
@@ -465,13 +465,6 @@ func sortedKeysInt(m map[int]bool, max int) []int {
 		out = out[:max]
 	}
 	return out
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 var highRiskPorts = map[int]bool{
