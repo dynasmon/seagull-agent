@@ -671,10 +671,3 @@ func (c *Capturer) readBootTime(now time.Time) time.Time {
 	}
 	return now.Add(-time.Duration(sec * float64(time.Second))).UTC()
 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
