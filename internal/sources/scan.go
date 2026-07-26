@@ -3,6 +3,7 @@ package sources
 import (
 	"time"
 
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/mathx"
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
 )
 
@@ -186,7 +187,7 @@ func buildScanSummaries(agentID string, scanEvents []model.NetEvent, window time
 				"total_probes":      a.total,
 				"unique_dst_ports":  uniquePorts,
 				"ssh_port_hits":     a.sshHits,
-				"ssh_ratio":         round2(sshRatio),
+				"ssh_ratio":         mathx.Round2(sshRatio),
 				"unique_scan_types": len(a.scanTypes),
 				"scan_class":        class,
 				"scan_score":        score,
@@ -196,8 +197,4 @@ func buildScanSummaries(agentID string, scanEvents []model.NetEvent, window time
 	}
 
 	return out
-}
-
-func round2(v float64) float64 {
-	return float64(int(v*100)) / 100
 }
