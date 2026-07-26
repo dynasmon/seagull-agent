@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/pcapx"
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
 )
 
@@ -367,7 +368,6 @@ func (c *Capturer) captureProc6(ts time.Time) ([]model.NetEvent, error) {
 }
 
 func (c *Capturer) shouldDrop(srcIP, dstIP string, srcPort, dstPort int) bool {
-	// Drop flows that are very likely outbound (remote well-known port -> local ephemeral port).
 	if c.opts.DropLikelyOutbound {
 		ephMin := c.opts.EphemeralPortMin
 		if ephMin <= 0 {
@@ -385,29 +385,7 @@ func (c *Capturer) shouldDrop(srcIP, dstIP string, srcPort, dstPort int) bool {
 		return true
 	}
 
-	sip := net.ParseIP(srcIP)
-	dip := net.ParseIP(dstIP)
-	if sip == nil || dip == nil {
-		return true
-	}
-
-	if c.opts.SkipLoopback && (sip.IsLoopback() || dip.IsLoopback()) {
-		return true
-	}
-	if c.opts.SkipLinkLocal && (sip.IsLinkLocalUnicast() || dip.IsLinkLocalUnicast()) {
-		return true
-	}
-	if c.opts.SkipPrivateToPrivate && sip.IsPrivate() && dip.IsPrivate() {
-		return true
-	}
-
-	for _, n := range c.opts.DenyCIDRs {
-		if n.Contains(sip) || n.Contains(dip) {
-			return true
-		}
-	}
-
-	return false
+	return pcapx.DropByIP(srcIP, dstIP, c.opts.SkipLoopback, c.opts.SkipLinkLocal, c.opts.SkipPrivateToPrivate, c.opts.DenyCIDRs)
 }
 
 func (c *Capturer) stateTTL(stateHex string) time.Duration {
@@ -525,11 +503,4 @@ func parseHexIPPort6(s string) (string, int, error) {
 	}
 
 	return net.IP(ipBytes).String(), int(port64), nil
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
