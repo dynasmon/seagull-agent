@@ -13,6 +13,8 @@ import (
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/pcapx"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/mathx"
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/netcontext"
 )
@@ -372,13 +374,13 @@ func (c *PcapDDoSCapturer) onPacket(pkt gopacket.Packet) {
 		return
 	}
 
-	if isSkippableIP(srcIP, c.opts.SkipLoopback, c.opts.SkipLinkLocal) {
+	if pcapx.SkippableIP(srcIP, c.opts.SkipLoopback, c.opts.SkipLinkLocal) {
 		return
 	}
-	if isSkippableIP(dstIP, c.opts.SkipLoopback, c.opts.SkipLinkLocal) {
+	if pcapx.SkippableIP(dstIP, c.opts.SkipLoopback, c.opts.SkipLinkLocal) {
 		return
 	}
-	if ipInCIDRs(srcIP, c.opts.DenyCIDRs) || ipInCIDRs(dstIP, c.opts.DenyCIDRs) {
+	if pcapx.IPInCIDRs(srcIP, c.opts.DenyCIDRs) || pcapx.IPInCIDRs(dstIP, c.opts.DenyCIDRs) {
 		return
 	}
 
@@ -652,27 +654,27 @@ func (c *PcapDDoSCapturer) rotateIfNeeded(now time.Time) {
 					"window_seconds":               int(c.opts.Window.Seconds()),
 					"packets":                      a.pkts,
 					"requests":                     reqCount,
-					"pps":                          round2(pps),
-					"bps":                          round2(bps),
+					"pps":                          mathx.Round2HalfUp(pps),
+					"bps":                          mathx.Round2HalfUp(bps),
 					"unique_src_ips":               uniqueSrc,
 					"unique_src_capped":            uniqueCapped,
 					"cardinality_mode":             cardMode,
-					"src_entropy_norm":             round2(srcEnt),
+					"src_entropy_norm":             mathx.Round2HalfUp(srcEnt),
 					"src_entropy_signal":           srcEntropySignal,
 					"port_entropy_signal":          portEntropySignal,
-					"port_entropy_norm":            round2(pm.EntropyNorm),
+					"port_entropy_norm":            mathx.Round2HalfUp(pm.EntropyNorm),
 					"port_distinct":                pm.Distinct,
 					"port_top":                     pm.TopPort,
-					"port_top_share":               round2(pm.TopShare),
-					"tcp_syn_ratio":                round2(synRatio),
-					"http_rps":                     round2(httpRPS),
-					"tls_handshake_rps":            round2(tlsRPS),
-					"l7_ratio":                     round2(l7Ratio),
-					"udp_amp_ratio":                round2(ampRatio),
-					"baseline_pps":                 round2(a.baselinePPS),
-					"baseline_bps":                 round2(a.baselineBPS),
+					"port_top_share":               mathx.Round2HalfUp(pm.TopShare),
+					"tcp_syn_ratio":                mathx.Round2HalfUp(synRatio),
+					"http_rps":                     mathx.Round2HalfUp(httpRPS),
+					"tls_handshake_rps":            mathx.Round2HalfUp(tlsRPS),
+					"l7_ratio":                     mathx.Round2HalfUp(l7Ratio),
+					"udp_amp_ratio":                mathx.Round2HalfUp(ampRatio),
+					"baseline_pps":                 mathx.Round2HalfUp(a.baselinePPS),
+					"baseline_bps":                 mathx.Round2HalfUp(a.baselineBPS),
 					"baseline_ready":               baselineReady,
-					"baseline_factor":              round2(c.opts.BaselineFactor),
+					"baseline_factor":              mathx.Round2HalfUp(c.opts.BaselineFactor),
 					"top_src":                      topSrc,
 					"collector_bp_compensated":     backpressureDropped > 0,
 					"collector_bp_sample_every":    c.opts.BackpressureSampleEvery,
@@ -829,25 +831,4 @@ func isAmplificationSrcPort(port int) bool {
 	default:
 		return false
 	}
-}
-
-func round2(v float64) float64 {
-	if v != v {
-		return 0
-	}
-	return float64(int(v*100+0.5)) / 100
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
