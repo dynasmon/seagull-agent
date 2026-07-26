@@ -5,6 +5,7 @@ import (
 	"time"
 
 	agentcfg "gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/config"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/mathx"
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/sources"
 )
 
@@ -169,10 +170,10 @@ func (s *Service) flushSummary() {
 		"sent_delta":                         sentDelta,
 		"scan_probes_delta":                  scanDelta,
 		"scan_probes_effective_delta":        scanEffDelta,
-		"sent_per_sec":                       round2(sentPerSec),
-		"scan_probes_per_sec":                round2(scanPerSec),
-		"scan_probes_effective_per_sec":      round2(scanEffPerSec),
-		"avg_sent_per_sec":                   round2(avgSentPerSec),
+		"sent_per_sec":                       mathx.Round2(sentPerSec),
+		"scan_probes_per_sec":                mathx.Round2(scanPerSec),
+		"scan_probes_effective_per_sec":      mathx.Round2(scanEffPerSec),
+		"avg_sent_per_sec":                   mathx.Round2(avgSentPerSec),
 		"max_sent_cycle":                     s.state.MaxSentCycle,
 		"max_scan_cycle":                     s.state.MaxScanCycle,
 		"max_ports_cycle":                    s.state.MaxPortsCycle,
@@ -203,8 +204,4 @@ func (s *Service) maybeHeartbeat() {
 		"last_http_status": s.state.LastHTTPStatus,
 	})
 	s.state.LastHeartbeatAt = time.Now().UTC()
-}
-
-func round2(v float64) float64 {
-	return float64(int(v*100)) / 100
 }
