@@ -165,7 +165,7 @@ func parsePacmanLocal(dir string, maxPkgs int) ([]model.PackageEntry, []string, 
 		return nil, nil, err
 	}
 
-	pkgs := make([]model.PackageEntry, 0, minInt(len(entries), maxPkgs))
+	pkgs := make([]model.PackageEntry, 0, min(len(entries), maxPkgs))
 	var warns []string
 
 	for _, e := range entries {
@@ -222,7 +222,7 @@ func runRPMWithDBPath(ctx context.Context, opts Options, dbPath string) ([]model
 	if err != nil {
 		return nil, nil, err
 	}
-	pkgs := make([]model.PackageEntry, 0, minInt(len(lines), opts.MaxPackages))
+	pkgs := make([]model.PackageEntry, 0, min(len(lines), opts.MaxPackages))
 	for _, ln := range lines {
 		parts := strings.Split(ln, "\t")
 		if len(parts) < 2 {
