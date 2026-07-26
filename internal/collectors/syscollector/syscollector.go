@@ -191,7 +191,7 @@ func runDpkg(ctx context.Context, opts Options) ([]model.PackageEntry, []string,
 	if err != nil {
 		return nil, nil, err
 	}
-	pkgs := make([]model.PackageEntry, 0, minInt(len(lines), opts.MaxPackages))
+	pkgs := make([]model.PackageEntry, 0, min(len(lines), opts.MaxPackages))
 	for _, ln := range lines {
 		parts := strings.Split(ln, "\t")
 		if len(parts) < 2 {
@@ -227,7 +227,7 @@ func runRPM(ctx context.Context, opts Options) ([]model.PackageEntry, []string, 
 	if err != nil {
 		return nil, nil, err
 	}
-	pkgs := make([]model.PackageEntry, 0, minInt(len(lines), opts.MaxPackages))
+	pkgs := make([]model.PackageEntry, 0, min(len(lines), opts.MaxPackages))
 	for _, ln := range lines {
 		parts := strings.Split(ln, "\t")
 		if len(parts) < 2 {
@@ -263,7 +263,7 @@ func runPacman(ctx context.Context, opts Options) ([]model.PackageEntry, []strin
 	if err != nil {
 		return nil, nil, err
 	}
-	pkgs := make([]model.PackageEntry, 0, minInt(len(lines), opts.MaxPackages))
+	pkgs := make([]model.PackageEntry, 0, min(len(lines), opts.MaxPackages))
 	for _, ln := range lines {
 		ln = strings.TrimSpace(ln)
 		if ln == "" {
@@ -299,7 +299,7 @@ func runAPK(ctx context.Context, opts Options) ([]model.PackageEntry, []string, 
 	if err != nil {
 		return nil, nil, err
 	}
-	pkgs := make([]model.PackageEntry, 0, minInt(len(lines), opts.MaxPackages))
+	pkgs := make([]model.PackageEntry, 0, min(len(lines), opts.MaxPackages))
 	for _, ln := range lines {
 		ln = strings.TrimSpace(ln)
 		if ln == "" {
@@ -397,13 +397,6 @@ func splitLines(s string) []string {
 		out = append(out, ln)
 	}
 	return out
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 func filepathJoinClean(root, p string) string {
