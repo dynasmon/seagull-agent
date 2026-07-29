@@ -15,6 +15,15 @@ import (
 
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/agentauth"
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/spool"
+)
+
+const (
+	batchIDHeader = "X-Seagull-Batch-Id"
+
+	KindEvents    = "events"
+	KindInventory = "inventory"
+	KindVuln      = "vuln"
 )
 
 type Sender struct {
@@ -24,6 +33,7 @@ type Sender struct {
 	retries        int
 	agentID        string
 	credentialFunc func() string
+	spool          *spool.Spool
 }
 
 func New(baseURL string, timeout time.Duration, maxBatch int, agentID string, credentialFunc func() string, httpClient *http.Client) *Sender {
@@ -50,6 +60,19 @@ func New(baseURL string, timeout time.Duration, maxBatch int, agentID string, cr
 	}
 }
 
+func (s *Sender) SetSpool(sp *spool.Spool) {
+	if sp != nil && sp.Enabled() {
+		s.spool = sp
+	}
+}
+
+func (s *Sender) SpoolStats() spool.Stats {
+	if s.spool == nil {
+		return spool.Stats{}
+	}
+	return s.spool.Stats()
+}
+
 func (s *Sender) SendEvents(ctx context.Context, events []model.NetEvent) (int, error) {
 	if s.baseURL == "" {
 		return 0, fmt.Errorf("sender baseURL is empty")
@@ -58,7 +81,6 @@ func (s *Sender) SendEvents(ctx context.Context, events []model.NetEvent) (int, 
 		return 0, nil
 	}
 
-	endpoint := s.baseURL + "/ingest/events"
 	lastStatus := 0
 
 	for i := 0; i < len(events); i += s.maxBatch {
@@ -72,7 +94,7 @@ func (s *Sender) SendEvents(ctx context.Context, events []model.NetEvent) (int, 
 			return lastStatus, fmt.Errorf("marshal events: %w", err)
 		}
 
-		status, _, err := s.postWithRetry(ctx, endpoint, payload)
+		status, _, err := s.deliver(ctx, KindEvents, "", payload)
 		lastStatus = status
 		if err != nil {
 			return lastStatus, err
@@ -82,7 +104,63 @@ func (s *Sender) SendEvents(ctx context.Context, events []model.NetEvent) (int, 
 	return lastStatus, nil
 }
 
-func (s *Sender) postWithRetry(ctx context.Context, url string, payload []byte) (int, []byte, error) {
+func (s *Sender) Flush(ctx context.Context) (int, error) {
+	if s.spool == nil || s.spool.Pending() == 0 {
+		return 0, nil
+	}
+	return s.spool.Drain(ctx, s.spoolDrainLimit(), func(env spool.Envelope) error {
+		endpoint := s.endpointFor(env.Kind)
+		if endpoint == "" {
+			return nil
+		}
+		_, _, err := s.postWithRetry(ctx, endpoint, env.ID, env.Payload)
+		return err
+	})
+}
+
+func (s *Sender) spoolDrainLimit() int {
+	limit := s.maxBatch / 10
+	if limit < 8 {
+		limit = 8
+	}
+	if limit > 64 {
+		limit = 64
+	}
+	return limit
+}
+
+func (s *Sender) endpointFor(kind string) string {
+	switch strings.TrimSpace(kind) {
+	case KindEvents:
+		return s.baseURL + "/ingest/events"
+	case KindInventory:
+		return s.baseURL + "/inventory"
+	case KindVuln:
+		return s.baseURL + "/vuln/ingest"
+	default:
+		return ""
+	}
+}
+
+func (s *Sender) deliver(ctx context.Context, kind string, batchID string, payload []byte) (int, []byte, error) {
+	if strings.TrimSpace(batchID) == "" {
+		batchID = spool.NewID()
+	}
+	endpoint := s.endpointFor(kind)
+	if endpoint == "" {
+		return 0, nil, fmt.Errorf("unknown delivery kind: %s", kind)
+	}
+
+	status, body, err := s.postWithRetry(ctx, endpoint, batchID, payload)
+	if err != nil && s.spool != nil && isSpoolable(err, status) {
+		if _, spoolErr := s.spool.Enqueue(batchID, kind, payload); spoolErr == nil {
+			return status, body, err
+		}
+	}
+	return status, body, err
+}
+
+func (s *Sender) postWithRetry(ctx context.Context, url string, batchID string, payload []byte) (int, []byte, error) {
 	var lastErr error
 	lastStatus := 0
 	var lastBody []byte
@@ -94,7 +172,7 @@ func (s *Sender) postWithRetry(ctx context.Context, url string, payload []byte) 
 			}
 		}
 
-		status, body, err := s.postOnce(ctx, url, payload)
+		status, body, err := s.postOnce(ctx, url, batchID, payload)
 		lastStatus = status
 		lastBody = body
 
@@ -111,12 +189,15 @@ func (s *Sender) postWithRetry(ctx context.Context, url string, payload []byte) 
 	return lastStatus, lastBody, lastErr
 }
 
-func (s *Sender) postOnce(ctx context.Context, url string, payload []byte) (int, []byte, error) {
+func (s *Sender) postOnce(ctx context.Context, url string, batchID string, payload []byte) (int, []byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
 		return 0, nil, fmt.Errorf("new request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if strings.TrimSpace(batchID) != "" {
+		req.Header.Set(batchIDHeader, batchID)
+	}
 	agentauth.ApplyCredentialHeaders(req, s.agentID, s.credentialFunc)
 
 	resp, err := s.client.Do(req)
@@ -159,8 +240,7 @@ func (s *Sender) SendInventorySnapshot(ctx context.Context, snap model.Inventory
 		return 0, fmt.Errorf("marshal inventory snapshot: %w", err)
 	}
 
-	endpoint := s.baseURL + "/inventory"
-	status, _, err := s.postWithRetry(ctx, endpoint, payload)
+	status, _, err := s.deliver(ctx, KindInventory, "", payload)
 	return status, err
 }
 
@@ -172,8 +252,7 @@ func (s *Sender) SendVulnIngest(ctx context.Context, payload []byte) (int, []byt
 		return 0, nil, nil
 	}
 
-	endpoint := s.baseURL + "/vuln/ingest"
-	return s.postWithRetry(ctx, endpoint, payload)
+	return s.deliver(ctx, KindVuln, "", payload)
 }
 
 func isRetryable(err error, status int) bool {
@@ -185,6 +264,16 @@ func isRetryable(err error, status int) bool {
 		return true
 	}
 	return false
+}
+
+func isSpoolable(err error, status int) bool {
+	if err == nil {
+		return false
+	}
+	if status == 0 {
+		return true
+	}
+	return status == http.StatusTooManyRequests || status >= 500
 }
 
 func isRetryableNetErr(err error) bool {
