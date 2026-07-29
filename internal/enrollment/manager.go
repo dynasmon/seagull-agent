@@ -9,12 +9,12 @@ import (
 	"sync"
 	"time"
 
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/buildinfo"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/certrenew"
 	agentcfg "gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/config"
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/controlplane"
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/sources"
 )
-
-const buildVersion = "0.1.0"
 
 type Manager struct {
 	cfg     agentcfg.Config
@@ -198,6 +198,12 @@ func (m *Manager) shouldAttemptIdentityRecovery(errText string, status int) bool
 	if strings.Contains(et, "status=401") {
 		return true
 	}
+	if strings.Contains(et, "remote error: tls:") {
+		return strings.Contains(et, "certificate required") ||
+			strings.Contains(et, "bad certificate") ||
+			strings.Contains(et, "expired certificate") ||
+			strings.Contains(et, "unknown certificate authority")
+	}
 	return strings.Contains(et, "unknown or revoked agent") ||
 		strings.Contains(et, "invalid agent credential") ||
 		strings.Contains(et, "credential expired") ||
@@ -274,6 +280,7 @@ func (m *Manager) RecoverIdentity(rootCtx context.Context, trigger string, force
 	}
 
 	hostname, _ := os.Hostname()
+	keyPEM, csrPEM := m.prepareEnrollmentCSR()
 	type recoveryMethod struct {
 		name            string
 		token           string
@@ -302,11 +309,15 @@ func (m *Manager) RecoverIdentity(rootCtx context.Context, trigger string, force
 	for _, method := range methods {
 		ctx, cancel := context.WithTimeout(rootCtx, m.cfg.ControlEnrollTimeout)
 		resp, err := m.cp.Enroll(ctx, controlplane.EnrollRequest{
-			AgentID:        m.cfg.AgentID,
-			Hostname:       hostname,
-			OS:             goruntime.GOOS,
-			Version:        buildVersion,
-			BootstrapToken: method.token,
+			AgentID:         m.cfg.AgentID,
+			Hostname:        hostname,
+			OS:              goruntime.GOOS,
+			Arch:            goruntime.GOARCH,
+			Version:         buildinfo.Version,
+			ProtocolVersion: buildinfo.ProtocolVersion,
+			Profile:         agentcfg.NormalizeProfile(m.cfg.Profile),
+			CSRPEM:          string(csrPEM),
+			BootstrapToken:  method.token,
 		})
 		cancel()
 		if err != nil {
@@ -319,6 +330,8 @@ func (m *Manager) RecoverIdentity(rootCtx context.Context, trigger string, force
 			})
 			continue
 		}
+		m.persistEnrollmentServerCA(resp.Certificate)
+		m.persistEnrollmentCertificate(resp.Certificate, keyPEM, method.name)
 		if err := m.ApplyCredentialUpdate(resp.Credential, method.name); err != nil {
 			lastErr = err
 			agentcfg.LogJSON(agentcfg.LevelWarn, "agent_identity_recovery_persist_failed", map[string]interface{}{
@@ -361,6 +374,70 @@ func (m *Manager) RecoverIdentity(rootCtx context.Context, trigger string, force
 	next := m.nextEnrollRetryAt
 	m.enrollMu.Unlock()
 	return fmt.Errorf("%w; next retry at %s", lastErr, next.Format(time.RFC3339))
+}
+
+func (m *Manager) prepareEnrollmentCSR() ([]byte, []byte) {
+	if strings.TrimSpace(m.cfg.TLSCertFile) == "" || strings.TrimSpace(m.cfg.TLSKeyFile) == "" {
+		return nil, nil
+	}
+	keyPEM, csrPEM, err := certrenew.NewKeyAndCSR(m.cfg.AgentID)
+	if err != nil {
+		agentcfg.LogJSON(agentcfg.LevelWarn, "agent_enroll_csr_failed", map[string]interface{}{
+			"agent_id": m.cfg.AgentID,
+			"error":    err.Error(),
+		})
+		return nil, nil
+	}
+	return keyPEM, csrPEM
+}
+
+func (m *Manager) persistEnrollmentServerCA(issued *controlplane.CertificateRenewal) {
+	if issued == nil {
+		return
+	}
+	bundle := strings.TrimSpace(issued.ServerCAPEM)
+	caFile := strings.TrimSpace(m.cfg.TLSCAFile)
+	if bundle == "" || caFile == "" {
+		return
+	}
+	if existing, err := os.ReadFile(caFile); err == nil && strings.TrimSpace(string(existing)) == bundle {
+		return
+	}
+	if err := agentcfg.AtomicWriteFile(caFile, []byte(bundle+"\n"), 0o644); err != nil {
+		agentcfg.LogJSON(agentcfg.LevelWarn, "agent_enroll_server_ca_persist_failed", map[string]interface{}{
+			"agent_id": m.cfg.AgentID,
+			"path":     caFile,
+			"error":    err.Error(),
+		})
+		return
+	}
+	agentcfg.LogJSON(agentcfg.LevelInfo, "agent_enroll_server_ca_persisted", map[string]interface{}{
+		"agent_id": m.cfg.AgentID,
+		"path":     caFile,
+	})
+}
+
+func (m *Manager) persistEnrollmentCertificate(issued *controlplane.CertificateRenewal, keyPEM []byte, method string) {
+	if issued == nil || len(keyPEM) == 0 {
+		return
+	}
+	if strings.TrimSpace(issued.CertificatePEM) == "" {
+		return
+	}
+	if err := certrenew.PersistPair([]byte(issued.CertificatePEM), keyPEM, m.cfg.TLSCertFile, m.cfg.TLSKeyFile); err != nil {
+		agentcfg.LogJSON(agentcfg.LevelWarn, "agent_enroll_certificate_persist_failed", map[string]interface{}{
+			"agent_id": m.cfg.AgentID,
+			"method":   method,
+			"error":    err.Error(),
+		})
+		return
+	}
+	agentcfg.LogJSON(agentcfg.LevelInfo, "agent_enroll_certificate_persisted", map[string]interface{}{
+		"agent_id":  m.cfg.AgentID,
+		"method":    method,
+		"serial":    issued.SerialHex,
+		"not_after": strings.TrimSpace(issued.NotAfter),
+	})
 }
 
 func stableJitter(agentID, scope string, max time.Duration) time.Duration {
