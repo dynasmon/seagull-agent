@@ -16,9 +16,14 @@ import (
 
 type Client struct {
 	baseURL        string
+	enrollBaseURL  string
 	http           *http.Client
 	agentID        string
 	credentialFunc func() string
+}
+
+func (c *Client) SetEnrollBaseURL(url string) {
+	c.enrollBaseURL = strings.TrimRight(strings.TrimSpace(url), "/")
 }
 
 func New(baseURL string, timeout time.Duration, agentID string, credentialFunc func() string, httpClient *http.Client) *Client {
@@ -66,11 +71,23 @@ func (c *Client) do(ctx context.Context, method, path, name string, body []byte)
 }
 
 type EnrollRequest struct {
-	AgentID        string `json:"agent_id"`
-	Hostname       string `json:"hostname,omitempty"`
-	OS             string `json:"os,omitempty"`
-	Version        string `json:"version,omitempty"`
-	BootstrapToken string `json:"-"`
+	AgentID         string `json:"agent_id"`
+	Hostname        string `json:"hostname,omitempty"`
+	OS              string `json:"os,omitempty"`
+	Arch            string `json:"arch,omitempty"`
+	Version         string `json:"version,omitempty"`
+	ProtocolVersion int    `json:"protocol_version,omitempty"`
+	Profile         string `json:"profile,omitempty"`
+	CSRPEM          string `json:"csr_pem,omitempty"`
+	BootstrapToken  string `json:"-"`
+}
+
+type ProtocolDescriptor struct {
+	ProtocolVersion    int    `json:"protocol_version"`
+	MinSupported       int    `json:"min_supported"`
+	MaxSupported       int    `json:"max_supported"`
+	EventSchemaVersion int    `json:"event_schema_version"`
+	ServerTime         string `json:"server_time,omitempty"`
 }
 
 type Credential struct {
@@ -83,14 +100,27 @@ type Credential struct {
 }
 
 type EnrollResponse struct {
-	AgentID    string                 `json:"agent_id"`
-	Config     map[string]interface{} `json:"config"`
-	Credential Credential             `json:"credential"`
+	AgentID     string                 `json:"agent_id"`
+	Config      map[string]interface{} `json:"config"`
+	Credential  Credential             `json:"credential"`
+	Certificate *CertificateRenewal    `json:"certificate,omitempty"`
+	Protocol    *ProtocolDescriptor    `json:"protocol,omitempty"`
+}
+
+func (c *Client) enrollEndpoint() string {
+	if c.enrollBaseURL != "" {
+		return c.enrollBaseURL + "/enroll"
+	}
+	if c.baseURL != "" {
+		return c.baseURL + "/agents/enroll"
+	}
+	return ""
 }
 
 func (c *Client) Enroll(ctx context.Context, req EnrollRequest) (EnrollResponse, error) {
 	var out EnrollResponse
-	if c.baseURL == "" {
+	u := c.enrollEndpoint()
+	if u == "" {
 		return out, fmt.Errorf("controlplane baseURL is empty")
 	}
 
@@ -98,8 +128,6 @@ func (c *Client) Enroll(ctx context.Context, req EnrollRequest) (EnrollResponse,
 	if err != nil {
 		return out, fmt.Errorf("marshal enroll request: %w", err)
 	}
-
-	u := c.baseURL + "/agents/enroll"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(payload))
 	if err != nil {
 		return out, fmt.Errorf("new enroll request: %w", err)
@@ -129,10 +157,14 @@ func (c *Client) Enroll(ctx context.Context, req EnrollRequest) (EnrollResponse,
 }
 
 type HeartbeatRequest struct {
-	Status        string                 `json:"status"`
-	UptimeSeconds int64                  `json:"uptime_seconds,omitempty"`
-	Modules       map[string]interface{} `json:"modules,omitempty"`
-	Metrics       map[string]interface{} `json:"metrics,omitempty"`
+	Status          string                 `json:"status"`
+	UptimeSeconds   int64                  `json:"uptime_seconds,omitempty"`
+	AgentVersion    string                 `json:"agent_version,omitempty"`
+	ProtocolVersion int                    `json:"protocol_version,omitempty"`
+	Profile         string                 `json:"profile,omitempty"`
+	Capabilities    map[string]interface{} `json:"capabilities,omitempty"`
+	Modules         map[string]interface{} `json:"modules,omitempty"`
+	Metrics         map[string]interface{} `json:"metrics,omitempty"`
 }
 
 func (c *Client) Heartbeat(ctx context.Context, hb HeartbeatRequest) error {
@@ -190,6 +222,7 @@ type CertificateRenewal struct {
 	AgentID        string `json:"agent_id"`
 	CertificatePEM string `json:"certificate_pem"`
 	CAPEM          string `json:"ca_pem"`
+	ServerCAPEM    string `json:"server_ca_pem,omitempty"`
 	SerialHex      string `json:"serial_hex"`
 	NotBefore      string `json:"not_before"`
 	NotAfter       string `json:"not_after"`
