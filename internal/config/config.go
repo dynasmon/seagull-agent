@@ -24,10 +24,18 @@ const (
 type Config struct {
 	AgentID        string
 	APIURL         string
+	EnrollURL      string
 	Sources        []string
 	Interval       time.Duration
 	HTTPTimeout    time.Duration
 	SenderMaxBatch int
+
+	Profile string
+
+	SpoolDir      string
+	SpoolMaxBytes int64
+	SpoolMaxAge   time.Duration
+	SpoolMaxItems int
 
 	AgentConfigFile               string
 	AgentIdentityStateFile        string
@@ -198,11 +206,22 @@ func LoadConfig() Config {
 	if apiURL == "" {
 		log.Fatal("[AGENT] SEAGULL_API_URL is required")
 	}
+	enrollURL := strings.TrimSpace(getEnv("SEAGULL_ENROLL_URL", ""))
 	sources := splitCSVLower(getEnv("SEAGULL_SOURCES", defaultL7Sources))
 
 	interval := parseDuration(getEnv("SEAGULL_POLL_INTERVAL", "1s"), 1*time.Second)
 	httpTimeout := parseDuration(getEnv("SEAGULL_HTTP_TIMEOUT", "10s"), 10*time.Second)
 	senderMaxBatch := parseInt(getEnv("SEAGULL_SENDER_MAX_BATCH", "300"), 300)
+
+	profile := NormalizeProfile(getEnv("SEAGULL_AGENT_PROFILE", ProfileManaged))
+
+	spoolDir := strings.TrimSpace(getEnv("SEAGULL_AGENT_SPOOL_DIR", "/var/lib/seagull/spool"))
+	if !parseBool(getEnv("SEAGULL_AGENT_SPOOL_ENABLED", "true"), true) {
+		spoolDir = ""
+	}
+	spoolMaxBytes := int64(parseInt(getEnv("SEAGULL_AGENT_SPOOL_MAX_BYTES", "268435456"), 268435456))
+	spoolMaxAge := parseDuration(getEnv("SEAGULL_AGENT_SPOOL_MAX_AGE", "24h"), 24*time.Hour)
+	spoolMaxItems := parseInt(getEnv("SEAGULL_AGENT_SPOOL_MAX_ITEMS", "10000"), 10000)
 
 	agentConfigFile := getEnv("SEAGULL_AGENT_CONFIG_FILE", "/var/lib/seagull/agent.config.json")
 	agentIdentityStateFile := getEnv("SEAGULL_AGENT_IDENTITY_STATE_FILE", "/var/lib/seagull/agent.identity.json")
@@ -420,10 +439,18 @@ func LoadConfig() Config {
 	cfg := Config{
 		AgentID:        agentID,
 		APIURL:         apiURL,
+		EnrollURL:      enrollURL,
 		Sources:        sources,
 		Interval:       interval,
 		HTTPTimeout:    httpTimeout,
 		SenderMaxBatch: senderMaxBatch,
+
+		Profile: profile,
+
+		SpoolDir:      spoolDir,
+		SpoolMaxBytes: spoolMaxBytes,
+		SpoolMaxAge:   spoolMaxAge,
+		SpoolMaxItems: spoolMaxItems,
 
 		AgentConfigFile:               agentConfigFile,
 		AgentIdentityStateFile:        agentIdentityStateFile,
