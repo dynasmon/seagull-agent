@@ -81,9 +81,13 @@ func NewHTTPClient(timeout time.Duration, tlsOpts TLSOptions) (*http.Client, err
 				return nil, fmt.Errorf("TLS client cert and key must be provided together")
 			}
 			tlsCfg.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
-				return materials.clientCertificate()
+				cert, err := materials.clientCertificate()
+				if err != nil {
+					return &tls.Certificate{}, nil
+				}
+				return cert, nil
 			}
-			if _, err := materials.clientCertificate(); err != nil {
+			if _, err := materials.clientCertificate(); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return nil, err
 			}
 		}
@@ -105,7 +109,7 @@ func newReloadingTLSMaterial(tlsOpts TLSOptions) (*reloadingTLSMaterial, error) 
 		}
 	}
 	if tlsOpts.CertFile != "" || tlsOpts.KeyFile != "" {
-		if _, err := m.clientCertificate(); err != nil {
+		if _, err := m.clientCertificate(); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return nil, err
 		}
 	}
@@ -209,7 +213,7 @@ func statFile(path string, label string) (fileStamp, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return fileStamp{}, fmt.Errorf("%s does not exist: %s", label, path)
+			return fileStamp{}, fmt.Errorf("%s does not exist: %s: %w", label, path, os.ErrNotExist)
 		}
 		return fileStamp{}, fmt.Errorf("stat %s: %w", label, err)
 	}
