@@ -34,7 +34,25 @@ func (s *Service) loop(rootCtx context.Context) {
 	}
 }
 
+func (s *Service) drainSpool(rootCtx context.Context) {
+	delivered, err := s.sender.Flush(rootCtx)
+	if delivered > 0 {
+		s.state.SpoolDeliveredTotal += delivered
+		agentcfg.LogJSON(agentcfg.LevelInfo, "spool_drained", map[string]interface{}{
+			"agent_id":  s.cfg.AgentID,
+			"delivered": delivered,
+			"pending":   s.sender.SpoolStats().Pending,
+		})
+	}
+	if err != nil {
+		s.state.SpoolLastError = err.Error()
+		return
+	}
+	s.state.SpoolLastError = ""
+}
+
 func (s *Service) runAndLog(rootCtx context.Context) {
+	s.drainSpool(rootCtx)
 	res := s.sources.RunOnce(rootCtx)
 	if res == nil {
 		return

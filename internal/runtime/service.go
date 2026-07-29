@@ -11,10 +11,9 @@ import (
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/responseactions"
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/sender"
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/sources"
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/spool"
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/transport"
 )
-
-const buildVersion = "0.1.0"
 
 type SummaryState struct {
 	StartedAt time.Time
@@ -40,6 +39,9 @@ type SummaryState struct {
 	CertRenewalsTotal    int
 	CertRenewErrorsTotal int
 	CertLastRenewError   string
+
+	SpoolDeliveredTotal int
+	SpoolLastError      string
 
 	LastHTTPStatus int
 	LastError      string
@@ -110,7 +112,22 @@ func New(ctx context.Context, cfg agentcfg.Config, stop context.CancelFunc, http
 
 	enrollMgr := enrollment.NewManager(cfg, runtimeConfig)
 	eventSender := sender.New(cfg.APIURL, cfg.HTTPTimeout, cfg.SenderMaxBatch, cfg.AgentID, enrollMgr.CurrentCredential, httpClient)
+	if diskSpool, err := spool.New(spool.Options{
+		Dir:      cfg.SpoolDir,
+		MaxBytes: cfg.SpoolMaxBytes,
+		MaxAge:   cfg.SpoolMaxAge,
+		MaxItems: cfg.SpoolMaxItems,
+	}); err != nil {
+		agentcfg.LogJSON(agentcfg.LevelWarn, "spool_init_failed", map[string]interface{}{
+			"agent_id": cfg.AgentID,
+			"dir":      cfg.SpoolDir,
+			"error":    err.Error(),
+		})
+	} else {
+		eventSender.SetSpool(diskSpool)
+	}
 	cp := controlplane.New(cfg.APIURL, cfg.HTTPTimeout, cfg.AgentID, enrollMgr.CurrentCredential, httpClient)
+	cp.SetEnrollBaseURL(cfg.EnrollURL)
 	enrollMgr.SetClient(cp)
 
 	cfgCtx, cancel := context.WithTimeout(ctx, cfg.ControlEnrollTimeout)
