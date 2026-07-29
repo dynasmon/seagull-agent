@@ -28,6 +28,7 @@ import (
 type ExecuteOptions struct {
 	ExpectedAgentID      string
 	AgentID              string
+	Profile              string
 	BuildVersion         string
 	EffectiveConfig      map[string]interface{}
 	ModuleStates         map[string]interface{}
@@ -92,6 +93,10 @@ func Execute(action controlplane.ResponseAction, opts ExecuteOptions) ExecuteRes
 
 	if action.ID <= 0 {
 		out.Error = "invalid action id"
+		return out
+	}
+	if !agentcfg.ProfileAllowsResponseActions(opts.Profile) {
+		out.Error = "agent profile does not allow response actions"
 		return out
 	}
 	if opts.ExpectedAgentID != "" && strings.TrimSpace(action.AgentID) != strings.TrimSpace(opts.ExpectedAgentID) {
