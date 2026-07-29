@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/buildinfo"
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/certrenew"
 	agentcfg "gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/config"
 	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/controlplane"
@@ -96,7 +97,8 @@ func (s *Service) startResponseActionExecutor(rootCtx context.Context) {
 					execRes := responseactions.Execute(staged.Action, responseactions.ExecuteOptions{
 						ExpectedAgentID: s.cfg.AgentID,
 						AgentID:         s.cfg.AgentID,
-						BuildVersion:    buildVersion,
+						Profile:         s.cfg.Profile,
+						BuildVersion:    buildinfo.Version,
 						EffectiveConfig: effectiveConfig,
 						ModuleStates:    modules,
 						RefreshRuntimeConfig: func() (bool, int, string, error) {
@@ -401,6 +403,16 @@ func (s *Service) buildHeartbeatRequest() controlplane.HeartbeatRequest {
 	metrics["response_actions_pending"] = s.pendingResponseActions()
 	metrics["response_actions_poll_errors_total"] = s.state.ResponseActionPollErrorsTotal
 
+	spoolStats := s.sender.SpoolStats()
+	metrics["spool_pending"] = spoolStats.Pending
+	metrics["spool_bytes"] = spoolStats.Bytes
+	metrics["spool_enqueued_total"] = spoolStats.EnqueuedTotal
+	metrics["spool_delivered_total"] = spoolStats.DeliveredTotal
+	metrics["spool_dropped_total"] = spoolStats.DroppedTotal
+	if s.state.SpoolLastError != "" {
+		metrics["spool_last_error"] = s.state.SpoolLastError
+	}
+
 	if agentcfg.Contains(s.cfg.Sources, "syscollector") {
 		sysCfg := s.runtimeConfig.Syscollector()
 		status := s.sources.SyscollectorStatus()
@@ -437,11 +449,23 @@ func (s *Service) buildHeartbeatRequest() controlplane.HeartbeatRequest {
 	}
 
 	return controlplane.HeartbeatRequest{
-		Status:        "ok",
-		UptimeSeconds: int64(time.Since(s.state.StartedAt).Seconds()),
+		Status:          "ok",
+		UptimeSeconds:   int64(time.Since(s.state.StartedAt).Seconds()),
+		AgentVersion:    buildinfo.Version,
+		ProtocolVersion: buildinfo.ProtocolVersion,
+		Profile:         agentcfg.NormalizeProfile(s.cfg.Profile),
+		Capabilities:    s.effectiveCapabilities(),
 		Modules: map[string]interface{}{
 			"sources": s.cfg.Sources,
 		},
 		Metrics: metrics,
 	}
+}
+
+func (s *Service) effectiveCapabilities() map[string]interface{} {
+	build := buildinfo.Summary()
+	build["sources"] = s.cfg.Sources
+	build["profile"] = agentcfg.NormalizeProfile(s.cfg.Profile)
+	build["response_actions"] = agentcfg.ProfileAllowsResponseActions(s.cfg.Profile)
+	return build
 }
