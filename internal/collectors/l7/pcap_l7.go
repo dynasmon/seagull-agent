@@ -14,7 +14,7 @@ import (
 
 	"github.com/dynasmon/Seagull-agent/internal/collectors/pcapx"
 	"github.com/dynasmon/Seagull-agent/internal/netcontext"
-	"github.com/dynasmon/Seagull-agent/internal/protocol"
+	"github.com/dynasmon/Seagull-agent/protocol"
 )
 
 type PcapL7Options struct {

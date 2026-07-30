@@ -3,27 +3,92 @@ package buildinfo
 import (
 	"fmt"
 	"runtime"
+	"runtime/debug"
+	"strings"
+	"sync"
+
+	"github.com/dynasmon/Seagull-agent/protocol"
 )
 
 var (
-	Version   = "0.0.0-dev"
-	Commit    = "unknown"
+	Version   = ""
+	Commit    = ""
 	BuildDate = ""
-	Channel   = "dev"
+	Channel   = ""
 )
 
 const (
-	ProtocolVersion    = 1
-	MinProtocolVersion = 1
-	MaxProtocolVersion = 1
-	EventSchemaVersion = 1
+	devVersion = "0.0.0-dev"
+	devChannel = "dev"
 )
 
+var resolveOnce sync.Once
+
+func resolve() {
+	resolveOnce.Do(func() {
+		revision, modified := vcsStamp()
+		if strings.TrimSpace(Commit) == "" {
+			Commit = revision
+		}
+		if strings.TrimSpace(Commit) == "" {
+			Commit = "unknown"
+		}
+		if strings.TrimSpace(Version) == "" {
+			Version = devVersion
+			if modified {
+				Version = devVersion + "+dirty"
+			}
+		}
+		if strings.TrimSpace(Channel) == "" {
+			Channel = devChannel
+		}
+	})
+}
+
+func vcsStamp() (string, bool) {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "", false
+	}
+	revision := ""
+	modified := false
+	for _, setting := range info.Settings {
+		switch setting.Key {
+		case "vcs.revision":
+			revision = setting.Value
+		case "vcs.modified":
+			modified = setting.Value == "true"
+		}
+	}
+	if len(revision) > 12 {
+		revision = revision[:12]
+	}
+	return revision, modified
+}
+
+func Release() string {
+	resolve()
+	return Version
+}
+
+func Revision() string {
+	resolve()
+	return Commit
+}
+
+func ReleaseChannel() string {
+	resolve()
+	return Channel
+}
+
 func String() string {
-	return fmt.Sprintf("%s (%s, %s/%s, protocol %d)", Version, Commit, runtime.GOOS, runtime.GOARCH, ProtocolVersion)
+	resolve()
+	return fmt.Sprintf("seagull-agent %s (%s, %s, %s/%s, protocol %d, event schema %d)",
+		Version, Commit, Channel, runtime.GOOS, runtime.GOARCH, protocol.Version, protocol.EventSchemaVersion)
 }
 
 func Summary() map[string]interface{} {
+	resolve()
 	return map[string]interface{}{
 		"version":              Version,
 		"commit":               Commit,
@@ -31,7 +96,9 @@ func Summary() map[string]interface{} {
 		"channel":              Channel,
 		"os":                   runtime.GOOS,
 		"arch":                 runtime.GOARCH,
-		"protocol_version":     ProtocolVersion,
-		"event_schema_version": EventSchemaVersion,
+		"protocol_version":     protocol.Version,
+		"min_server_protocol":  protocol.MinSupportedServer,
+		"max_server_protocol":  protocol.MaxSupportedServer,
+		"event_schema_version": protocol.EventSchemaVersion,
 	}
 }

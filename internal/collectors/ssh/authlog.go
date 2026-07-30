@@ -15,7 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/dynasmon/Seagull-agent/internal/netcontext"
-	"github.com/dynasmon/Seagull-agent/internal/protocol"
+	"github.com/dynasmon/Seagull-agent/protocol"
 )
 
 var (

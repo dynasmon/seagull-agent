@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/dynasmon/Seagull-agent/internal/protocol"
+	"github.com/dynasmon/Seagull-agent/protocol"
 )
 
 // parseDpkgStatus reads /var/lib/dpkg/status and extracts installed packages.

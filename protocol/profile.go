@@ -1,4 +1,4 @@
-package agentcfg
+package protocol
 
 import "strings"
 
@@ -9,15 +9,13 @@ const (
 
 func NormalizeProfile(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case ProfileSensor:
-		return ProfileSensor
 	case ProfileManaged:
 		return ProfileManaged
 	default:
-		return ProfileManaged
+		return ProfileSensor
 	}
 }
 
 func ProfileAllowsResponseActions(profile string) bool {
-	return NormalizeProfile(profile) != ProfileSensor
+	return NormalizeProfile(profile) == ProfileManaged
 }

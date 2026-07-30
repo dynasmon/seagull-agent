@@ -4,11 +4,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dynasmon/Seagull-agent/internal/controlplane"
+	"github.com/dynasmon/Seagull-agent/protocol"
 )
 
 type StagedAction struct {
-	Action   controlplane.ResponseAction
+	Action   protocol.ResponseAction
 	StagedAt time.Time
 }
 
@@ -47,7 +47,7 @@ func NewStage(max int) *Stage {
 	}
 }
 
-func (s *Stage) Stage(now time.Time, actions []controlplane.ResponseAction, expectedAgentID string) StageResult {
+func (s *Stage) Stage(now time.Time, actions []protocol.ResponseAction, expectedAgentID string) StageResult {
 	if s == nil || len(actions) == 0 {
 		return StageResult{}
 	}

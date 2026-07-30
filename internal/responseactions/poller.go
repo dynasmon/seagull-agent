@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/dynasmon/Seagull-agent/internal/controlplane"
 	"github.com/dynasmon/Seagull-agent/internal/jitter"
+	"github.com/dynasmon/Seagull-agent/protocol"
 )
 
 type PollerConfig struct {
@@ -16,8 +16,8 @@ type PollerConfig struct {
 }
 
 type PollerDeps struct {
-	Fetch    func(context.Context) ([]controlplane.ResponseAction, error)
-	Stage    func([]controlplane.ResponseAction) StageResult
+	Fetch    func(context.Context) ([]protocol.ResponseAction, error)
+	Stage    func([]protocol.ResponseAction) StageResult
 	OnError  func(error)
 	OnStaged func(fetched int, result StageResult)
 }

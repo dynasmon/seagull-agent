@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dynasmon/Seagull-agent/internal/protocol"
+	"github.com/dynasmon/Seagull-agent/protocol"
 )
 
 type Buffer struct {

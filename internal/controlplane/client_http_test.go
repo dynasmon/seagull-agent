@@ -12,6 +12,7 @@ import (
 
 	"github.com/dynasmon/Seagull-agent/internal/agentauth"
 	"github.com/dynasmon/Seagull-agent/internal/controlplane"
+	"github.com/dynasmon/Seagull-agent/protocol"
 )
 
 func TestEnrollOK(t *testing.T) {
@@ -31,7 +32,7 @@ func TestEnrollOK(t *testing.T) {
 	defer ts.Close()
 
 	c := controlplane.New(ts.URL, 5*time.Second, "agent-1", nil, ts.Client())
-	out, err := c.Enroll(context.Background(), controlplane.EnrollRequest{AgentID: "agent-1", BootstrapToken: "boot-1"})
+	out, err := c.Enroll(context.Background(), protocol.EnrollRequest{AgentID: "agent-1", BootstrapToken: "boot-1"})
 	if err != nil {
 		t.Fatalf("Enroll error: %v", err)
 	}
@@ -55,7 +56,7 @@ func TestHeartbeatAppliesCredentialsAndStatus(t *testing.T) {
 			t.Fatalf("missing content type: %q", got)
 		}
 		body, _ := io.ReadAll(r.Body)
-		var hb controlplane.HeartbeatRequest
+		var hb protocol.HeartbeatRequest
 		if err := json.Unmarshal(body, &hb); err != nil {
 			t.Fatalf("bad heartbeat body: %v", err)
 		}
@@ -64,7 +65,7 @@ func TestHeartbeatAppliesCredentialsAndStatus(t *testing.T) {
 	defer ts.Close()
 
 	c := controlplane.New(ts.URL, 5*time.Second, "agent-1", func() string { return "cred-1" }, ts.Client())
-	if err := c.Heartbeat(context.Background(), controlplane.HeartbeatRequest{Status: "ok"}); err != nil {
+	if err := c.Heartbeat(context.Background(), protocol.HeartbeatRequest{Status: "ok"}); err != nil {
 		t.Fatalf("Heartbeat error: %v", err)
 	}
 }
@@ -76,7 +77,7 @@ func TestHeartbeatServerError(t *testing.T) {
 	defer ts.Close()
 
 	c := controlplane.New(ts.URL, 5*time.Second, "agent-1", nil, ts.Client())
-	err := c.Heartbeat(context.Background(), controlplane.HeartbeatRequest{Status: "ok"})
+	err := c.Heartbeat(context.Background(), protocol.HeartbeatRequest{Status: "ok"})
 	if err == nil || !strings.Contains(err.Error(), "status=500") {
 		t.Fatalf("expected status=500 error, got %v", err)
 	}

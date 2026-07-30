@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dynasmon/Seagull-agent/internal/protocol"
 	"github.com/dynasmon/Seagull-agent/internal/spool"
+	"github.com/dynasmon/Seagull-agent/protocol"
 )
 
 func newTestSender(t *testing.T, baseURL string) (*Sender, *spool.Spool) {

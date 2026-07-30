@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dynasmon/Seagull-agent/internal/controlplane"
+	"github.com/dynasmon/Seagull-agent/protocol"
 )
 
 func TestStartPollingStagesActions(t *testing.T) {
@@ -22,13 +22,13 @@ func TestStartPollingStagesActions(t *testing.T) {
 		Jitter:  0,
 		Timeout: 100 * time.Millisecond,
 	}, PollerDeps{
-		Fetch: func(_ context.Context) ([]controlplane.ResponseAction, error) {
+		Fetch: func(_ context.Context) ([]protocol.ResponseAction, error) {
 			calls.Add(1)
-			return []controlplane.ResponseAction{
+			return []protocol.ResponseAction{
 				{ID: 1, ActionType: "block_ip", AgentID: "agent-1", Status: "pending", RequestedAt: time.Now().UTC()},
 			}, nil
 		},
-		Stage: func(_ []controlplane.ResponseAction) StageResult {
+		Stage: func(_ []protocol.ResponseAction) StageResult {
 			staged.Add(1)
 			return StageResult{Added: 1, Pending: 1}
 		},
@@ -55,10 +55,10 @@ func TestStartPollingErrorCallback(t *testing.T) {
 		Jitter:  0,
 		Timeout: 100 * time.Millisecond,
 	}, PollerDeps{
-		Fetch: func(_ context.Context) ([]controlplane.ResponseAction, error) {
+		Fetch: func(_ context.Context) ([]protocol.ResponseAction, error) {
 			return nil, context.DeadlineExceeded
 		},
-		Stage: func(_ []controlplane.ResponseAction) StageResult {
+		Stage: func(_ []protocol.ResponseAction) StageResult {
 			return StageResult{}
 		},
 		OnError: func(error) {

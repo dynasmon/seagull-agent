@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/dynasmon/Seagull-agent/internal/agentauth"
-	"github.com/dynasmon/Seagull-agent/internal/protocol"
 	"github.com/dynasmon/Seagull-agent/internal/spool"
+	"github.com/dynasmon/Seagull-agent/protocol"
 )
 
 const (

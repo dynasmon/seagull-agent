@@ -22,7 +22,7 @@ import (
 	"time"
 
 	agentcfg "github.com/dynasmon/Seagull-agent/internal/config"
-	"github.com/dynasmon/Seagull-agent/internal/controlplane"
+	"github.com/dynasmon/Seagull-agent/protocol"
 )
 
 type ExecuteOptions struct {
@@ -79,7 +79,7 @@ type inventorySnapshotOptions struct {
 	}
 }
 
-func Execute(action controlplane.ResponseAction, opts ExecuteOptions) ExecuteResult {
+func Execute(action protocol.ResponseAction, opts ExecuteOptions) ExecuteResult {
 	now := opts.Now.UTC()
 	out := ExecuteResult{
 		Status:    "failed",
@@ -95,7 +95,7 @@ func Execute(action controlplane.ResponseAction, opts ExecuteOptions) ExecuteRes
 		out.Error = "invalid action id"
 		return out
 	}
-	if !agentcfg.ProfileAllowsResponseActions(opts.Profile) {
+	if !protocol.ProfileAllowsResponseActions(opts.Profile) {
 		out.Error = "agent profile does not allow response actions"
 		return out
 	}
@@ -205,7 +205,7 @@ func Execute(action controlplane.ResponseAction, opts ExecuteOptions) ExecuteRes
 	}
 }
 
-func runTopologyDiscovery(action controlplane.ResponseAction, opts ExecuteOptions, now time.Time) (map[string]interface{}, error) {
+func runTopologyDiscovery(action protocol.ResponseAction, opts ExecuteOptions, now time.Time) (map[string]interface{}, error) {
 	if opts.RunTopologyDiscovery == nil {
 		return nil, fmt.Errorf("trigger_topology_discovery is not available")
 	}
@@ -221,7 +221,7 @@ func runTopologyDiscovery(action controlplane.ResponseAction, opts ExecuteOption
 	return result, nil
 }
 
-func runRefreshRuntimeConfig(action controlplane.ResponseAction, opts ExecuteOptions, now time.Time) (map[string]interface{}, error) {
+func runRefreshRuntimeConfig(action protocol.ResponseAction, opts ExecuteOptions, now time.Time) (map[string]interface{}, error) {
 	if opts.RefreshRuntimeConfig == nil {
 		return nil, fmt.Errorf("refresh_runtime_config is not available")
 	}
@@ -243,7 +243,7 @@ func runRefreshRuntimeConfig(action controlplane.ResponseAction, opts ExecuteOpt
 	return out, nil
 }
 
-func buildInventorySnapshot(action controlplane.ResponseAction, opts ExecuteOptions, now time.Time) (map[string]interface{}, error) {
+func buildInventorySnapshot(action protocol.ResponseAction, opts ExecuteOptions, now time.Time) (map[string]interface{}, error) {
 	snapshotOpts, err := parseInventorySnapshotOptions(action.Payload)
 	if err != nil {
 		return nil, err
@@ -296,7 +296,7 @@ func buildInventorySnapshot(action controlplane.ResponseAction, opts ExecuteOpti
 	return out, nil
 }
 
-func actionMeta(action controlplane.ResponseAction) map[string]interface{} {
+func actionMeta(action protocol.ResponseAction) map[string]interface{} {
 	out := map[string]interface{}{
 		"id":           action.ID,
 		"action_type":  action.ActionType,
@@ -311,7 +311,7 @@ func actionMeta(action controlplane.ResponseAction) map[string]interface{} {
 	return out
 }
 
-func buildTriageBundle(action controlplane.ResponseAction, opts ExecuteOptions, now time.Time) (map[string]interface{}, error) {
+func buildTriageBundle(action protocol.ResponseAction, opts ExecuteOptions, now time.Time) (map[string]interface{}, error) {
 	bundleOpts, err := parseTriageBundleOptions(action.Payload)
 	if err != nil {
 		return nil, err
@@ -775,7 +775,7 @@ type killTarget struct {
 	name string
 }
 
-func runKillProcess(action controlplane.ResponseAction, opts ExecuteOptions, now time.Time) (map[string]interface{}, error) {
+func runKillProcess(action protocol.ResponseAction, opts ExecuteOptions, now time.Time) (map[string]interface{}, error) {
 	p, err := parseKillProcessPayload(action.Payload)
 	if err != nil {
 		return nil, err
@@ -1082,7 +1082,7 @@ func buildNftAddRule(p firewallPayload) (string, []string, string) {
 	return "nft", args, "nft " + strings.Join(args, " ")
 }
 
-func runBlockOutboundIP(action controlplane.ResponseAction, opts ExecuteOptions, now time.Time) (map[string]interface{}, error) {
+func runBlockOutboundIP(action protocol.ResponseAction, opts ExecuteOptions, now time.Time) (map[string]interface{}, error) {
 	p, err := parseFirewallPayload(action.Payload)
 	if err != nil {
 		return nil, err
@@ -1127,7 +1127,7 @@ func runBlockOutboundIP(action controlplane.ResponseAction, opts ExecuteOptions,
 	return result, nil
 }
 
-func runUnblockOutboundIP(action controlplane.ResponseAction, opts ExecuteOptions, now time.Time) (map[string]interface{}, error) {
+func runUnblockOutboundIP(action protocol.ResponseAction, opts ExecuteOptions, now time.Time) (map[string]interface{}, error) {
 	p, err := parseFirewallPayload(action.Payload)
 	if err != nil {
 		return nil, err
@@ -1324,7 +1324,7 @@ func validateQuarantinePath(path string) error {
 	return nil
 }
 
-func runQuarantineFile(action controlplane.ResponseAction, opts ExecuteOptions, now time.Time) (map[string]interface{}, error) {
+func runQuarantineFile(action protocol.ResponseAction, opts ExecuteOptions, now time.Time) (map[string]interface{}, error) {
 	p, err := parseQuarantineFilePayload(action.Payload)
 	if err != nil {
 		return nil, err
@@ -1494,7 +1494,7 @@ func shellCommandAllowed(command string, allowlist []string) bool {
 	return false
 }
 
-func auditShellExec(opts ExecuteOptions, action controlplane.ResponseAction, command string, exitCode int, timedOut bool, blockedReason string) {
+func auditShellExec(opts ExecuteOptions, action protocol.ResponseAction, command string, exitCode int, timedOut bool, blockedReason string) {
 	fields := map[string]interface{}{
 		"agent_id":  strings.TrimSpace(opts.AgentID),
 		"action_id": action.ID,
@@ -1517,7 +1517,7 @@ func truncateShellOutput(s string) string {
 	return s[:maxShellOutputBytes] + "\n[truncated]"
 }
 
-func runShellCommand(action controlplane.ResponseAction, opts ExecuteOptions, now time.Time) (map[string]interface{}, error) {
+func runShellCommand(action protocol.ResponseAction, opts ExecuteOptions, now time.Time) (map[string]interface{}, error) {
 	p, err := parseShellCommandPayload(action.Payload)
 	if err != nil {
 		return nil, err

@@ -6,7 +6,7 @@ import (
 	"time"
 
 	agentcfg "github.com/dynasmon/Seagull-agent/internal/config"
-	"github.com/dynasmon/Seagull-agent/internal/protocol"
+	"github.com/dynasmon/Seagull-agent/protocol"
 )
 
 type CycleResult struct {

@@ -8,14 +8,14 @@ import (
 	"github.com/dynasmon/Seagull-agent/internal/buildinfo"
 	"github.com/dynasmon/Seagull-agent/internal/certrenew"
 	agentcfg "github.com/dynasmon/Seagull-agent/internal/config"
-	"github.com/dynasmon/Seagull-agent/internal/controlplane"
 	"github.com/dynasmon/Seagull-agent/internal/heartbeat"
 	"github.com/dynasmon/Seagull-agent/internal/jitter"
 	"github.com/dynasmon/Seagull-agent/internal/responseactions"
 	"github.com/dynasmon/Seagull-agent/internal/sources"
+	"github.com/dynasmon/Seagull-agent/protocol"
 )
 
-func (s *Service) stageResponseActions(actions []controlplane.ResponseAction) responseactions.StageResult {
+func (s *Service) stageResponseActions(actions []protocol.ResponseAction) responseactions.StageResult {
 	if s.responseStage == nil {
 		s.responseStage = responseactions.NewStage(s.cfg.ResponseActionStageMax)
 	}
@@ -66,7 +66,7 @@ func (s *Service) startResponseActionExecutor(rootCtx context.Context) {
 					}
 
 					now := time.Now().UTC()
-					runningResult := controlplane.ResponseActionExecutionResult{
+					runningResult := protocol.ResponseActionExecutionResult{
 						ResponseActionID: staged.Action.ID,
 						AgentID:          s.cfg.AgentID,
 						Status:           "running",
@@ -115,7 +115,7 @@ func (s *Service) startResponseActionExecutor(rootCtx context.Context) {
 					})
 					s.responseStage.MarkHandled(staged.Action.ID)
 
-					result := controlplane.ResponseActionExecutionResult{
+					result := protocol.ResponseActionExecutionResult{
 						ResponseActionID: staged.Action.ID,
 						AgentID:          s.cfg.AgentID,
 						Status:           execRes.Status,
@@ -206,7 +206,7 @@ func (s *Service) startControlPlane(rootCtx context.Context) {
 		Timeout: s.cfg.HTTPTimeout,
 	}, heartbeat.Deps{
 		Build: s.buildHeartbeatRequest,
-		Send: func(ctx context.Context, hb controlplane.HeartbeatRequest) error {
+		Send: func(ctx context.Context, hb protocol.HeartbeatRequest) error {
 			return s.cp.Heartbeat(ctx, hb)
 		},
 		OnError: func(err error) {
@@ -271,7 +271,7 @@ func (s *Service) startControlPlane(rootCtx context.Context) {
 		Jitter:  s.cfg.ControlResponsePollJitter,
 		Timeout: s.cfg.HTTPTimeout,
 	}, responseactions.PollerDeps{
-		Fetch: func(ctx context.Context) ([]controlplane.ResponseAction, error) {
+		Fetch: func(ctx context.Context) ([]protocol.ResponseAction, error) {
 			return s.cp.ListPendingResponseActions(ctx)
 		},
 		Stage: s.stageResponseActions,
@@ -356,7 +356,7 @@ func (s *Service) startControlPlane(rootCtx context.Context) {
 	}()
 }
 
-func (s *Service) buildHeartbeatRequest() controlplane.HeartbeatRequest {
+func (s *Service) buildHeartbeatRequest() protocol.HeartbeatRequest {
 	metrics := map[string]interface{}{
 		"events_sent_total":   s.state.EventsSentTotal,
 		"send_errors_total":   s.state.SendErrorsTotal,
@@ -448,12 +448,12 @@ func (s *Service) buildHeartbeatRequest() controlplane.HeartbeatRequest {
 		metrics["topology_active_discovery_last_trigger"] = discStatus.LastTrigger
 	}
 
-	return controlplane.HeartbeatRequest{
+	return protocol.HeartbeatRequest{
 		Status:          "ok",
 		UptimeSeconds:   int64(time.Since(s.state.StartedAt).Seconds()),
 		AgentVersion:    buildinfo.Version,
-		ProtocolVersion: buildinfo.ProtocolVersion,
-		Profile:         agentcfg.NormalizeProfile(s.cfg.Profile),
+		ProtocolVersion: protocol.Version,
+		Profile:         protocol.NormalizeProfile(s.cfg.Profile),
 		Capabilities:    s.effectiveCapabilities(),
 		Modules: map[string]interface{}{
 			"sources": s.cfg.Sources,
@@ -463,9 +463,12 @@ func (s *Service) buildHeartbeatRequest() controlplane.HeartbeatRequest {
 }
 
 func (s *Service) effectiveCapabilities() map[string]interface{} {
+	profile := protocol.NormalizeProfile(s.cfg.Profile)
 	build := buildinfo.Summary()
 	build["sources"] = s.cfg.Sources
-	build["profile"] = agentcfg.NormalizeProfile(s.cfg.Profile)
-	build["response_actions"] = agentcfg.ProfileAllowsResponseActions(s.cfg.Profile)
+	build["profile"] = profile
+	build["response_actions"] = protocol.ProfileAllowsResponseActions(profile)
+	build["response_action_types"] = protocol.SupportedActions(profile)
+	build["shell_exec"] = protocol.ProfileAllowsResponseActions(profile) && s.cfg.AllowShellExec
 	return build
 }

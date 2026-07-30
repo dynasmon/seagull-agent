@@ -4,14 +4,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dynasmon/Seagull-agent/internal/controlplane"
+	"github.com/dynasmon/Seagull-agent/protocol"
 )
 
 func TestStageDeduplicates(t *testing.T) {
 	stage := NewStage(8)
 	now := time.Now().UTC()
 
-	actions := []controlplane.ResponseAction{
+	actions := []protocol.ResponseAction{
 		{ID: 1001, ActionType: "block_ip", AgentID: "agent-1", Status: "pending", RequestedAt: now},
 		{ID: 1001, ActionType: "block_ip", AgentID: "agent-1", Status: "pending", RequestedAt: now},
 	}
@@ -37,7 +37,7 @@ func TestStageFiltersOwnershipAndExpiration(t *testing.T) {
 	expired := now.Add(-1 * time.Minute)
 	future := now.Add(5 * time.Minute)
 
-	actions := []controlplane.ResponseAction{
+	actions := []protocol.ResponseAction{
 		{ID: 1001, ActionType: "block_ip", AgentID: "agent-2", Status: "pending", RequestedAt: now},
 		{ID: 1002, ActionType: "block_ip", AgentID: "agent-1", Status: "pending", RequestedAt: now, ExpiresAt: &expired},
 		{ID: 1003, ActionType: "block_ip", AgentID: "agent-1", Status: "pending", RequestedAt: now, ExpiresAt: &future},
@@ -56,7 +56,7 @@ func TestStageBoundedCapacity(t *testing.T) {
 	stage := NewStage(2)
 	now := time.Now().UTC()
 
-	actions := []controlplane.ResponseAction{
+	actions := []protocol.ResponseAction{
 		{ID: 1, ActionType: "block_ip", AgentID: "agent-1", Status: "pending", RequestedAt: now},
 		{ID: 2, ActionType: "block_ip", AgentID: "agent-1", Status: "pending", RequestedAt: now},
 		{ID: 3, ActionType: "block_ip", AgentID: "agent-1", Status: "pending", RequestedAt: now},
@@ -76,7 +76,7 @@ func TestStageIgnoresHandledIDs(t *testing.T) {
 	now := time.Now().UTC()
 
 	stage.MarkHandled(777)
-	got := stage.Stage(now, []controlplane.ResponseAction{
+	got := stage.Stage(now, []protocol.ResponseAction{
 		{ID: 777, ActionType: "collect_triage_bundle", AgentID: "agent-1", Status: "pending", RequestedAt: now},
 	}, "agent-1")
 	if got.Added != 0 || got.Ignored != 1 {
@@ -89,7 +89,7 @@ func TestStageNextSkipsExpiredAndMismatched(t *testing.T) {
 	now := time.Now().UTC()
 	expired := now.Add(-1 * time.Minute)
 
-	stage.Stage(now, []controlplane.ResponseAction{
+	stage.Stage(now, []protocol.ResponseAction{
 		{ID: 1, ActionType: "collect_triage_bundle", AgentID: "other", Status: "pending", RequestedAt: now},
 		{ID: 2, ActionType: "collect_triage_bundle", AgentID: "agent-1", Status: "pending", RequestedAt: now, ExpiresAt: &expired},
 		{ID: 3, ActionType: "collect_triage_bundle", AgentID: "agent-1", Status: "pending", RequestedAt: now},

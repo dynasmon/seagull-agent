@@ -14,6 +14,7 @@ import (
 	agentcfg "github.com/dynasmon/Seagull-agent/internal/config"
 	"github.com/dynasmon/Seagull-agent/internal/controlplane"
 	"github.com/dynasmon/Seagull-agent/internal/sources"
+	"github.com/dynasmon/Seagull-agent/protocol"
 )
 
 type Manager struct {
@@ -94,7 +95,7 @@ func (m *Manager) CurrentBootstrapToken() string {
 	return strings.TrimSpace(m.cfg.BootstrapToken)
 }
 
-func (m *Manager) ApplyCredentialUpdate(update controlplane.Credential, recoveryMethod string) error {
+func (m *Manager) ApplyCredentialUpdate(update protocol.Credential, recoveryMethod string) error {
 	cred := strings.TrimSpace(update.Credential)
 	if cred == "" {
 		return fmt.Errorf("empty credential update")
@@ -308,14 +309,14 @@ func (m *Manager) RecoverIdentity(rootCtx context.Context, trigger string, force
 	var lastErr error
 	for _, method := range methods {
 		ctx, cancel := context.WithTimeout(rootCtx, m.cfg.ControlEnrollTimeout)
-		resp, err := m.cp.Enroll(ctx, controlplane.EnrollRequest{
+		resp, err := m.cp.Enroll(ctx, protocol.EnrollRequest{
 			AgentID:         m.cfg.AgentID,
 			Hostname:        hostname,
 			OS:              goruntime.GOOS,
 			Arch:            goruntime.GOARCH,
 			Version:         buildinfo.Version,
-			ProtocolVersion: buildinfo.ProtocolVersion,
-			Profile:         agentcfg.NormalizeProfile(m.cfg.Profile),
+			ProtocolVersion: protocol.Version,
+			Profile:         protocol.NormalizeProfile(m.cfg.Profile),
 			CSRPEM:          string(csrPEM),
 			BootstrapToken:  method.token,
 		})
@@ -391,7 +392,7 @@ func (m *Manager) prepareEnrollmentCSR() ([]byte, []byte) {
 	return keyPEM, csrPEM
 }
 
-func (m *Manager) persistEnrollmentServerCA(issued *controlplane.CertificateRenewal) {
+func (m *Manager) persistEnrollmentServerCA(issued *protocol.CertificateRenewal) {
 	if issued == nil {
 		return
 	}
@@ -417,7 +418,7 @@ func (m *Manager) persistEnrollmentServerCA(issued *controlplane.CertificateRene
 	})
 }
 
-func (m *Manager) persistEnrollmentCertificate(issued *controlplane.CertificateRenewal, keyPEM []byte, method string) {
+func (m *Manager) persistEnrollmentCertificate(issued *protocol.CertificateRenewal, keyPEM []byte, method string) {
 	if issued == nil || len(keyPEM) == 0 {
 		return
 	}

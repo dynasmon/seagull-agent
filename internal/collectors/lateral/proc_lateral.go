@@ -4,7 +4,7 @@ import (
 	"time"
 
 	"github.com/dynasmon/Seagull-agent/internal/collectors/proc"
-	"github.com/dynasmon/Seagull-agent/internal/protocol"
+	"github.com/dynasmon/Seagull-agent/protocol"
 )
 
 func lateralConfidence(kind string, dstPort int, stateHex string) int {

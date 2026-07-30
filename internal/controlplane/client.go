@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +11,18 @@ import (
 	"time"
 
 	"github.com/dynasmon/Seagull-agent/internal/agentauth"
+	"github.com/dynasmon/Seagull-agent/protocol"
+)
+
+var (
+	responseActionListPaths = []string{
+		"/agents/response-actions/pending",
+		"/agents/response/actions/pending",
+	}
+	responseActionResultPaths = []string{
+		"/agents/response-actions/results",
+		"/agents/response/actions/results",
+	}
 )
 
 type Client struct {
@@ -20,10 +31,6 @@ type Client struct {
 	http           *http.Client
 	agentID        string
 	credentialFunc func() string
-}
-
-func (c *Client) SetEnrollBaseURL(url string) {
-	c.enrollBaseURL = strings.TrimRight(strings.TrimSpace(url), "/")
 }
 
 func New(baseURL string, timeout time.Duration, agentID string, credentialFunc func() string, httpClient *http.Client) *Client {
@@ -41,6 +48,10 @@ func New(baseURL string, timeout time.Duration, agentID string, credentialFunc f
 		agentID:        strings.TrimSpace(agentID),
 		credentialFunc: credentialFunc,
 	}
+}
+
+func (c *Client) SetEnrollBaseURL(url string) {
+	c.enrollBaseURL = strings.TrimRight(strings.TrimSpace(url), "/")
 }
 
 func (c *Client) do(ctx context.Context, method, path, name string, body []byte) (int, []byte, error) {
@@ -70,43 +81,6 @@ func (c *Client) do(ctx context.Context, method, path, name string, body []byte)
 	return resp.StatusCode, respBody, nil
 }
 
-type EnrollRequest struct {
-	AgentID         string `json:"agent_id"`
-	Hostname        string `json:"hostname,omitempty"`
-	OS              string `json:"os,omitempty"`
-	Arch            string `json:"arch,omitempty"`
-	Version         string `json:"version,omitempty"`
-	ProtocolVersion int    `json:"protocol_version,omitempty"`
-	Profile         string `json:"profile,omitempty"`
-	CSRPEM          string `json:"csr_pem,omitempty"`
-	BootstrapToken  string `json:"-"`
-}
-
-type ProtocolDescriptor struct {
-	ProtocolVersion    int    `json:"protocol_version"`
-	MinSupported       int    `json:"min_supported"`
-	MaxSupported       int    `json:"max_supported"`
-	EventSchemaVersion int    `json:"event_schema_version"`
-	ServerTime         string `json:"server_time,omitempty"`
-}
-
-type Credential struct {
-	Credential            string `json:"credential"`
-	ExpiresAt             string `json:"expires_at"`
-	MaxUses               int    `json:"max_uses"`
-	UsedUses              int    `json:"used_uses"`
-	RenewalToken          string `json:"renewal_token"`
-	RenewalTokenExpiresAt string `json:"renewal_token_expires_at"`
-}
-
-type EnrollResponse struct {
-	AgentID     string                 `json:"agent_id"`
-	Config      map[string]interface{} `json:"config"`
-	Credential  Credential             `json:"credential"`
-	Certificate *CertificateRenewal    `json:"certificate,omitempty"`
-	Protocol    *ProtocolDescriptor    `json:"protocol,omitempty"`
-}
-
 func (c *Client) enrollEndpoint() string {
 	if c.enrollBaseURL != "" {
 		return c.enrollBaseURL + "/enroll"
@@ -117,8 +91,8 @@ func (c *Client) enrollEndpoint() string {
 	return ""
 }
 
-func (c *Client) Enroll(ctx context.Context, req EnrollRequest) (EnrollResponse, error) {
-	var out EnrollResponse
+func (c *Client) Enroll(ctx context.Context, req protocol.EnrollRequest) (protocol.EnrollResponse, error) {
+	var out protocol.EnrollResponse
 	u := c.enrollEndpoint()
 	if u == "" {
 		return out, fmt.Errorf("controlplane baseURL is empty")
@@ -156,18 +130,7 @@ func (c *Client) Enroll(ctx context.Context, req EnrollRequest) (EnrollResponse,
 	return out, nil
 }
 
-type HeartbeatRequest struct {
-	Status          string                 `json:"status"`
-	UptimeSeconds   int64                  `json:"uptime_seconds,omitempty"`
-	AgentVersion    string                 `json:"agent_version,omitempty"`
-	ProtocolVersion int                    `json:"protocol_version,omitempty"`
-	Profile         string                 `json:"profile,omitempty"`
-	Capabilities    map[string]interface{} `json:"capabilities,omitempty"`
-	Modules         map[string]interface{} `json:"modules,omitempty"`
-	Metrics         map[string]interface{} `json:"metrics,omitempty"`
-}
-
-func (c *Client) Heartbeat(ctx context.Context, hb HeartbeatRequest) error {
+func (c *Client) Heartbeat(ctx context.Context, hb protocol.HeartbeatRequest) error {
 	payload, err := json.Marshal(hb)
 	if err != nil {
 		return fmt.Errorf("marshal heartbeat: %w", err)
@@ -203,8 +166,8 @@ func (c *Client) GetConfig(ctx context.Context) (map[string]interface{}, error) 
 	return out, nil
 }
 
-func (c *Client) RotateCredential(ctx context.Context) (Credential, error) {
-	var out Credential
+func (c *Client) RotateCredential(ctx context.Context) (protocol.Credential, error) {
+	var out protocol.Credential
 	status, body, err := c.do(ctx, http.MethodPost, "/agents/credential/rotate", "rotate credential", nil)
 	if err != nil {
 		return out, err
@@ -218,23 +181,9 @@ func (c *Client) RotateCredential(ctx context.Context) (Credential, error) {
 	return out, nil
 }
 
-type CertificateRenewal struct {
-	AgentID        string `json:"agent_id"`
-	CertificatePEM string `json:"certificate_pem"`
-	CAPEM          string `json:"ca_pem"`
-	ServerCAPEM    string `json:"server_ca_pem,omitempty"`
-	SerialHex      string `json:"serial_hex"`
-	NotBefore      string `json:"not_before"`
-	NotAfter       string `json:"not_after"`
-}
-
-type certificateRenewRequest struct {
-	CSRPEM string `json:"csr_pem"`
-}
-
-func (c *Client) RenewCertificate(ctx context.Context, csrPEM string) (CertificateRenewal, error) {
-	var out CertificateRenewal
-	payload, err := json.Marshal(certificateRenewRequest{CSRPEM: csrPEM})
+func (c *Client) RenewCertificate(ctx context.Context, csrPEM string) (protocol.CertificateRenewal, error) {
+	var out protocol.CertificateRenewal
+	payload, err := json.Marshal(protocol.CertificateRenewRequest{CSRPEM: csrPEM})
 	if err != nil {
 		return out, fmt.Errorf("marshal certificate renew request: %w", err)
 	}
@@ -254,44 +203,13 @@ func (c *Client) RenewCertificate(ctx context.Context, csrPEM string) (Certifica
 	return out, nil
 }
 
-var ErrInvalidResponseAction = errors.New("invalid response action")
-
-type ResponseAction struct {
-	ID          int64           `json:"id"`
-	ActionType  string          `json:"action_type"`
-	AgentID     string          `json:"agent_id"`
-	Status      string          `json:"status"`
-	Payload     json.RawMessage `json:"payload"`
-	RequestedAt time.Time       `json:"requested_at"`
-	ExpiresAt   *time.Time      `json:"expires_at,omitempty"`
-}
-
-type responseActionListEnvelope struct {
-	Items   []ResponseAction `json:"items"`
-	Actions []ResponseAction `json:"actions"`
-}
-
-type ResponseActionExecutionResult struct {
-	ResponseActionID int64                  `json:"response_action_id"`
-	AgentID          string                 `json:"agent_id,omitempty"`
-	Status           string                 `json:"status"`
-	ResultPayload    map[string]interface{} `json:"result_payload,omitempty"`
-	Error            string                 `json:"error,omitempty"`
-	StartedAt        *time.Time             `json:"started_at,omitempty"`
-	FinishedAt       *time.Time             `json:"finished_at,omitempty"`
-}
-
-func (c *Client) ListPendingResponseActions(ctx context.Context) ([]ResponseAction, error) {
+func (c *Client) ListPendingResponseActions(ctx context.Context) ([]protocol.ResponseAction, error) {
 	if c.baseURL == "" {
 		return nil, fmt.Errorf("controlplane baseURL is empty")
 	}
-	paths := []string{
-		"/agents/response-actions/pending",
-		"/agents/response/actions/pending",
-	}
 
 	var lastErr error
-	for _, path := range paths {
+	for _, path := range responseActionListPaths {
 		out, err := c.listPendingResponseActionsPath(ctx, path)
 		if err == nil {
 			return out, nil
@@ -305,22 +223,22 @@ func (c *Client) ListPendingResponseActions(ctx context.Context) ([]ResponseActi
 	if lastErr != nil {
 		return nil, lastErr
 	}
-	return []ResponseAction{}, nil
+	return []protocol.ResponseAction{}, nil
 }
 
-func (c *Client) listPendingResponseActionsPath(ctx context.Context, path string) ([]ResponseAction, error) {
+func (c *Client) listPendingResponseActionsPath(ctx context.Context, path string) ([]protocol.ResponseAction, error) {
 	status, body, err := c.do(ctx, http.MethodGet, path, "response actions", nil)
 	if err != nil {
 		return nil, err
 	}
 	if status == http.StatusNoContent {
-		return []ResponseAction{}, nil
+		return []protocol.ResponseAction{}, nil
 	}
 	if status < 200 || status >= 300 {
 		return nil, fmt.Errorf("response actions failed status=%d body=%s", status, string(body))
 	}
 	if len(bytes.TrimSpace(body)) == 0 {
-		return []ResponseAction{}, nil
+		return []protocol.ResponseAction{}, nil
 	}
 
 	actions, err := decodeResponseActions(body)
@@ -328,31 +246,31 @@ func (c *Client) listPendingResponseActionsPath(ctx context.Context, path string
 		return nil, err
 	}
 	for i := range actions {
-		if err := normalizeResponseAction(&actions[i]); err != nil {
+		if err := actions[i].Normalize(); err != nil {
 			return nil, fmt.Errorf("decode response action: %w", err)
 		}
 	}
 	return actions, nil
 }
 
-func decodeResponseActions(body []byte) ([]ResponseAction, error) {
+func decodeResponseActions(body []byte) ([]protocol.ResponseAction, error) {
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) == 0 {
-		return []ResponseAction{}, nil
+		return []protocol.ResponseAction{}, nil
 	}
 
 	if trimmed[0] == '[' {
-		var out []ResponseAction
+		var out []protocol.ResponseAction
 		if err := json.Unmarshal(trimmed, &out); err != nil {
 			return nil, fmt.Errorf("unmarshal response actions array: %w", err)
 		}
 		if out == nil {
-			out = []ResponseAction{}
+			out = []protocol.ResponseAction{}
 		}
 		return out, nil
 	}
 
-	var env responseActionListEnvelope
+	var env protocol.ResponseActionList
 	if err := json.Unmarshal(trimmed, &env); err != nil {
 		return nil, fmt.Errorf("unmarshal response actions envelope: %w", err)
 	}
@@ -362,39 +280,10 @@ func decodeResponseActions(body []byte) ([]ResponseAction, error) {
 	if env.Actions != nil {
 		return env.Actions, nil
 	}
-	return []ResponseAction{}, nil
+	return []protocol.ResponseAction{}, nil
 }
 
-func normalizeResponseAction(a *ResponseAction) error {
-	if a == nil {
-		return fmt.Errorf("%w: nil action", ErrInvalidResponseAction)
-	}
-	a.ActionType = strings.ToLower(strings.TrimSpace(a.ActionType))
-	a.AgentID = strings.TrimSpace(a.AgentID)
-	a.Status = strings.ToLower(strings.TrimSpace(a.Status))
-
-	if a.ID <= 0 {
-		return fmt.Errorf("%w: invalid id", ErrInvalidResponseAction)
-	}
-	if a.ActionType == "" {
-		return fmt.Errorf("%w: empty action_type", ErrInvalidResponseAction)
-	}
-	if a.AgentID == "" {
-		return fmt.Errorf("%w: empty agent_id", ErrInvalidResponseAction)
-	}
-	if a.Status == "" {
-		return fmt.Errorf("%w: empty status", ErrInvalidResponseAction)
-	}
-	if a.RequestedAt.IsZero() {
-		return fmt.Errorf("%w: empty requested_at", ErrInvalidResponseAction)
-	}
-	if len(bytes.TrimSpace(a.Payload)) == 0 {
-		a.Payload = json.RawMessage(`{}`)
-	}
-	return nil
-}
-
-func (c *Client) ReportResponseActionResult(ctx context.Context, in ResponseActionExecutionResult) error {
+func (c *Client) ReportResponseActionResult(ctx context.Context, in protocol.ResponseActionExecutionResult) error {
 	if c.baseURL == "" {
 		return fmt.Errorf("controlplane baseURL is empty")
 	}
@@ -411,12 +300,8 @@ func (c *Client) ReportResponseActionResult(ctx context.Context, in ResponseActi
 		return fmt.Errorf("marshal response action result: %w", err)
 	}
 
-	paths := []string{
-		"/agents/response-actions/results",
-		"/agents/response/actions/results",
-	}
 	var lastErr error
-	for _, path := range paths {
+	for _, path := range responseActionResultPaths {
 		status, body, err := c.do(ctx, http.MethodPost, path, "response action result", payload)
 		if err != nil {
 			return err

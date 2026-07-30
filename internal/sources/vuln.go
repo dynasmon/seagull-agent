@@ -11,7 +11,7 @@ import (
 	"github.com/dynasmon/Seagull-agent/internal/collectors/syscollector"
 	"github.com/dynasmon/Seagull-agent/internal/collectors/vuln"
 	"github.com/dynasmon/Seagull-agent/internal/jitter"
-	"github.com/dynasmon/Seagull-agent/internal/protocol"
+	"github.com/dynasmon/Seagull-agent/protocol"
 )
 
 type VulnScannerStatus struct {

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/dynasmon/Seagull-agent/internal/controlplane"
+	"github.com/dynasmon/Seagull-agent/protocol"
 )
 
 func TestListPendingResponseActionsOK(t *testing.T) {
@@ -102,7 +103,7 @@ func TestReportResponseActionResultOK(t *testing.T) {
 
 	c := controlplane.New(ts.URL, 5*time.Second, "agent-1", func() string { return "cred-1" }, ts.Client())
 	now := time.Now().UTC().Truncate(time.Second)
-	err := c.ReportResponseActionResult(context.Background(), controlplane.ResponseActionExecutionResult{
+	err := c.ReportResponseActionResult(context.Background(), protocol.ResponseActionExecutionResult{
 		ResponseActionID: 12,
 		AgentID:          "agent-1",
 		Status:           "success",
@@ -132,7 +133,7 @@ func TestReportResponseActionResultFallbackPath(t *testing.T) {
 	defer ts.Close()
 
 	c := controlplane.New(ts.URL, 5*time.Second, "agent-1", nil, ts.Client())
-	err := c.ReportResponseActionResult(context.Background(), controlplane.ResponseActionExecutionResult{
+	err := c.ReportResponseActionResult(context.Background(), protocol.ResponseActionExecutionResult{
 		ResponseActionID: 13,
 		Status:           "failed",
 		Error:            "x",

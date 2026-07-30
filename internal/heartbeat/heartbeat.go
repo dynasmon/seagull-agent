@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/dynasmon/Seagull-agent/internal/controlplane"
 	"github.com/dynasmon/Seagull-agent/internal/jitter"
+	"github.com/dynasmon/Seagull-agent/protocol"
 )
 
 type Config struct {
@@ -16,8 +16,8 @@ type Config struct {
 }
 
 type Deps struct {
-	Build   func() controlplane.HeartbeatRequest
-	Send    func(context.Context, controlplane.HeartbeatRequest) error
+	Build   func() protocol.HeartbeatRequest
+	Send    func(context.Context, protocol.HeartbeatRequest) error
 	OnError func(error)
 }
 

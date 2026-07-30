@@ -10,6 +10,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/dynasmon/Seagull-agent/protocol"
 )
 
 const (
@@ -213,7 +215,7 @@ func LoadConfig() Config {
 	httpTimeout := parseDuration(getEnv("SEAGULL_HTTP_TIMEOUT", "10s"), 10*time.Second)
 	senderMaxBatch := parseInt(getEnv("SEAGULL_SENDER_MAX_BATCH", "300"), 300)
 
-	profile := NormalizeProfile(getEnv("SEAGULL_AGENT_PROFILE", ProfileManaged))
+	profile := protocol.NormalizeProfile(getEnv("SEAGULL_AGENT_PROFILE", protocol.ProfileSensor))
 
 	spoolDir := strings.TrimSpace(getEnv("SEAGULL_AGENT_SPOOL_DIR", "/var/lib/seagull/spool"))
 	if !parseBool(getEnv("SEAGULL_AGENT_SPOOL_ENABLED", "true"), true) {
