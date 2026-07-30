@@ -13,9 +13,9 @@ import (
 	"syscall"
 	"time"
 
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/agentauth"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/spool"
+	"github.com/dynasmon/Seagull-agent/internal/agentauth"
+	"github.com/dynasmon/Seagull-agent/internal/protocol"
+	"github.com/dynasmon/Seagull-agent/internal/spool"
 )
 
 const (
@@ -73,7 +73,7 @@ func (s *Sender) SpoolStats() spool.Stats {
 	return s.spool.Stats()
 }
 
-func (s *Sender) SendEvents(ctx context.Context, events []model.NetEvent) (int, error) {
+func (s *Sender) SendEvents(ctx context.Context, events []protocol.NetEvent) (int, error) {
 	if s.baseURL == "" {
 		return 0, fmt.Errorf("sender baseURL is empty")
 	}
@@ -216,7 +216,7 @@ func (s *Sender) postOnce(ctx context.Context, url string, batchID string, paylo
 	return resp.StatusCode, body, nil
 }
 
-func (s *Sender) SendInventorySnapshot(ctx context.Context, snap model.InventorySnapshot) (int, error) {
+func (s *Sender) SendInventorySnapshot(ctx context.Context, snap protocol.InventorySnapshot) (int, error) {
 	if s.baseURL == "" {
 		return 0, fmt.Errorf("sender baseURL is empty")
 	}
@@ -229,7 +229,7 @@ func (s *Sender) SendInventorySnapshot(ctx context.Context, snap model.Inventory
 		snap.OS = map[string]interface{}{}
 	}
 	if snap.Packages == nil {
-		snap.Packages = []model.PackageEntry{}
+		snap.Packages = []protocol.PackageEntry{}
 	}
 	if snap.Extra == nil {
 		snap.Extra = map[string]interface{}{}

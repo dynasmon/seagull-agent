@@ -16,8 +16,8 @@ import (
 	"strings"
 	"time"
 
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/netcontext"
+	"github.com/dynasmon/Seagull-agent/internal/netcontext"
+	"github.com/dynasmon/Seagull-agent/internal/protocol"
 )
 
 type Options struct {
@@ -29,7 +29,7 @@ type Options struct {
 }
 
 type Result struct {
-	Snapshot model.InventorySnapshot
+	Snapshot protocol.InventorySnapshot
 	Warnings []string
 }
 
@@ -64,7 +64,7 @@ func Collect(ctx context.Context, opts Options) (Result, error) {
 
 	hash := hashPackages(pkgs)
 
-	snap := model.InventorySnapshot{
+	snap := protocol.InventorySnapshot{
 		SchemaVersion: 1,
 		CollectedAt:   &now,
 		OS:            osInfo,
@@ -131,7 +131,7 @@ func parseOSRelease(s string) map[string]string {
 	return m
 }
 
-func collectPackages(ctx context.Context, opts Options) ([]model.PackageEntry, string, []string, error) {
+func collectPackages(ctx context.Context, opts Options) ([]protocol.PackageEntry, string, []string, error) {
 	var warns []string
 
 	// If a host root is mounted, try to read its package database directly.
@@ -180,10 +180,10 @@ func collectPackages(ctx context.Context, opts Options) ([]model.PackageEntry, s
 		return pkgs, "apk", append(warns, w...), err
 	}
 
-	return []model.PackageEntry{}, "unknown", []string{"no_package_manager_detected"}, nil
+	return []protocol.PackageEntry{}, "unknown", []string{"no_package_manager_detected"}, nil
 }
 
-func runDpkg(ctx context.Context, opts Options) ([]model.PackageEntry, []string, error) {
+func runDpkg(ctx context.Context, opts Options) ([]protocol.PackageEntry, []string, error) {
 	ctxCmd, cancel := context.WithTimeout(ctx, opts.CmdTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctxCmd, "dpkg-query", "-W", "-f=${Package}\t${Version}\t${Architecture}\n")
@@ -191,13 +191,13 @@ func runDpkg(ctx context.Context, opts Options) ([]model.PackageEntry, []string,
 	if err != nil {
 		return nil, nil, err
 	}
-	pkgs := make([]model.PackageEntry, 0, min(len(lines), opts.MaxPackages))
+	pkgs := make([]protocol.PackageEntry, 0, min(len(lines), opts.MaxPackages))
 	for _, ln := range lines {
 		parts := strings.Split(ln, "\t")
 		if len(parts) < 2 {
 			continue
 		}
-		p := model.PackageEntry{Name: parts[0], Version: parts[1]}
+		p := protocol.PackageEntry{Name: parts[0], Version: parts[1]}
 		if len(parts) >= 3 {
 			p.Arch = parts[2]
 		}
@@ -219,7 +219,7 @@ func runDpkg(ctx context.Context, opts Options) ([]model.PackageEntry, []string,
 	return pkgs, warns, nil
 }
 
-func runRPM(ctx context.Context, opts Options) ([]model.PackageEntry, []string, error) {
+func runRPM(ctx context.Context, opts Options) ([]protocol.PackageEntry, []string, error) {
 	ctxCmd, cancel := context.WithTimeout(ctx, opts.CmdTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctxCmd, "rpm", "-qa", "--qf", "%{NAME}\t%{VERSION}-%{RELEASE}\t%{ARCH}\n")
@@ -227,13 +227,13 @@ func runRPM(ctx context.Context, opts Options) ([]model.PackageEntry, []string, 
 	if err != nil {
 		return nil, nil, err
 	}
-	pkgs := make([]model.PackageEntry, 0, min(len(lines), opts.MaxPackages))
+	pkgs := make([]protocol.PackageEntry, 0, min(len(lines), opts.MaxPackages))
 	for _, ln := range lines {
 		parts := strings.Split(ln, "\t")
 		if len(parts) < 2 {
 			continue
 		}
-		p := model.PackageEntry{Name: parts[0], Version: parts[1]}
+		p := protocol.PackageEntry{Name: parts[0], Version: parts[1]}
 		if len(parts) >= 3 {
 			p.Arch = parts[2]
 		}
@@ -255,7 +255,7 @@ func runRPM(ctx context.Context, opts Options) ([]model.PackageEntry, []string, 
 	return pkgs, warns, nil
 }
 
-func runPacman(ctx context.Context, opts Options) ([]model.PackageEntry, []string, error) {
+func runPacman(ctx context.Context, opts Options) ([]protocol.PackageEntry, []string, error) {
 	ctxCmd, cancel := context.WithTimeout(ctx, opts.CmdTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctxCmd, "pacman", "-Q")
@@ -263,7 +263,7 @@ func runPacman(ctx context.Context, opts Options) ([]model.PackageEntry, []strin
 	if err != nil {
 		return nil, nil, err
 	}
-	pkgs := make([]model.PackageEntry, 0, min(len(lines), opts.MaxPackages))
+	pkgs := make([]protocol.PackageEntry, 0, min(len(lines), opts.MaxPackages))
 	for _, ln := range lines {
 		ln = strings.TrimSpace(ln)
 		if ln == "" {
@@ -274,7 +274,7 @@ func runPacman(ctx context.Context, opts Options) ([]model.PackageEntry, []strin
 		if len(parts) < 2 {
 			continue
 		}
-		p := model.PackageEntry{Name: parts[0], Version: parts[1]}
+		p := protocol.PackageEntry{Name: parts[0], Version: parts[1]}
 		pkgs = append(pkgs, p)
 		if len(pkgs) >= opts.MaxPackages {
 			break
@@ -290,7 +290,7 @@ func runPacman(ctx context.Context, opts Options) ([]model.PackageEntry, []strin
 	return pkgs, warns, nil
 }
 
-func runAPK(ctx context.Context, opts Options) ([]model.PackageEntry, []string, error) {
+func runAPK(ctx context.Context, opts Options) ([]protocol.PackageEntry, []string, error) {
 	// apk info -vv: "name-version description"
 	ctxCmd, cancel := context.WithTimeout(ctx, opts.CmdTimeout)
 	defer cancel()
@@ -299,7 +299,7 @@ func runAPK(ctx context.Context, opts Options) ([]model.PackageEntry, []string, 
 	if err != nil {
 		return nil, nil, err
 	}
-	pkgs := make([]model.PackageEntry, 0, min(len(lines), opts.MaxPackages))
+	pkgs := make([]protocol.PackageEntry, 0, min(len(lines), opts.MaxPackages))
 	for _, ln := range lines {
 		ln = strings.TrimSpace(ln)
 		if ln == "" {
@@ -320,7 +320,7 @@ func runAPK(ctx context.Context, opts Options) ([]model.PackageEntry, []string, 
 		if name == "" || ver == "" {
 			continue
 		}
-		pkgs = append(pkgs, model.PackageEntry{Name: name, Version: ver})
+		pkgs = append(pkgs, protocol.PackageEntry{Name: name, Version: ver})
 		if len(pkgs) >= opts.MaxPackages {
 			break
 		}
@@ -335,7 +335,7 @@ func runAPK(ctx context.Context, opts Options) ([]model.PackageEntry, []string, 
 	return pkgs, warns, nil
 }
 
-func hashPackages(pkgs []model.PackageEntry) string {
+func hashPackages(pkgs []protocol.PackageEntry) string {
 	rows := make([]string, 0, len(pkgs))
 	for _, p := range pkgs {
 		rows = append(rows, fmt.Sprintf("%s\t%s\t%s", p.Name, p.Version, p.Arch))

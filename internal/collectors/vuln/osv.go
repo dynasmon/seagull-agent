@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
+	"github.com/dynasmon/Seagull-agent/internal/protocol"
 )
 
 type OSVOptions struct {
@@ -93,7 +93,7 @@ type osvEvent struct {
 	LastAffected string `json:"last_affected"`
 }
 
-func QueryOSV(ctx context.Context, pkgs []model.PackageEntry, opts OSVOptions) ([]Finding, OSVStats, error) {
+func QueryOSV(ctx context.Context, pkgs []protocol.PackageEntry, opts OSVOptions) ([]Finding, OSVStats, error) {
 	var stats OSVStats
 	if opts.BatchSize <= 0 {
 		opts.BatchSize = 200
@@ -115,14 +115,14 @@ func QueryOSV(ctx context.Context, pkgs []model.PackageEntry, opts OSVOptions) (
 	client := &http.Client{Timeout: opts.HTTPTimeout}
 
 	// Deterministic order improves reproducibility and stable pagination in logs.
-	pkgs2 := make([]model.PackageEntry, 0, len(pkgs))
+	pkgs2 := make([]protocol.PackageEntry, 0, len(pkgs))
 	for _, p := range pkgs {
 		name := strings.TrimSpace(p.Name)
 		ver := strings.TrimSpace(p.Version)
 		if name == "" || ver == "" {
 			continue
 		}
-		pkgs2 = append(pkgs2, model.PackageEntry{Name: name, Version: ver, Arch: strings.TrimSpace(p.Arch)})
+		pkgs2 = append(pkgs2, protocol.PackageEntry{Name: name, Version: ver, Arch: strings.TrimSpace(p.Arch)})
 	}
 	sort.Slice(pkgs2, func(i, j int) bool {
 		if pkgs2[i].Name == pkgs2[j].Name {
@@ -360,7 +360,7 @@ func severityFromScore(score float64) string {
 	return "unknown"
 }
 
-func applyWazuhLikeEnrichment(f *Finding, pkg model.PackageEntry, opts OSVOptions) {
+func applyWazuhLikeEnrichment(f *Finding, pkg protocol.PackageEntry, opts OSVOptions) {
 	if f == nil {
 		return
 	}
@@ -442,7 +442,7 @@ func bumpSeverity(sev string) string {
 	}
 }
 
-func buildRemediation(pkg model.PackageEntry, v osvVuln) string {
+func buildRemediation(pkg protocol.PackageEntry, v osvVuln) string {
 	fixed := firstFixedVersion(v)
 	if fixed != "" {
 		return fmt.Sprintf("Upgrade %s to >= %s", pkg.Name, fixed)
@@ -463,7 +463,7 @@ func firstFixedVersion(v osvVuln) string {
 	return ""
 }
 
-func buildEvidence(pkg model.PackageEntry, v osvVuln) map[string]interface{} {
+func buildEvidence(pkg protocol.PackageEntry, v osvVuln) map[string]interface{} {
 	e := map[string]interface{}{
 		"package": map[string]interface{}{
 			"name":    pkg.Name,

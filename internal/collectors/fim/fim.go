@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
+	"github.com/dynasmon/Seagull-agent/internal/protocol"
 )
 
 const (
@@ -134,7 +134,7 @@ func defaultWatchPaths() []string {
 	}
 }
 
-func (c *Capturer) Capture(now time.Time) ([]model.NetEvent, error) {
+func (c *Capturer) Capture(now time.Time) ([]protocol.NetEvent, error) {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
@@ -329,8 +329,8 @@ func (c *Capturer) cleanupHashCache(now time.Time) {
 	}
 }
 
-func (c *Capturer) diff(now time.Time, prev, curr map[string]fileState, prevInode map[uint64]string) []model.NetEvent {
-	out := make([]model.NetEvent, 0, 64)
+func (c *Capturer) diff(now time.Time, prev, curr map[string]fileState, prevInode map[uint64]string) []protocol.NetEvent {
+	out := make([]protocol.NetEvent, 0, 64)
 	renamedFrom := make(map[string]struct{}, 16)
 
 	for path, cur := range curr {
@@ -389,7 +389,7 @@ func classifyChangeAction(old, cur fileState) string {
 	return ""
 }
 
-func (c *Capturer) makeDeleteEvent(now time.Time, old fileState) model.NetEvent {
+func (c *Capturer) makeDeleteEvent(now time.Time, old fileState) protocol.NetEvent {
 	extra := c.baseExtra(old, "delete")
 	extra["previous"] = map[string]interface{}{
 		"path":   old.Path,
@@ -399,7 +399,7 @@ func (c *Capturer) makeDeleteEvent(now time.Time, old fileState) model.NetEvent 
 		"size":   old.Size,
 		"digest": old.Digest,
 	}
-	return model.NetEvent{
+	return protocol.NetEvent{
 		AgentID:   c.agentID,
 		EventType: eventTypeForCategory(old.Category),
 		Timestamp: now,
@@ -409,7 +409,7 @@ func (c *Capturer) makeDeleteEvent(now time.Time, old fileState) model.NetEvent 
 	}
 }
 
-func (c *Capturer) makeEvent(now time.Time, cur fileState, action string, old *fileState) model.NetEvent {
+func (c *Capturer) makeEvent(now time.Time, cur fileState, action string, old *fileState) protocol.NetEvent {
 	extra := c.baseExtra(cur, action)
 	extra["uid"] = cur.UID
 	extra["gid"] = cur.GID
@@ -437,7 +437,7 @@ func (c *Capturer) makeEvent(now time.Time, cur fileState, action string, old *f
 		extra["path_to"] = cur.Path
 	}
 
-	return model.NetEvent{
+	return protocol.NetEvent{
 		AgentID:   c.agentID,
 		EventType: eventTypeForCategory(cur.Category),
 		Timestamp: now,

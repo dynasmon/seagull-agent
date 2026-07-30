@@ -12,9 +12,9 @@ import (
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/pcapx"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/netcontext"
+	"github.com/dynasmon/Seagull-agent/internal/collectors/pcapx"
+	"github.com/dynasmon/Seagull-agent/internal/netcontext"
+	"github.com/dynasmon/Seagull-agent/internal/protocol"
 )
 
 type PcapLateralOptions struct {
@@ -136,11 +136,11 @@ func (c *PcapLateralCapturer) buildBPF() string {
 	return fmt.Sprintf("tcp and (%s) and (tcp[tcpflags] & (tcp-syn|tcp-ack) == tcp-syn)", strings.Join(clauses, " or "))
 }
 
-func (c *PcapLateralCapturer) Drain() []model.NetEvent {
+func (c *PcapLateralCapturer) Drain() []protocol.NetEvent {
 	return c.buffer.Drain()
 }
 
-func (c *PcapLateralCapturer) push(ev model.NetEvent) {
+func (c *PcapLateralCapturer) push(ev protocol.NetEvent) {
 	if ev.Extra == nil {
 		ev.Extra = map[string]interface{}{}
 	}
@@ -153,7 +153,7 @@ func (c *PcapLateralCapturer) push(ev model.NetEvent) {
 	c.buffer.Push(key, ev)
 }
 
-func (c *PcapLateralCapturer) packetToEvent(pkt gopacket.Packet, iface string) *model.NetEvent {
+func (c *PcapLateralCapturer) packetToEvent(pkt gopacket.Packet, iface string) *protocol.NetEvent {
 	ts := pkt.Metadata().Timestamp.UTC()
 
 	var srcIP, dstIP string
@@ -206,7 +206,7 @@ func (c *PcapLateralCapturer) packetToEvent(pkt gopacket.Packet, iface string) *
 		confidence = 95
 	}
 
-	return &model.NetEvent{
+	return &protocol.NetEvent{
 		AgentID:   c.agentID,
 		EventType: "lateral_conn",
 		Timestamp: ts,

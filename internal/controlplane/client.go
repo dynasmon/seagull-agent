@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/agentauth"
+	"github.com/dynasmon/Seagull-agent/internal/agentauth"
 )
 
 type Client struct {

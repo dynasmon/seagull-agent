@@ -4,12 +4,12 @@ import (
 	"sync"
 	"time"
 
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
+	"github.com/dynasmon/Seagull-agent/internal/protocol"
 )
 
 type Buffer struct {
 	mu          sync.Mutex
-	buf         []model.NetEvent
+	buf         []protocol.NetEvent
 	cache       map[string]time.Time
 	lastCleanup time.Time
 	ttl         time.Duration
@@ -18,7 +18,7 @@ type Buffer struct {
 
 func NewBuffer(ttl time.Duration, maxBatch int) *Buffer {
 	return &Buffer{
-		buf:         make([]model.NetEvent, 0, 2048),
+		buf:         make([]protocol.NetEvent, 0, 2048),
 		cache:       make(map[string]time.Time, 8192),
 		lastCleanup: time.Now().UTC(),
 		ttl:         ttl,
@@ -26,7 +26,7 @@ func NewBuffer(ttl time.Duration, maxBatch int) *Buffer {
 	}
 }
 
-func (b *Buffer) Push(key string, ev model.NetEvent) bool {
+func (b *Buffer) Push(key string, ev protocol.NetEvent) bool {
 	now := time.Now().UTC()
 
 	b.mu.Lock()
@@ -58,14 +58,14 @@ func (b *Buffer) cleanupLocked(now time.Time) {
 	b.lastCleanup = now
 }
 
-func (b *Buffer) Drain() []model.NetEvent {
+func (b *Buffer) Drain() []protocol.NetEvent {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	if len(b.buf) == 0 {
 		return nil
 	}
-	out := make([]model.NetEvent, len(b.buf))
+	out := make([]protocol.NetEvent, len(b.buf))
 	copy(out, b.buf)
 	b.buf = b.buf[:0]
 	return out

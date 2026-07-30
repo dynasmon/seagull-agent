@@ -6,10 +6,10 @@ import (
 	"strings"
 	"time"
 
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/syscollector"
-	agentcfg "gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/config"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/netcontext"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/topologydiscovery"
+	"github.com/dynasmon/Seagull-agent/internal/collectors/syscollector"
+	agentcfg "github.com/dynasmon/Seagull-agent/internal/config"
+	"github.com/dynasmon/Seagull-agent/internal/netcontext"
+	"github.com/dynasmon/Seagull-agent/internal/topologydiscovery"
 )
 
 type TopologyDiscoveryStatus struct {

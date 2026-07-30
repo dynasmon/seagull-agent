@@ -5,14 +5,14 @@ import (
 	"strings"
 	"time"
 
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/buildinfo"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/certrenew"
-	agentcfg "gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/config"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/controlplane"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/heartbeat"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/jitter"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/responseactions"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/sources"
+	"github.com/dynasmon/Seagull-agent/internal/buildinfo"
+	"github.com/dynasmon/Seagull-agent/internal/certrenew"
+	agentcfg "github.com/dynasmon/Seagull-agent/internal/config"
+	"github.com/dynasmon/Seagull-agent/internal/controlplane"
+	"github.com/dynasmon/Seagull-agent/internal/heartbeat"
+	"github.com/dynasmon/Seagull-agent/internal/jitter"
+	"github.com/dynasmon/Seagull-agent/internal/responseactions"
+	"github.com/dynasmon/Seagull-agent/internal/sources"
 )
 
 func (s *Service) stageResponseActions(actions []controlplane.ResponseAction) responseactions.StageResult {

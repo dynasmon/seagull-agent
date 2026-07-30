@@ -9,12 +9,12 @@ import (
 	"path/filepath"
 	"strings"
 
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
+	"github.com/dynasmon/Seagull-agent/internal/protocol"
 )
 
 // parseDpkgStatus reads /var/lib/dpkg/status and extracts installed packages.
 // It is intentionally conservative: it only includes packages with "install ok installed".
-func parseDpkgStatus(path string, maxBytes int64, maxPkgs int) ([]model.PackageEntry, []string, error) {
+func parseDpkgStatus(path string, maxBytes int64, maxPkgs int) ([]protocol.PackageEntry, []string, error) {
 	if maxBytes <= 0 {
 		maxBytes = 8 << 20
 	}
@@ -34,7 +34,7 @@ func parseDpkgStatus(path string, maxBytes int64, maxPkgs int) ([]model.PackageE
 	scanner.Buffer(buf, 512*1024)
 
 	var warns []string
-	var pkgs []model.PackageEntry
+	var pkgs []protocol.PackageEntry
 
 	cur := map[string]string{}
 	flush := func() {
@@ -54,7 +54,7 @@ func parseDpkgStatus(path string, maxBytes int64, maxPkgs int) ([]model.PackageE
 			cur = map[string]string{}
 			return
 		}
-		pkgs = append(pkgs, model.PackageEntry{Name: name, Version: ver, Arch: arch})
+		pkgs = append(pkgs, protocol.PackageEntry{Name: name, Version: ver, Arch: arch})
 		cur = map[string]string{}
 	}
 
@@ -95,7 +95,7 @@ func parseDpkgStatus(path string, maxBytes int64, maxPkgs int) ([]model.PackageE
 
 // parseApkInstalled reads /lib/apk/db/installed from an Alpine root.
 // The format uses single-letter keys per line (P=name, V=version, A=arch).
-func parseApkInstalled(path string, maxBytes int64, maxPkgs int) ([]model.PackageEntry, []string, error) {
+func parseApkInstalled(path string, maxBytes int64, maxPkgs int) ([]protocol.PackageEntry, []string, error) {
 	if maxBytes <= 0 {
 		maxBytes = 8 << 20
 	}
@@ -115,12 +115,12 @@ func parseApkInstalled(path string, maxBytes int64, maxPkgs int) ([]model.Packag
 	scanner.Buffer(buf, 512*1024)
 
 	var warns []string
-	pkgs := make([]model.PackageEntry, 0, 4096)
+	pkgs := make([]protocol.PackageEntry, 0, 4096)
 
 	name, ver, arch := "", "", ""
 	flush := func() {
 		if name != "" && ver != "" {
-			pkgs = append(pkgs, model.PackageEntry{Name: name, Version: ver, Arch: arch})
+			pkgs = append(pkgs, protocol.PackageEntry{Name: name, Version: ver, Arch: arch})
 		}
 		name, ver, arch = "", "", ""
 	}
@@ -155,7 +155,7 @@ func parseApkInstalled(path string, maxBytes int64, maxPkgs int) ([]model.Packag
 }
 
 // parsePacmanLocal reads /var/lib/pacman/local/*/desc.
-func parsePacmanLocal(dir string, maxPkgs int) ([]model.PackageEntry, []string, error) {
+func parsePacmanLocal(dir string, maxPkgs int) ([]protocol.PackageEntry, []string, error) {
 	if maxPkgs <= 0 {
 		maxPkgs = 50000
 	}
@@ -165,7 +165,7 @@ func parsePacmanLocal(dir string, maxPkgs int) ([]model.PackageEntry, []string, 
 		return nil, nil, err
 	}
 
-	pkgs := make([]model.PackageEntry, 0, min(len(entries), maxPkgs))
+	pkgs := make([]protocol.PackageEntry, 0, min(len(entries), maxPkgs))
 	var warns []string
 
 	for _, e := range entries {
@@ -181,7 +181,7 @@ func parsePacmanLocal(dir string, maxPkgs int) ([]model.PackageEntry, []string, 
 		if name == "" || ver == "" {
 			continue
 		}
-		pkgs = append(pkgs, model.PackageEntry{Name: name, Version: ver, Arch: arch})
+		pkgs = append(pkgs, protocol.PackageEntry{Name: name, Version: ver, Arch: arch})
 		if len(pkgs) >= maxPkgs {
 			warns = append(warns, "package_list_capped")
 			break
@@ -213,7 +213,7 @@ func parsePacmanDesc(s string) (name, ver, arch string) {
 	return
 }
 
-func runRPMWithDBPath(ctx context.Context, opts Options, dbPath string) ([]model.PackageEntry, []string, error) {
+func runRPMWithDBPath(ctx context.Context, opts Options, dbPath string) ([]protocol.PackageEntry, []string, error) {
 	ctxCmd, cancel := context.WithTimeout(ctx, opts.CmdTimeout)
 	defer cancel()
 
@@ -222,13 +222,13 @@ func runRPMWithDBPath(ctx context.Context, opts Options, dbPath string) ([]model
 	if err != nil {
 		return nil, nil, err
 	}
-	pkgs := make([]model.PackageEntry, 0, min(len(lines), opts.MaxPackages))
+	pkgs := make([]protocol.PackageEntry, 0, min(len(lines), opts.MaxPackages))
 	for _, ln := range lines {
 		parts := strings.Split(ln, "\t")
 		if len(parts) < 2 {
 			continue
 		}
-		p := model.PackageEntry{Name: parts[0], Version: parts[1]}
+		p := protocol.PackageEntry{Name: parts[0], Version: parts[1]}
 		if len(parts) >= 3 {
 			p.Arch = parts[2]
 		}

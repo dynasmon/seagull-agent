@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/controlplane"
+	"github.com/dynasmon/Seagull-agent/internal/controlplane"
 )
 
 func TestExecuteCollectTriageBundleSuccess(t *testing.T) {

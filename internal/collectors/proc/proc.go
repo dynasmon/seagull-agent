@@ -12,8 +12,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/pcapx"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
+	"github.com/dynasmon/Seagull-agent/internal/collectors/pcapx"
+	"github.com/dynasmon/Seagull-agent/internal/protocol"
 )
 
 var tcpStateNames = map[string]string{
@@ -132,10 +132,10 @@ func applyDefaults(o *Options) {
 	}
 }
 
-func (c *Capturer) Capture() ([]model.NetEvent, error) {
+func (c *Capturer) Capture() ([]protocol.NetEvent, error) {
 	now := time.Now().UTC()
 
-	var out []model.NetEvent
+	var out []protocol.NetEvent
 
 	ev4, err := c.captureProc4(now)
 	if err != nil {
@@ -162,7 +162,7 @@ func (c *Capturer) Capture() ([]model.NetEvent, error) {
 //
 //	src_* = remote (client/attacker)
 //	dst_* = local (monitored host/target port)
-func (c *Capturer) captureProc4(ts time.Time) ([]model.NetEvent, error) {
+func (c *Capturer) captureProc4(ts time.Time) ([]protocol.NetEvent, error) {
 	f, err := os.Open(c.tcp4Path)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", c.tcp4Path, err)
@@ -170,7 +170,7 @@ func (c *Capturer) captureProc4(ts time.Time) ([]model.NetEvent, error) {
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
-	events := make([]model.NetEvent, 0, 256)
+	events := make([]protocol.NetEvent, 0, 256)
 
 	firstLine := true
 	for scanner.Scan() {
@@ -243,7 +243,7 @@ func (c *Capturer) captureProc4(ts time.Time) ([]model.NetEvent, error) {
 			}
 		}
 
-		events = append(events, model.NetEvent{
+		events = append(events, protocol.NetEvent{
 			AgentID:   c.agentID,
 			EventType: "flow",
 			Timestamp: ts,
@@ -266,7 +266,7 @@ func (c *Capturer) captureProc4(ts time.Time) ([]model.NetEvent, error) {
 	return events, nil
 }
 
-func (c *Capturer) captureProc6(ts time.Time) ([]model.NetEvent, error) {
+func (c *Capturer) captureProc6(ts time.Time) ([]protocol.NetEvent, error) {
 	f, err := os.Open(c.tcp6Path)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", c.tcp6Path, err)
@@ -274,7 +274,7 @@ func (c *Capturer) captureProc6(ts time.Time) ([]model.NetEvent, error) {
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
-	events := make([]model.NetEvent, 0, 256)
+	events := make([]protocol.NetEvent, 0, 256)
 
 	firstLine := true
 	for scanner.Scan() {
@@ -344,7 +344,7 @@ func (c *Capturer) captureProc6(ts time.Time) ([]model.NetEvent, error) {
 			}
 		}
 
-		events = append(events, model.NetEvent{
+		events = append(events, protocol.NetEvent{
 			AgentID:   c.agentID,
 			EventType: "flow",
 			Timestamp: ts,
@@ -395,12 +395,12 @@ func (c *Capturer) stateTTL(stateHex string) time.Duration {
 	return c.opts.DedupTTL
 }
 
-func (c *Capturer) dedupAndLimit(now time.Time, in []model.NetEvent) []model.NetEvent {
+func (c *Capturer) dedupAndLimit(now time.Time, in []protocol.NetEvent) []protocol.NetEvent {
 	if len(in) == 0 {
 		return in
 	}
 
-	out := make([]model.NetEvent, 0, min(len(in), c.opts.MaxBatchSize))
+	out := make([]protocol.NetEvent, 0, min(len(in), c.opts.MaxBatchSize))
 
 	for _, ev := range in {
 		if len(out) >= c.opts.MaxBatchSize {

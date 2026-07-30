@@ -14,8 +14,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/netcontext"
+	"github.com/dynasmon/Seagull-agent/internal/netcontext"
+	"github.com/dynasmon/Seagull-agent/internal/protocol"
 )
 
 var (
@@ -121,7 +121,7 @@ func ResolveAuthLogPath(configuredPath string) (string, error) {
 	return "", lastErr
 }
 
-func (c *AuthLogCapturer) Capture(now time.Time) ([]model.NetEvent, error) {
+func (c *AuthLogCapturer) Capture(now time.Time) ([]protocol.NetEvent, error) {
 	f, err := os.Open(c.opts.Path)
 	if err != nil {
 		return nil, fmt.Errorf("open authlog %s: %w", c.opts.Path, err)
@@ -149,8 +149,8 @@ func (c *AuthLogCapturer) Capture(now time.Time) ([]model.NetEvent, error) {
 
 	reader := bufio.NewReader(f)
 
-	var out []model.NetEvent
-	out = make([]model.NetEvent, 0, c.opts.MaxBatchSize)
+	var out []protocol.NetEvent
+	out = make([]protocol.NetEvent, 0, c.opts.MaxBatchSize)
 
 	for len(out) < c.opts.MaxBatchSize {
 		line, err := reader.ReadString('\n')
@@ -180,10 +180,10 @@ func (c *AuthLogCapturer) Capture(now time.Time) ([]model.NetEvent, error) {
 	return out, nil
 }
 
-func (c *AuthLogCapturer) parseLine(now time.Time, line string) (model.NetEvent, dedupKey, bool) {
+func (c *AuthLogCapturer) parseLine(now time.Time, line string) (protocol.NetEvent, dedupKey, bool) {
 	msg := strings.TrimSpace(line)
 	if msg == "" {
-		return model.NetEvent{}, dedupKey{}, false
+		return protocol.NetEvent{}, dedupKey{}, false
 	}
 
 	if mm := reSudoCmd.FindStringSubmatch(msg); len(mm) == 6 {
@@ -193,7 +193,7 @@ func (c *AuthLogCapturer) parseLine(now time.Time, line string) (model.NetEvent,
 		targetUser := strings.TrimSpace(mm[4])
 		command := strings.TrimSpace(mm[5])
 
-		ev := model.NetEvent{
+		ev := protocol.NetEvent{
 			AgentID:   c.agentID,
 			EventType: "sudo_cmd",
 			Timestamp: now.UTC(),
@@ -269,7 +269,7 @@ func (c *AuthLogCapturer) parseLine(now time.Time, line string) (model.NetEvent,
 		}
 	}
 
-	return model.NetEvent{}, dedupKey{}, false
+	return protocol.NetEvent{}, dedupKey{}, false
 }
 
 func (c *AuthLogCapturer) isDeduped(now time.Time, key dedupKey) bool {
@@ -299,14 +299,14 @@ func (c *AuthLogCapturer) pruneDedup(now time.Time) {
 	}
 }
 
-func (c *AuthLogCapturer) newSSHEndpointEvent(now time.Time, srcIP string, dstPort int, extra map[string]interface{}) model.NetEvent {
+func (c *AuthLogCapturer) newSSHEndpointEvent(now time.Time, srcIP string, dstPort int, extra map[string]interface{}) protocol.NetEvent {
 	if extra == nil {
 		extra = map[string]interface{}{}
 	}
 	extra["event_id"] = uuid.NewString()
 	extra["source"] = "auth.log"
 
-	return model.NetEvent{
+	return protocol.NetEvent{
 		AgentID:   c.agentID,
 		EventType: "ssh_auth",
 		Timestamp: now.UTC(),

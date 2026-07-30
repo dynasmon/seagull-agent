@@ -9,10 +9,10 @@ import (
 	"strings"
 	"syscall"
 
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/buildinfo"
-	agentcfg "gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/config"
-	agentruntime "gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/runtime"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/transport"
+	"github.com/dynasmon/Seagull-agent/internal/buildinfo"
+	agentcfg "github.com/dynasmon/Seagull-agent/internal/config"
+	agentruntime "github.com/dynasmon/Seagull-agent/internal/runtime"
+	"github.com/dynasmon/Seagull-agent/internal/transport"
 )
 
 func main() {

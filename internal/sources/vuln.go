@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/syscollector"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/vuln"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/jitter"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
+	"github.com/dynasmon/Seagull-agent/internal/collectors/syscollector"
+	"github.com/dynasmon/Seagull-agent/internal/collectors/vuln"
+	"github.com/dynasmon/Seagull-agent/internal/jitter"
+	"github.com/dynasmon/Seagull-agent/internal/protocol"
 )
 
 type VulnScannerStatus struct {
@@ -447,7 +447,7 @@ func (m *Manager) runVulnOnce(ctx context.Context, cfg VulnScannerConfig, forceS
 	m.vulnMu.Unlock()
 
 	if m.cfg.VulnEmitSummaryEvent {
-		ev := model.NetEvent{
+		ev := protocol.NetEvent{
 			AgentID:       m.cfg.AgentID,
 			SchemaVersion: 1,
 			Timestamp:     finishedAt,
@@ -475,7 +475,7 @@ func (m *Manager) runVulnOnce(ctx context.Context, cfg VulnScannerConfig, forceS
 			},
 		}
 		ctxEv, cancelEv := context.WithTimeout(ctx, m.cfg.HTTPTimeout)
-		_, _ = m.sender.SendEvents(ctxEv, []model.NetEvent{ev})
+		_, _ = m.sender.SendEvents(ctxEv, []protocol.NetEvent{ev})
 		cancelEv()
 	}
 }

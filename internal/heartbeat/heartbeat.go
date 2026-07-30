@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/controlplane"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/jitter"
+	"github.com/dynasmon/Seagull-agent/internal/controlplane"
+	"github.com/dynasmon/Seagull-agent/internal/jitter"
 )
 
 type Config struct {

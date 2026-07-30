@@ -22,9 +22,9 @@ import (
 	"testing"
 	"time"
 
-	agentcfg "gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/config"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/controlplane"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/sources"
+	agentcfg "github.com/dynasmon/Seagull-agent/internal/config"
+	"github.com/dynasmon/Seagull-agent/internal/controlplane"
+	"github.com/dynasmon/Seagull-agent/internal/sources"
 )
 
 func TestRecoverIdentitySerializesConcurrentAttempts(t *testing.T) {

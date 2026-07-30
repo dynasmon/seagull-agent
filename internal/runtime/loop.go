@@ -4,9 +4,9 @@ import (
 	"context"
 	"time"
 
-	agentcfg "gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/config"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/mathx"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/sources"
+	agentcfg "github.com/dynasmon/Seagull-agent/internal/config"
+	"github.com/dynasmon/Seagull-agent/internal/mathx"
+	"github.com/dynasmon/Seagull-agent/internal/sources"
 )
 
 func (s *Service) loop(rootCtx context.Context) {

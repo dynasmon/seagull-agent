@@ -13,10 +13,10 @@ import (
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/pcapx"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/mathx"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/netcontext"
+	"github.com/dynasmon/Seagull-agent/internal/collectors/pcapx"
+	"github.com/dynasmon/Seagull-agent/internal/mathx"
+	"github.com/dynasmon/Seagull-agent/internal/netcontext"
+	"github.com/dynasmon/Seagull-agent/internal/protocol"
 )
 
 type PcapDDoSOptions struct {
@@ -85,7 +85,7 @@ type PcapDDoSCapturer struct {
 	netCtx *netcontext.NetworkContext
 
 	mu  sync.Mutex
-	buf []model.NetEvent
+	buf []protocol.NetEvent
 	// bufLen mirrors len(buf) and is read on the hot path without lock contention.
 	bufLen int64
 
@@ -155,7 +155,7 @@ func NewPcapDDoSCapturer(agentID string, opts PcapDDoSOptions) (*PcapDDoSCapture
 		agentID:     agentID,
 		opts:        opts,
 		netCtx:      nc,
-		buf:         make([]model.NetEvent, 0, 1024),
+		buf:         make([]protocol.NetEvent, 0, 1024),
 		windowStart: time.Now().UTC(),
 		aggs:        make(map[aggKey]*agg, 256),
 	}, nil
@@ -311,21 +311,21 @@ func (c *PcapDDoSCapturer) Start(ctx context.Context) error {
 	}
 }
 
-func (c *PcapDDoSCapturer) Drain() []model.NetEvent {
+func (c *PcapDDoSCapturer) Drain() []protocol.NetEvent {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if len(c.buf) == 0 {
 		return nil
 	}
-	out := make([]model.NetEvent, len(c.buf))
+	out := make([]protocol.NetEvent, len(c.buf))
 	copy(out, c.buf)
 	c.buf = c.buf[:0]
 	atomic.StoreInt64(&c.bufLen, 0)
 	return out
 }
 
-func (c *PcapDDoSCapturer) push(ev model.NetEvent) {
+func (c *PcapDDoSCapturer) push(ev protocol.NetEvent) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if len(c.buf) >= c.opts.MaxBatchSize {
@@ -637,7 +637,7 @@ func (c *PcapDDoSCapturer) rotateIfNeeded(now time.Time) {
 		}
 
 		if shouldEmit {
-			ev := model.NetEvent{
+			ev := protocol.NetEvent{
 				AgentID:   c.agentID,
 				EventType: "dos_attack",
 				Timestamp: now,

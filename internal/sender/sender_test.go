@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/spool"
+	"github.com/dynasmon/Seagull-agent/internal/protocol"
+	"github.com/dynasmon/Seagull-agent/internal/spool"
 )
 
 func newTestSender(t *testing.T, baseURL string) (*Sender, *spool.Spool) {
@@ -43,7 +43,7 @@ func TestSendEventsSpoolsBatchWhenBackendIsUnavailable(t *testing.T) {
 	defer server.Close()
 
 	s, sp := newTestSender(t, server.URL)
-	events := []model.NetEvent{{AgentID: "agent-test-1", EventType: "flow", Timestamp: time.Now().UTC()}}
+	events := []protocol.NetEvent{{AgentID: "agent-test-1", EventType: "flow", Timestamp: time.Now().UTC()}}
 
 	if _, err := s.SendEvents(context.Background(), events); err == nil {
 		t.Fatal("expected send failure while backend is down")
@@ -87,7 +87,7 @@ func TestClientErrorsAreNotSpooled(t *testing.T) {
 	defer server.Close()
 
 	s, sp := newTestSender(t, server.URL)
-	events := []model.NetEvent{{AgentID: "agent-test-1", EventType: "flow", Timestamp: time.Now().UTC()}}
+	events := []protocol.NetEvent{{AgentID: "agent-test-1", EventType: "flow", Timestamp: time.Now().UTC()}}
 
 	if _, err := s.SendEvents(context.Background(), events); err == nil {
 		t.Fatal("expected 401 to surface as error")

@@ -5,9 +5,9 @@ import (
 	"strings"
 	"time"
 
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/certrenew"
-	agentcfg "gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/config"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/jitter"
+	"github.com/dynasmon/Seagull-agent/internal/certrenew"
+	agentcfg "github.com/dynasmon/Seagull-agent/internal/config"
+	"github.com/dynasmon/Seagull-agent/internal/jitter"
 )
 
 func (s *Service) startCertificateRotation(rootCtx context.Context) {

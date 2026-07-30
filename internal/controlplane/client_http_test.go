@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/agentauth"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/controlplane"
+	"github.com/dynasmon/Seagull-agent/internal/agentauth"
+	"github.com/dynasmon/Seagull-agent/internal/controlplane"
 )
 
 func TestEnrollOK(t *testing.T) {

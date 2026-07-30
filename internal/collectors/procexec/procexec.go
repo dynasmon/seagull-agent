@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
+	"github.com/dynasmon/Seagull-agent/internal/protocol"
 )
 
 const (
@@ -149,7 +149,7 @@ func applyDefaults(o *Options) {
 	}
 }
 
-func (c *Capturer) Capture(now time.Time) ([]model.NetEvent, error) {
+func (c *Capturer) Capture(now time.Time) ([]protocol.NetEvent, error) {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
@@ -170,7 +170,7 @@ func (c *Capturer) Capture(now time.Time) ([]model.NetEvent, error) {
 	}
 	live := make(map[int]uint64, len(pids))
 
-	out := make([]model.NetEvent, 0, min(len(pids), c.opts.MaxBatchSize))
+	out := make([]protocol.NetEvent, 0, min(len(pids), c.opts.MaxBatchSize))
 	for _, pid := range pids {
 		if len(out) >= c.opts.MaxBatchSize {
 			break
@@ -457,7 +457,7 @@ func (c *Capturer) resolveUsername(uid uint32, now time.Time) string {
 	return name
 }
 
-func (c *Capturer) toEvent(info *procInfo, now time.Time) model.NetEvent {
+func (c *Capturer) toEvent(info *procInfo, now time.Time) protocol.NetEvent {
 	startAt := c.bootTime.Add(time.Duration(float64(info.stat.StartTicks)/defaultStartTimeHz) * time.Second).UTC()
 	cmdline := strings.TrimSpace(info.cmdline)
 	if cmdline == "" {
@@ -503,7 +503,7 @@ func (c *Capturer) toEvent(info *procInfo, now time.Time) model.NetEvent {
 		}
 	}
 
-	return model.NetEvent{
+	return protocol.NetEvent{
 		AgentID:   c.agentID,
 		EventType: "proc_exec",
 		Timestamp: now,

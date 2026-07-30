@@ -12,9 +12,9 @@ import (
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/pcapx"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/netcontext"
+	"github.com/dynasmon/Seagull-agent/internal/collectors/pcapx"
+	"github.com/dynasmon/Seagull-agent/internal/netcontext"
+	"github.com/dynasmon/Seagull-agent/internal/protocol"
 )
 
 type PcapL7Options struct {
@@ -114,15 +114,15 @@ func (c *PcapL7Capturer) Start(ctx context.Context) error {
 	}
 }
 
-func (c *PcapL7Capturer) Drain() []model.NetEvent {
+func (c *PcapL7Capturer) Drain() []protocol.NetEvent {
 	return c.buffer.Drain()
 }
 
-func (c *PcapL7Capturer) push(ev model.NetEvent) {
+func (c *PcapL7Capturer) push(ev protocol.NetEvent) {
 	c.buffer.Push(c.dedupKey(ev), ev)
 }
 
-func (c *PcapL7Capturer) dedupKey(ev model.NetEvent) string {
+func (c *PcapL7Capturer) dedupKey(ev protocol.NetEvent) string {
 	extra := ev.Extra
 	if extra == nil {
 		extra = map[string]interface{}{}
@@ -133,7 +133,7 @@ func (c *PcapL7Capturer) dedupKey(ev model.NetEvent) string {
 	)
 }
 
-func (c *PcapL7Capturer) packetToEvent(pkt gopacket.Packet) *model.NetEvent {
+func (c *PcapL7Capturer) packetToEvent(pkt gopacket.Packet) *protocol.NetEvent {
 	ts := time.Now().UTC()
 	if meta := pkt.Metadata(); meta != nil && !meta.Timestamp.IsZero() {
 		ts = meta.Timestamp.UTC()
@@ -235,7 +235,7 @@ func (c *PcapL7Capturer) packetToEvent(pkt gopacket.Packet) *model.NetEvent {
 
 	c.netCtx.EnrichEndpoints(evidence, srcS, dstS)
 
-	return &model.NetEvent{
+	return &protocol.NetEvent{
 		AgentID:   c.agentID,
 		EventType: "l7_flow",
 		Timestamp: ts,

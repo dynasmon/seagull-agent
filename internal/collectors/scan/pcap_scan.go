@@ -11,9 +11,9 @@ import (
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/pcapx"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/netcontext"
+	"github.com/dynasmon/Seagull-agent/internal/collectors/pcapx"
+	"github.com/dynasmon/Seagull-agent/internal/netcontext"
+	"github.com/dynasmon/Seagull-agent/internal/protocol"
 )
 
 type PcapScanOptions struct {
@@ -157,11 +157,11 @@ func (c *PcapScanCapturer) buildBPF() string {
 	return strings.Join(parts, " or ")
 }
 
-func (c *PcapScanCapturer) Drain() []model.NetEvent {
+func (c *PcapScanCapturer) Drain() []protocol.NetEvent {
 	return c.buffer.Drain()
 }
 
-func (c *PcapScanCapturer) push(ev model.NetEvent) {
+func (c *PcapScanCapturer) push(ev protocol.NetEvent) {
 	if ev.Extra == nil {
 		ev.Extra = map[string]interface{}{}
 	}
@@ -179,7 +179,7 @@ func (c *PcapScanCapturer) push(ev model.NetEvent) {
 	c.buffer.Push(key, ev)
 }
 
-func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *model.NetEvent {
+func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *protocol.NetEvent {
 	ts := pkt.Metadata().Timestamp.UTC()
 
 	var srcIP, dstIP string
@@ -210,7 +210,7 @@ func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *mod
 				return nil
 			}
 
-			return &model.NetEvent{
+			return &protocol.NetEvent{
 				AgentID:   c.agentID,
 				EventType: "scan_probe",
 				Timestamp: ts,
@@ -256,7 +256,7 @@ func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *mod
 			return nil
 		}
 
-		return &model.NetEvent{
+		return &protocol.NetEvent{
 			AgentID:   c.agentID,
 			EventType: "scan_probe",
 			Timestamp: ts,
@@ -294,7 +294,7 @@ func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *mod
 			return nil
 		}
 
-		return &model.NetEvent{
+		return &protocol.NetEvent{
 			AgentID:   c.agentID,
 			EventType: "scan_probe",
 			Timestamp: ts,
@@ -337,7 +337,7 @@ func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *mod
 				return nil
 			}
 
-			return &model.NetEvent{
+			return &protocol.NetEvent{
 				AgentID:   c.agentID,
 				EventType: "scan_probe",
 				Timestamp: ts,
@@ -366,7 +366,7 @@ func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *mod
 				return nil
 			}
 
-			return &model.NetEvent{
+			return &protocol.NetEvent{
 				AgentID:   c.agentID,
 				EventType: "scan_probe",
 				Timestamp: ts,

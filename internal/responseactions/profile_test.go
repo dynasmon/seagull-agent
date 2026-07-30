@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	agentcfg "gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/config"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/controlplane"
+	agentcfg "github.com/dynasmon/Seagull-agent/internal/config"
+	"github.com/dynasmon/Seagull-agent/internal/controlplane"
 )
 
 func TestSensorProfileRefusesResponseActions(t *testing.T) {

@@ -3,8 +3,8 @@ package sources
 import (
 	"time"
 
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/mathx"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
+	"github.com/dynasmon/Seagull-agent/internal/mathx"
+	"github.com/dynasmon/Seagull-agent/internal/protocol"
 )
 
 type ScanStats struct {
@@ -17,7 +17,7 @@ type ScanStats struct {
 	Score          int
 }
 
-func computeScanStats(scanEvents []model.NetEvent) ScanStats {
+func computeScanStats(scanEvents []protocol.NetEvent) ScanStats {
 	if len(scanEvents) == 0 {
 		return ScanStats{Class: "none"}
 	}
@@ -117,7 +117,7 @@ type scanAgg struct {
 	scanTypes map[string]bool
 }
 
-func buildScanSummaries(agentID string, scanEvents []model.NetEvent, window time.Duration) []model.NetEvent {
+func buildScanSummaries(agentID string, scanEvents []protocol.NetEvent, window time.Duration) []protocol.NetEvent {
 	if len(scanEvents) == 0 {
 		return nil
 	}
@@ -156,7 +156,7 @@ func buildScanSummaries(agentID string, scanEvents []model.NetEvent, window time
 		}
 	}
 
-	out := make([]model.NetEvent, 0, len(m))
+	out := make([]protocol.NetEvent, 0, len(m))
 	now := time.Now().UTC()
 
 	windowSec := int(window.Seconds())
@@ -174,7 +174,7 @@ func buildScanSummaries(agentID string, scanEvents []model.NetEvent, window time
 			sshRatio = float64(a.sshHits) / float64(a.total)
 		}
 
-		out = append(out, model.NetEvent{
+		out = append(out, protocol.NetEvent{
 			AgentID:   agentID,
 			EventType: "scan_summary",
 			Timestamp: now,

@@ -5,14 +5,14 @@ import (
 	"net/http"
 	"time"
 
-	agentcfg "gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/config"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/controlplane"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/enrollment"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/responseactions"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/sender"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/sources"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/spool"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/transport"
+	agentcfg "github.com/dynasmon/Seagull-agent/internal/config"
+	"github.com/dynasmon/Seagull-agent/internal/controlplane"
+	"github.com/dynasmon/Seagull-agent/internal/enrollment"
+	"github.com/dynasmon/Seagull-agent/internal/responseactions"
+	"github.com/dynasmon/Seagull-agent/internal/sender"
+	"github.com/dynasmon/Seagull-agent/internal/sources"
+	"github.com/dynasmon/Seagull-agent/internal/spool"
+	"github.com/dynasmon/Seagull-agent/internal/transport"
 )
 
 type SummaryState struct {

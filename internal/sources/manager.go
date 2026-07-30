@@ -6,16 +6,16 @@ import (
 	"sync"
 	"time"
 
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/ddos"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/fim"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/l7"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/lateral"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/proc"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/procexec"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/scan"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/ssh"
-	agentcfg "gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/config"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/sender"
+	"github.com/dynasmon/Seagull-agent/internal/collectors/ddos"
+	"github.com/dynasmon/Seagull-agent/internal/collectors/fim"
+	"github.com/dynasmon/Seagull-agent/internal/collectors/l7"
+	"github.com/dynasmon/Seagull-agent/internal/collectors/lateral"
+	"github.com/dynasmon/Seagull-agent/internal/collectors/proc"
+	"github.com/dynasmon/Seagull-agent/internal/collectors/procexec"
+	"github.com/dynasmon/Seagull-agent/internal/collectors/scan"
+	"github.com/dynasmon/Seagull-agent/internal/collectors/ssh"
+	agentcfg "github.com/dynasmon/Seagull-agent/internal/config"
+	"github.com/dynasmon/Seagull-agent/internal/sender"
 )
 
 type Manager struct {

@@ -4,10 +4,10 @@ import (
 	"context"
 	"time"
 
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/syscollector"
-	agentcfg "gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/config"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/jitter"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/netcontext"
+	"github.com/dynasmon/Seagull-agent/internal/collectors/syscollector"
+	agentcfg "github.com/dynasmon/Seagull-agent/internal/config"
+	"github.com/dynasmon/Seagull-agent/internal/jitter"
+	"github.com/dynasmon/Seagull-agent/internal/netcontext"
 )
 
 type SyscollectorStatus struct {

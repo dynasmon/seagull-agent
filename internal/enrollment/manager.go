@@ -9,11 +9,11 @@ import (
 	"sync"
 	"time"
 
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/buildinfo"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/certrenew"
-	agentcfg "gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/config"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/controlplane"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/sources"
+	"github.com/dynasmon/Seagull-agent/internal/buildinfo"
+	"github.com/dynasmon/Seagull-agent/internal/certrenew"
+	agentcfg "github.com/dynasmon/Seagull-agent/internal/config"
+	"github.com/dynasmon/Seagull-agent/internal/controlplane"
+	"github.com/dynasmon/Seagull-agent/internal/sources"
 )
 
 type Manager struct {

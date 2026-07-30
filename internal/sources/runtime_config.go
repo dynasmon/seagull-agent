@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	agentcfg "gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/config"
+	agentcfg "github.com/dynasmon/Seagull-agent/internal/config"
 )
 
 type SyscollectorConfig struct {

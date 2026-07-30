@@ -5,20 +5,20 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dynasmon/Seagull-agent/internal/collectors/pcapx"
+	"github.com/dynasmon/Seagull-agent/internal/protocol"
 	"github.com/google/gopacket/layers"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/pcapx"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
 )
 
 func TestBufferDedupAndDrain(t *testing.T) {
 	b := pcapx.NewBuffer(time.Minute, 10)
-	if !b.Push("k1", model.NetEvent{}) {
+	if !b.Push("k1", protocol.NetEvent{}) {
 		t.Fatal("first push should be added")
 	}
-	if b.Push("k1", model.NetEvent{}) {
+	if b.Push("k1", protocol.NetEvent{}) {
 		t.Fatal("duplicate within ttl should be dropped")
 	}
-	if !b.Push("k2", model.NetEvent{}) {
+	if !b.Push("k2", protocol.NetEvent{}) {
 		t.Fatal("distinct key should be added")
 	}
 	out := b.Drain()
@@ -32,10 +32,10 @@ func TestBufferDedupAndDrain(t *testing.T) {
 
 func TestBufferBatchCap(t *testing.T) {
 	b := pcapx.NewBuffer(time.Minute, 1)
-	if !b.Push("a", model.NetEvent{}) {
+	if !b.Push("a", protocol.NetEvent{}) {
 		t.Fatal("first push should be added")
 	}
-	if b.Push("b", model.NetEvent{}) {
+	if b.Push("b", protocol.NetEvent{}) {
 		t.Fatal("push beyond maxBatch should be dropped")
 	}
 }

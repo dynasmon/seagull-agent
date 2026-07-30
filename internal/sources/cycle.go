@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	agentcfg "gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/config"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
+	agentcfg "github.com/dynasmon/Seagull-agent/internal/config"
+	"github.com/dynasmon/Seagull-agent/internal/protocol"
 )
 
 type CycleResult struct {
@@ -32,9 +32,9 @@ type CycleResult struct {
 func (m *Manager) RunOnce(rootCtx context.Context) *CycleResult {
 	start := time.Now().UTC()
 
-	events := make([]model.NetEvent, 0, 1024)
-	scanRaw := make([]model.NetEvent, 0, 1024)
-	ddosEvs := make([]model.NetEvent, 0, 64)
+	events := make([]protocol.NetEvent, 0, 1024)
+	scanRaw := make([]protocol.NetEvent, 0, 1024)
+	ddosEvs := make([]protocol.NetEvent, 0, 64)
 
 	if m.authCapturer != nil {
 		evs, err := m.authCapturer.Capture(time.Now().UTC())
@@ -202,7 +202,7 @@ func (m *Manager) RunOnce(rootCtx context.Context) *CycleResult {
 	return res
 }
 
-func normalizeEvents(events []model.NetEvent, fallbackAgentID string) {
+func normalizeEvents(events []protocol.NetEvent, fallbackAgentID string) {
 	if len(events) == 0 {
 		return
 	}

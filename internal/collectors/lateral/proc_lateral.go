@@ -3,8 +3,8 @@ package lateral
 import (
 	"time"
 
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/collectors/proc"
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/model"
+	"github.com/dynasmon/Seagull-agent/internal/collectors/proc"
+	"github.com/dynasmon/Seagull-agent/internal/protocol"
 )
 
 func lateralConfidence(kind string, dstPort int, stateHex string) int {
@@ -72,13 +72,13 @@ func NewProcLateralCapturer(agentID, tcp4Path, tcp6Path string, procOpts proc.Op
 	}
 }
 
-func (c *ProcLateralCapturer) Capture() ([]model.NetEvent, error) {
+func (c *ProcLateralCapturer) Capture() ([]protocol.NetEvent, error) {
 	evs, err := c.inner.Capture()
 	if err != nil || len(evs) == 0 {
 		return evs, err
 	}
 
-	out := make([]model.NetEvent, 0, min(c.maxBatch, len(evs)))
+	out := make([]protocol.NetEvent, 0, min(c.maxBatch, len(evs)))
 
 	for i := range evs {
 		if len(out) >= c.maxBatch {

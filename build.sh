@@ -2,7 +2,7 @@
 set -euo pipefail
 
 AGENT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-MODULE_PATH="gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/buildinfo"
+MODULE_PATH="github.com/dynasmon/Seagull-agent/internal/buildinfo"
 
 VERSION="${SEAGULL_AGENT_VERSION:-}"
 CHANNEL="${SEAGULL_AGENT_CHANNEL:-dev}"

@@ -3,7 +3,7 @@ package mathx_test
 import (
 	"testing"
 
-	"gitlab.com/nathanmblima/dynasmon-seagull/agent/internal/mathx"
+	"github.com/dynasmon/Seagull-agent/internal/mathx"
 )
 
 func TestRound2Truncates(t *testing.T) {

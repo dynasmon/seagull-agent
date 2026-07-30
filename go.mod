@@ -1,4 +1,4 @@
-module gitlab.com/nathanmblima/dynasmon-seagull/agent
+module github.com/dynasmon/Seagull-agent
 
 go 1.22
 
