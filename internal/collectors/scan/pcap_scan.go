@@ -1,0 +1,455 @@
+package scan
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"strings"
+	"time"
+
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
+	"github.com/google/gopacket/pcap"
+
+	"github.com/dynasmon/Seagull-agent/internal/collectors/pcapx"
+	"github.com/dynasmon/Seagull-agent/internal/netcontext"
+	"github.com/dynasmon/Seagull-agent/protocol"
+)
+
+type PcapScanOptions struct {
+	Interface   string
+	SnapLen     int
+	Promisc     bool
+	ReadTimeout time.Duration
+
+	DedupTTL     time.Duration
+	MaxBatchSize int
+
+	SkipLoopback  bool
+	SkipLinkLocal bool
+
+	DenyCIDRs    []*net.IPNet
+	DenyDstPorts map[int]bool
+	DenySrcPorts map[int]bool
+
+	// Reduces UDP reply noise (NTP/DNS/etc). If true, drops inbound UDP where dst port is ephemeral.
+	DropUDPEphemeral bool
+	EphemeralPortMin int
+
+	IncludeARP    bool
+	IncludeICMP   bool
+	IncludeICMPv6 bool
+	IncludeTCPAck bool
+}
+
+type PcapScanCapturer struct {
+	agentID string
+	opts    PcapScanOptions
+
+	netCtx *netcontext.NetworkContext
+
+	buffer *pcapx.Buffer
+}
+
+func NewPcapScanCapturer(agentID string, opts PcapScanOptions) (*PcapScanCapturer, error) {
+	applyPcapDefaults(&opts)
+
+	nc, err := netcontext.Collect(netcontext.Caps{})
+	if err != nil {
+		return nil, err
+	}
+	if len(nc.LocalIPs) == 0 {
+		return nil, fmt.Errorf("no local IPs detected")
+	}
+
+	return &PcapScanCapturer{
+		agentID: agentID,
+		opts:    opts,
+		netCtx:  nc,
+		buffer:  pcapx.NewBuffer(opts.DedupTTL, opts.MaxBatchSize),
+	}, nil
+}
+
+func applyPcapDefaults(o *PcapScanOptions) {
+	if o.SnapLen <= 0 {
+		o.SnapLen = 128
+	}
+	if o.ReadTimeout <= 0 {
+		o.ReadTimeout = 500 * time.Millisecond
+	}
+	if o.DedupTTL <= 0 {
+		o.DedupTTL = 2 * time.Second
+	}
+	if o.MaxBatchSize <= 0 {
+		o.MaxBatchSize = 2000
+	}
+	if o.DenyDstPorts == nil {
+		o.DenyDstPorts = map[int]bool{}
+	}
+	if o.DenySrcPorts == nil {
+		o.DenySrcPorts = map[int]bool{}
+	}
+
+	if o.EphemeralPortMin <= 0 {
+		o.EphemeralPortMin = 49152
+	}
+
+	// Default to dropping UDP replies to ephemeral ports (big noise reducer in VMs and desktops).
+	if !o.DropUDPEphemeral {
+		o.DropUDPEphemeral = true
+	}
+
+	// Defaults focused on low-noise scan detection
+	if !o.IncludeICMP && !o.IncludeICMPv6 {
+		o.IncludeICMP = true
+		o.IncludeICMPv6 = true
+	}
+	// ARP is very noisy in real networks; keep it opt-in.
+	// ACK-only is also noisy; keep it opt-in.
+}
+
+func (c *PcapScanCapturer) Start(ctx context.Context) error {
+	iface := strings.TrimSpace(c.opts.Interface)
+	if iface == "" {
+		iface = "any"
+	}
+
+	handle, err := pcap.OpenLive(iface, int32(c.opts.SnapLen), c.opts.Promisc, c.opts.ReadTimeout)
+	if err != nil {
+		return fmt.Errorf("pcap open iface=%s: %w", iface, err)
+	}
+	defer handle.Close()
+
+	bpf := c.buildBPF()
+	if err := handle.SetBPFFilter(bpf); err != nil {
+		return fmt.Errorf("pcap bpf set (%s): %w", bpf, err)
+	}
+
+	src := gopacket.NewPacketSource(handle, handle.LinkType())
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+			pkt, err := src.NextPacket()
+			if err != nil {
+				continue
+			}
+			if ev := c.packetToEvent(pkt, iface); ev != nil {
+				c.push(*ev)
+			}
+		}
+	}
+}
+
+func (c *PcapScanCapturer) buildBPF() string {
+	parts := []string{"tcp", "udp"}
+	if c.opts.IncludeICMP {
+		parts = append(parts, "icmp")
+	}
+	if c.opts.IncludeICMPv6 {
+		parts = append(parts, "icmp6")
+	}
+	if c.opts.IncludeARP {
+		parts = append(parts, "arp")
+	}
+	return strings.Join(parts, " or ")
+}
+
+func (c *PcapScanCapturer) Drain() []protocol.NetEvent {
+	return c.buffer.Drain()
+}
+
+func (c *PcapScanCapturer) push(ev protocol.NetEvent) {
+	if ev.Extra == nil {
+		ev.Extra = map[string]interface{}{}
+	}
+	c.netCtx.EnrichEndpoints(ev.Extra, ev.SrcIP, ev.DstIP)
+
+	scanType := ""
+	if st, ok := ev.Extra["scan_type"].(string); ok {
+		scanType = st
+	}
+
+	key := fmt.Sprintf("%s|%s|%s|%d|%d|%s",
+		ev.Proto, ev.SrcIP, ev.DstIP, ev.SrcPort, ev.DstPort, scanType,
+	)
+
+	c.buffer.Push(key, ev)
+}
+
+func (c *PcapScanCapturer) packetToEvent(pkt gopacket.Packet, iface string) *protocol.NetEvent {
+	ts := pkt.Metadata().Timestamp.UTC()
+
+	var srcIP, dstIP string
+	var ipVersion int
+
+	if ip4 := pkt.Layer(layers.LayerTypeIPv4); ip4 != nil {
+		l := ip4.(*layers.IPv4)
+		srcIP, dstIP = l.SrcIP.String(), l.DstIP.String()
+		ipVersion = 4
+	} else if ip6 := pkt.Layer(layers.LayerTypeIPv6); ip6 != nil {
+		l := ip6.(*layers.IPv6)
+		srcIP, dstIP = l.SrcIP.String(), l.DstIP.String()
+		ipVersion = 6
+	} else if c.opts.IncludeARP {
+		if arpL := pkt.Layer(layers.LayerTypeARP); arpL != nil {
+			arp := arpL.(*layers.ARP)
+			if arp.Operation != layers.ARPRequest {
+				return nil
+			}
+
+			src := net.IP(arp.SourceProtAddress).String()
+			dst := net.IP(arp.DstProtAddress).String()
+
+			if !c.netCtx.LocalIPs[dst] {
+				return nil
+			}
+			if c.shouldDrop(src, dst, 0, 0) {
+				return nil
+			}
+
+			return &protocol.NetEvent{
+				AgentID:   c.agentID,
+				EventType: "scan_probe",
+				Timestamp: ts,
+				SrcIP:     src,
+				DstIP:     dst,
+				Proto:     "arp",
+				Bytes:     len(pkt.Data()),
+				Extra: map[string]interface{}{
+					"scan_type":       "arp_request",
+					"iface":           iface,
+					"ip_version":      0,
+					"collector":       "pcap_scan",
+					"signal_family":   "scan",
+					"scan_confidence": scanConfidenceForType("arp_request"),
+				},
+			}
+		}
+		return nil
+	} else {
+		return nil
+	}
+
+	// Only inbound-to-host signals (dst is one of our local IPs)
+	if !c.netCtx.LocalIPs[dstIP] {
+		return nil
+	}
+	if c.shouldDrop(srcIP, dstIP, 0, 0) {
+		return nil
+	}
+
+	if tcpL := pkt.Layer(layers.LayerTypeTCP); tcpL != nil {
+		tcp := tcpL.(*layers.TCP)
+
+		srcPort := int(tcp.SrcPort)
+		dstPort := int(tcp.DstPort)
+
+		if c.shouldDrop(srcIP, dstIP, srcPort, dstPort) {
+			return nil
+		}
+
+		scanType := classifyTCP(tcp, c.opts.IncludeTCPAck)
+		if scanType == "" {
+			return nil
+		}
+
+		return &protocol.NetEvent{
+			AgentID:   c.agentID,
+			EventType: "scan_probe",
+			Timestamp: ts,
+			SrcIP:     srcIP,
+			DstIP:     dstIP,
+			SrcPort:   srcPort,
+			DstPort:   dstPort,
+			Proto:     "tcp",
+			Bytes:     len(pkt.Data()),
+			Extra: map[string]interface{}{
+				"scan_type":       scanType,
+				"iface":           iface,
+				"ip_version":      ipVersion,
+				"tcp_flags":       pcapx.TCPFlags(tcp),
+				"collector":       "pcap_scan",
+				"signal_family":   "scan",
+				"scan_confidence": scanConfidenceForTCP(scanType, srcPort, dstPort),
+				"syn_only":        scanType == "tcp_syn",
+			},
+		}
+	}
+
+	if udpL := pkt.Layer(layers.LayerTypeUDP); udpL != nil {
+		udp := udpL.(*layers.UDP)
+
+		srcPort := int(udp.SrcPort)
+		dstPort := int(udp.DstPort)
+
+		// Drop common UDP reply noise (host-initiated traffic responses) to ephemeral ports.
+		if c.opts.DropUDPEphemeral && dstPort >= c.opts.EphemeralPortMin {
+			return nil
+		}
+
+		if c.shouldDrop(srcIP, dstIP, srcPort, dstPort) {
+			return nil
+		}
+
+		return &protocol.NetEvent{
+			AgentID:   c.agentID,
+			EventType: "scan_probe",
+			Timestamp: ts,
+			SrcIP:     srcIP,
+			DstIP:     dstIP,
+			SrcPort:   srcPort,
+			DstPort:   dstPort,
+			Proto:     "udp",
+			Bytes:     len(pkt.Data()),
+			Extra: map[string]interface{}{
+				"scan_type":     "udp_probe",
+				"iface":         iface,
+				"ip_version":    ipVersion,
+				"collector":     "pcap_scan",
+				"signal_family": "scan",
+				"scan_confidence": func() int {
+					conf := scanConfidenceForType("udp_probe")
+					if srcPort >= 49152 {
+						conf += 3
+					}
+					switch dstPort {
+					case 53, 161, 1900:
+						conf -= 8
+					case 123:
+						conf -= 10
+					}
+					if conf < 20 {
+						conf = 20
+					}
+					return conf
+				}(),
+			},
+		}
+	}
+
+	if c.opts.IncludeICMP {
+		if icmp4L := pkt.Layer(layers.LayerTypeICMPv4); icmp4L != nil {
+			icmp := icmp4L.(*layers.ICMPv4)
+			if icmp.TypeCode.Type() != layers.ICMPv4TypeEchoRequest {
+				return nil
+			}
+
+			return &protocol.NetEvent{
+				AgentID:   c.agentID,
+				EventType: "scan_probe",
+				Timestamp: ts,
+				SrcIP:     srcIP,
+				DstIP:     dstIP,
+				Proto:     "icmp",
+				Bytes:     len(pkt.Data()),
+				Extra: map[string]interface{}{
+					"scan_type":       "icmp_echo",
+					"iface":           iface,
+					"ip_version":      ipVersion,
+					"icmp_type":       int(icmp.TypeCode.Type()),
+					"icmp_code":       int(icmp.TypeCode.Code()),
+					"collector":       "pcap_scan",
+					"signal_family":   "scan",
+					"scan_confidence": scanConfidenceForType("icmp_echo"),
+				},
+			}
+		}
+	}
+
+	if c.opts.IncludeICMPv6 {
+		if icmp6L := pkt.Layer(layers.LayerTypeICMPv6); icmp6L != nil {
+			icmp := icmp6L.(*layers.ICMPv6)
+			if icmp.TypeCode.Type() != layers.ICMPv6TypeEchoRequest {
+				return nil
+			}
+
+			return &protocol.NetEvent{
+				AgentID:   c.agentID,
+				EventType: "scan_probe",
+				Timestamp: ts,
+				SrcIP:     srcIP,
+				DstIP:     dstIP,
+				Proto:     "icmp6",
+				Bytes:     len(pkt.Data()),
+				Extra: map[string]interface{}{
+					"scan_type":       "icmp6_echo",
+					"iface":           iface,
+					"ip_version":      ipVersion,
+					"icmp_type":       int(icmp.TypeCode.Type()),
+					"icmp_code":       int(icmp.TypeCode.Code()),
+					"collector":       "pcap_scan",
+					"signal_family":   "scan",
+					"scan_confidence": scanConfidenceForType("icmp6_echo"),
+				},
+			}
+		}
+	}
+
+	return nil
+}
+
+func (c *PcapScanCapturer) shouldDrop(srcIP, dstIP string, srcPort, dstPort int) bool {
+	if srcPort > 0 && c.opts.DenySrcPorts[srcPort] {
+		return true
+	}
+	if dstPort > 0 && c.opts.DenyDstPorts[dstPort] {
+		return true
+	}
+	return pcapx.DropByIP(srcIP, dstIP, c.opts.SkipLoopback, c.opts.SkipLinkLocal, false, c.opts.DenyCIDRs)
+}
+
+func classifyTCP(t *layers.TCP, includeAck bool) string {
+	if t.SYN && !t.ACK {
+		return "tcp_syn"
+	}
+	if t.FIN && !t.SYN && !t.RST && !t.ACK && !t.PSH && !t.URG {
+		return "tcp_fin"
+	}
+	if !t.SYN && !t.ACK && !t.FIN && !t.RST && !t.PSH && !t.URG {
+		return "tcp_null"
+	}
+	if t.FIN && t.PSH && t.URG {
+		return "tcp_xmas"
+	}
+	if includeAck && t.ACK && !t.SYN && !t.FIN && !t.RST && !t.PSH && !t.URG {
+		return "tcp_ack"
+	}
+	return ""
+}
+
+func scanConfidenceForType(scanType string) int {
+	switch scanType {
+	case "tcp_syn":
+		return 85
+	case "tcp_fin", "tcp_null", "tcp_xmas":
+		return 90
+	case "tcp_ack":
+		return 55
+	case "udp_probe":
+		return 45
+	case "icmp_echo", "icmp6_echo":
+		return 40
+	case "arp_request":
+		return 35
+	default:
+		return 30
+	}
+}
+
+func scanConfidenceForTCP(scanType string, srcPort, dstPort int) int {
+	conf := scanConfidenceForType(scanType)
+	if srcPort >= 49152 {
+		conf += 4
+	}
+	switch dstPort {
+	case 22, 135, 139, 445, 3389, 5985, 5986:
+		conf += 6
+	}
+	if conf > 95 {
+		conf = 95
+	}
+	return conf
+}

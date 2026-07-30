@@ -1,0 +1,76 @@
+SEAGULL_LOG_PREFIX="${SEAGULL_LOG_PREFIX:-seagull-agent}"
+
+log() {
+  printf '[%s] %s\n' "${SEAGULL_LOG_PREFIX}" "$*"
+}
+
+warn() {
+  printf '[%s] warning: %s\n' "${SEAGULL_LOG_PREFIX}" "$*" >&2
+}
+
+die() {
+  printf '[%s] error: %s\n' "${SEAGULL_LOG_PREFIX}" "$*" >&2
+  exit 1
+}
+
+trim() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "${s}"
+}
+
+install_root() {
+  local root="${SEAGULL_INSTALL_ROOT:-/}"
+  if [[ "${root}" != "/" ]]; then
+    root="${root%/}"
+  fi
+  printf '%s' "${root}"
+}
+
+rooted() {
+  local root
+  root="$(install_root)"
+  if [[ "${root}" == "/" ]]; then
+    printf '%s' "$1"
+    return
+  fi
+  printf '%s%s' "${root}" "$1"
+}
+
+is_staged_root() {
+  [[ "$(install_root)" != "/" ]]
+}
+
+require_root() {
+  if is_staged_root; then
+    return 0
+  fi
+  if [[ "${EUID}" -ne 0 ]]; then
+    die "run as root"
+  fi
+}
+
+have() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+systemd_available() {
+  if is_staged_root; then
+    return 1
+  fi
+  have systemctl
+}
+
+require_systemd() {
+  if is_staged_root; then
+    return 0
+  fi
+  if ! have systemctl; then
+    die "systemd is required by this installer"
+  fi
+}
+
+package_dir() {
+  printf '%s' "${SEAGULL_PACKAGE_DIR:?package directory is not set}"
+}
