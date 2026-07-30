@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	agentcfg "github.com/dynasmon/Seagull-agent/internal/config"
@@ -74,6 +75,28 @@ func NewKeyAndCSR(agentID string) ([]byte, []byte, error) {
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
 	return keyPEM, csrPEM, nil
+}
+
+func PersistServerCA(bundlePEM string, caFile string) (bool, error) {
+	bundle := strings.TrimSpace(bundlePEM)
+	target := strings.TrimSpace(caFile)
+	if bundle == "" || target == "" {
+		return false, nil
+	}
+	block, _ := pem.Decode([]byte(bundle))
+	if block == nil || block.Type != "CERTIFICATE" {
+		return false, errors.New("server CA bundle is not certificate PEM")
+	}
+	if _, err := x509.ParseCertificate(block.Bytes); err != nil {
+		return false, fmt.Errorf("parse server CA bundle: %w", err)
+	}
+	if existing, err := os.ReadFile(target); err == nil && strings.TrimSpace(string(existing)) == bundle {
+		return false, nil
+	}
+	if err := agentcfg.AtomicWriteFile(target, []byte(bundle+"\n"), 0o644); err != nil {
+		return false, fmt.Errorf("persist server CA: %w", err)
+	}
+	return true, nil
 }
 
 func PersistPair(certPEM, keyPEM []byte, certFile, keyFile string) error {

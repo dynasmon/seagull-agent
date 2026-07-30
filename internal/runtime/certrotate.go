@@ -98,6 +98,19 @@ func (s *Service) maybeRenewCertificate(rootCtx context.Context) {
 		return
 	}
 
+	if changed, err := certrenew.PersistServerCA(renewed.ServerCAPEM, s.cfg.TLSCAFile); err != nil {
+		agentcfg.LogJSON(agentcfg.LevelWarn, "agent_server_ca_persist_failed", map[string]interface{}{
+			"agent_id": s.cfg.AgentID,
+			"path":     s.cfg.TLSCAFile,
+			"error":    err.Error(),
+		})
+	} else if changed {
+		agentcfg.LogJSON(agentcfg.LevelInfo, "agent_server_ca_rotated", map[string]interface{}{
+			"agent_id": s.cfg.AgentID,
+			"path":     s.cfg.TLSCAFile,
+		})
+	}
+
 	s.state.CertRenewalsTotal++
 	s.state.CertLastRenewError = ""
 	agentcfg.LogJSON(agentcfg.LevelInfo, "agent_certificate_renewed", map[string]interface{}{

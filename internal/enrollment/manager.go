@@ -396,26 +396,21 @@ func (m *Manager) persistEnrollmentServerCA(issued *protocol.CertificateRenewal)
 	if issued == nil {
 		return
 	}
-	bundle := strings.TrimSpace(issued.ServerCAPEM)
-	caFile := strings.TrimSpace(m.cfg.TLSCAFile)
-	if bundle == "" || caFile == "" {
-		return
-	}
-	if existing, err := os.ReadFile(caFile); err == nil && strings.TrimSpace(string(existing)) == bundle {
-		return
-	}
-	if err := agentcfg.AtomicWriteFile(caFile, []byte(bundle+"\n"), 0o644); err != nil {
+	changed, err := certrenew.PersistServerCA(issued.ServerCAPEM, m.cfg.TLSCAFile)
+	if err != nil {
 		agentcfg.LogJSON(agentcfg.LevelWarn, "agent_enroll_server_ca_persist_failed", map[string]interface{}{
 			"agent_id": m.cfg.AgentID,
-			"path":     caFile,
+			"path":     m.cfg.TLSCAFile,
 			"error":    err.Error(),
 		})
 		return
 	}
-	agentcfg.LogJSON(agentcfg.LevelInfo, "agent_enroll_server_ca_persisted", map[string]interface{}{
-		"agent_id": m.cfg.AgentID,
-		"path":     caFile,
-	})
+	if changed {
+		agentcfg.LogJSON(agentcfg.LevelInfo, "agent_enroll_server_ca_persisted", map[string]interface{}{
+			"agent_id": m.cfg.AgentID,
+			"path":     m.cfg.TLSCAFile,
+		})
+	}
 }
 
 func (m *Manager) persistEnrollmentCertificate(issued *protocol.CertificateRenewal, keyPEM []byte, method string) {
