@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dynasmon/Seagull-agent/protocol"
+	"github.com/dynasmon/seagull-agent/protocol"
 )
 
 type StagedAction struct {
