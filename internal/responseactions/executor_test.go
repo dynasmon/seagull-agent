@@ -11,8 +11,21 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dynasmon/Seagull-agent/protocol"
+	"github.com/dynasmon/seagull-agent/protocol"
 )
+
+func testExecutable(t *testing.T, name string) string {
+	t.Helper()
+	path, err := exec.LookPath(name)
+	if err != nil {
+		t.Fatalf("resolve test executable %q: %v", name, err)
+	}
+	path, err = filepath.Abs(path)
+	if err != nil {
+		t.Fatalf("resolve absolute test executable %q: %v", name, err)
+	}
+	return path
+}
 
 func TestExecuteCollectTriageBundleSuccess(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
@@ -424,7 +437,7 @@ func TestExecuteBlockOutboundIPDryRunIptables(t *testing.T) {
 		t.Fatalf("expected iptables tool, got %v", out.Result["firewall_tool"])
 	}
 	rule, _ := out.Result["rule_text"].(string)
-	for _, want := range []string{"iptables -A OUTPUT", "-d 185.220.101.45", "-p tcp", "--dport 4444", "-j DROP", "--comment c2_block_incident_42"} {
+	for _, want := range []string{"iptables -A OUTPUT", "-d 185.220.101.45", "-p tcp", "--dport 4444", "-j DROP", "--comment c2_block_incident_42_"} {
 		if !strings.Contains(rule, want) {
 			t.Fatalf("rule_text missing %q: %s", want, rule)
 		}
@@ -472,7 +485,7 @@ func TestExecuteBlockOutboundIPDryRunNft(t *testing.T) {
 		t.Fatalf("expected nft tool, got %v", out.Result["firewall_tool"])
 	}
 	rule, _ := out.Result["rule_text"].(string)
-	for _, want := range []string{"nft add rule inet seagull output", "ip daddr 185.220.101.45", "udp dport 53", "drop", `comment "dns_block"`} {
+	for _, want := range []string{"nft add rule inet seagull output", "ip daddr 185.220.101.45", "udp dport 53", "drop", `comment "dns_block_`} {
 		if !strings.Contains(rule, want) {
 			t.Fatalf("nft rule_text missing %q: %s", want, rule)
 		}
@@ -506,6 +519,22 @@ func TestExecuteBlockOutboundIPRejectsMissingIP(t *testing.T) {
 		Payload:     []byte(`{"port":80,"protocol":"tcp"}`),
 	}
 	out := Execute(action, ExecuteOptions{Profile: protocol.ProfileManaged, ExpectedAgentID: "agent-1", AgentID: "agent-1", FirewallTool: "iptables", Now: now})
+	if out.Status != "failed" {
+		t.Fatalf("expected failed status, got %q", out.Status)
+	}
+}
+
+func TestExecuteBlockOutboundIPRejectsProtocolWithoutPort(t *testing.T) {
+	now := time.Now().UTC()
+	action := protocol.ResponseAction{
+		ID:          135,
+		ActionType:  "block_outbound_ip",
+		AgentID:     "agent-1",
+		Status:      "pending",
+		RequestedAt: now,
+		Payload:     []byte(`{"ip":"185.220.101.45","protocol":"tcp","dry_run":true}`),
+	}
+	out := Execute(action, ExecuteOptions{Profile: protocol.ProfileManaged, ExpectedAgentID: "agent-1", AgentID: "agent-1", FirewallTool: "nft", Now: now})
 	if out.Status != "failed" {
 		t.Fatalf("expected failed status, got %q", out.Status)
 	}
@@ -555,9 +584,9 @@ func TestExecuteQuarantineFileDryRun(t *testing.T) {
 		AgentID:     "agent-1",
 		Status:      "pending",
 		RequestedAt: now,
-		Payload:     []byte(fmt.Sprintf(`{"path":%q,"quarantine_dir":%q,"compute_hash":true,"dry_run":true}`, target, qdir)),
+		Payload:     []byte(fmt.Sprintf(`{"path":%q,"compute_hash":true,"dry_run":true}`, target)),
 	}
-	out := Execute(action, ExecuteOptions{Profile: protocol.ProfileManaged, ExpectedAgentID: "agent-1", AgentID: "agent-1", Now: now})
+	out := Execute(action, ExecuteOptions{Profile: protocol.ProfileManaged, ExpectedAgentID: "agent-1", AgentID: "agent-1", QuarantineDir: qdir, Now: now})
 	if out.Status != "success" {
 		t.Fatalf("expected success, got %q error=%q", out.Status, out.Error)
 	}
@@ -594,9 +623,9 @@ func TestExecuteQuarantineFileReal(t *testing.T) {
 		AgentID:     "agent-1",
 		Status:      "pending",
 		RequestedAt: now,
-		Payload:     []byte(fmt.Sprintf(`{"path":%q,"quarantine_dir":%q,"compute_hash":true}`, target, qdir)),
+		Payload:     []byte(fmt.Sprintf(`{"path":%q,"compute_hash":true}`, target)),
 	}
-	out := Execute(action, ExecuteOptions{Profile: protocol.ProfileManaged, ExpectedAgentID: "agent-1", AgentID: "agent-1", Now: now})
+	out := Execute(action, ExecuteOptions{Profile: protocol.ProfileManaged, ExpectedAgentID: "agent-1", AgentID: "agent-1", QuarantineDir: qdir, Now: now})
 	if out.Status != "success" {
 		t.Fatalf("expected success, got %q error=%q", out.Status, out.Error)
 	}
@@ -671,6 +700,36 @@ func TestParseNftHandles(t *testing.T) {
 	}
 }
 
+func TestLegacyNftHandleMatchingIsScopedToTheRuleTarget(t *testing.T) {
+	payload, err := parseFirewallPayload([]byte(`{"ip":"185.220.101.45","port":4444,"protocol":"tcp","comment":"c2_block"}`))
+	if err != nil {
+		t.Fatalf("parse payload: %v", err)
+	}
+	sample := strings.Join([]string{
+		`ip daddr 185.220.101.45 tcp dport 4444 drop comment "c2_block" # handle 7`,
+		`ip daddr 9.9.9.9 tcp dport 4444 drop comment "c2_block" # handle 8`,
+		`ip daddr 185.220.101.45 tcp dport 443 drop comment "c2_block" # handle 9`,
+	}, "\n")
+	handles := parseLegacyNftHandles(sample, payload)
+	if len(handles) != 1 || handles[0] != 7 {
+		t.Fatalf("expected only target handle 7, got %v", handles)
+	}
+}
+
+func TestFirewallRuleIdentityChangesWithTheTarget(t *testing.T) {
+	first, err := parseFirewallPayload([]byte(`{"ip":"185.220.101.45","comment":"incident"}`))
+	if err != nil {
+		t.Fatalf("parse first payload: %v", err)
+	}
+	second, err := parseFirewallPayload([]byte(`{"ip":"9.9.9.9","comment":"incident"}`))
+	if err != nil {
+		t.Fatalf("parse second payload: %v", err)
+	}
+	if first.comment == second.comment {
+		t.Fatalf("different firewall targets share rule identity %q", first.comment)
+	}
+}
+
 func TestSanitizeFirewallComment(t *testing.T) {
 	raw := "c2 block; rm -rf /"
 	got := sanitizeFirewallComment(&raw)
@@ -696,6 +755,7 @@ func TestDetectFirewallTool(t *testing.T) {
 
 func TestExecuteRunShellCommandAllowed(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
+	echo := testExecutable(t, "echo")
 	action := protocol.ResponseAction{
 		ID:          150,
 		ActionType:  "run_shell_command",
@@ -704,7 +764,7 @@ func TestExecuteRunShellCommandAllowed(t *testing.T) {
 		RequestedAt: now,
 		Payload:     []byte(`{"command":"echo seagull-ok","timeout_seconds":10}`),
 	}
-	out := Execute(action, ExecuteOptions{Profile: protocol.ProfileManaged, ExpectedAgentID: "agent-1", AgentID: "agent-1", AllowShellExec: true, Now: now})
+	out := Execute(action, ExecuteOptions{Profile: protocol.ProfileManaged, ExpectedAgentID: "agent-1", AgentID: "agent-1", AllowShellExec: true, ShellExecAllowlist: []string{echo}, Now: now})
 	if out.Status != "success" {
 		t.Fatalf("expected success, got %q error=%q", out.Status, out.Error)
 	}
@@ -724,6 +784,7 @@ func TestExecuteRunShellCommandAllowed(t *testing.T) {
 
 func TestExecuteRunShellCommandAllowlistMatch(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
+	echo := testExecutable(t, "echo")
 	action := protocol.ResponseAction{
 		ID:          151,
 		ActionType:  "run_shell_command",
@@ -737,7 +798,7 @@ func TestExecuteRunShellCommandAllowlistMatch(t *testing.T) {
 		ExpectedAgentID:    "agent-1",
 		AgentID:            "agent-1",
 		AllowShellExec:     true,
-		ShellExecAllowlist: []string{"echo", "ss"},
+		ShellExecAllowlist: []string{echo},
 		Now:                now,
 	})
 	if out.Status != "success" {
@@ -750,6 +811,7 @@ func TestExecuteRunShellCommandAllowlistMatch(t *testing.T) {
 
 func TestExecuteRunShellCommandBlockedByAllowlist(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
+	sleep := testExecutable(t, "sleep")
 	action := protocol.ResponseAction{
 		ID:          152,
 		ActionType:  "run_shell_command",
@@ -763,7 +825,7 @@ func TestExecuteRunShellCommandBlockedByAllowlist(t *testing.T) {
 		ExpectedAgentID:    "agent-1",
 		AgentID:            "agent-1",
 		AllowShellExec:     true,
-		ShellExecAllowlist: []string{"netstat", "ss"},
+		ShellExecAllowlist: []string{sleep},
 		Now:                now,
 	})
 	if out.Status != "failed" {
@@ -795,6 +857,7 @@ func TestExecuteRunShellCommandDisabled(t *testing.T) {
 
 func TestExecuteRunShellCommandTimeout(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
+	sleep := testExecutable(t, "sleep")
 	action := protocol.ResponseAction{
 		ID:          154,
 		ActionType:  "run_shell_command",
@@ -803,9 +866,9 @@ func TestExecuteRunShellCommandTimeout(t *testing.T) {
 		RequestedAt: now,
 		Payload:     []byte(`{"command":"sleep 5","timeout_seconds":1}`),
 	}
-	out := Execute(action, ExecuteOptions{Profile: protocol.ProfileManaged, ExpectedAgentID: "agent-1", AgentID: "agent-1", AllowShellExec: true, Now: now})
-	if out.Status != "success" {
-		t.Fatalf("expected success, got %q error=%q", out.Status, out.Error)
+	out := Execute(action, ExecuteOptions{Profile: protocol.ProfileManaged, ExpectedAgentID: "agent-1", AgentID: "agent-1", AllowShellExec: true, ShellExecAllowlist: []string{sleep}, Now: now})
+	if out.Status != "failed" {
+		t.Fatalf("expected failed timeout status, got %q error=%q", out.Status, out.Error)
 	}
 	if timedOut, _ := out.Result["timed_out"].(bool); !timedOut {
 		t.Fatalf("expected timed_out true")
@@ -828,5 +891,54 @@ func TestExecuteRunShellCommandRequiresCommand(t *testing.T) {
 	out := Execute(action, ExecuteOptions{Profile: protocol.ProfileManaged, ExpectedAgentID: "agent-1", AgentID: "agent-1", AllowShellExec: true, Now: now})
 	if out.Status != "failed" {
 		t.Fatalf("expected failed status, got %q", out.Status)
+	}
+}
+
+func TestExecuteRunShellCommandRequiresAllowlist(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	action := protocol.ResponseAction{
+		ID:          156,
+		ActionType:  "run_shell_command",
+		AgentID:     "agent-1",
+		Status:      "pending",
+		RequestedAt: now,
+		Payload:     []byte(`{"command":"echo blocked"}`),
+	}
+	out := Execute(action, ExecuteOptions{Profile: protocol.ProfileManaged, ExpectedAgentID: "agent-1", AgentID: "agent-1", AllowShellExec: true, Now: now})
+	if out.Status != "failed" {
+		t.Fatalf("expected missing allowlist to fail, got %q", out.Status)
+	}
+}
+
+func TestExecuteRunShellCommandDoesNotInterpretShellSyntax(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	echo := testExecutable(t, "echo")
+	marker := filepath.Join(t.TempDir(), "executed")
+	action := protocol.ResponseAction{
+		ID:          157,
+		ActionType:  "run_shell_command",
+		AgentID:     "agent-1",
+		Status:      "pending",
+		RequestedAt: now,
+		Payload:     []byte(fmt.Sprintf(`{"command":"echo safe; touch %s"}`, marker)),
+	}
+	out := Execute(action, ExecuteOptions{Profile: protocol.ProfileManaged, ExpectedAgentID: "agent-1", AgentID: "agent-1", AllowShellExec: true, ShellExecAllowlist: []string{echo}, Now: now})
+	if out.Status != "success" {
+		t.Fatalf("expected direct execution to succeed, got %q error=%q", out.Status, out.Error)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("shell syntax was interpreted, marker stat error: %v", err)
+	}
+}
+
+func TestBoundedShellOutput(t *testing.T) {
+	var output boundedOutput
+	data := strings.Repeat("x", maxShellOutputBytes+1024)
+	n, err := output.Write([]byte(data))
+	if err != nil || n != len(data) {
+		t.Fatalf("bounded write failed: n=%d err=%v", n, err)
+	}
+	if len(output.String()) > maxShellOutputBytes+len("\n[truncated]") {
+		t.Fatalf("bounded output exceeded its limit")
 	}
 }

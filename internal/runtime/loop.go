@@ -4,12 +4,12 @@ import (
 	"context"
 	"time"
 
-	agentcfg "github.com/dynasmon/Seagull-agent/internal/config"
-	"github.com/dynasmon/Seagull-agent/internal/mathx"
-	"github.com/dynasmon/Seagull-agent/internal/sources"
+	agentcfg "github.com/dynasmon/seagull-agent/internal/config"
+	"github.com/dynasmon/seagull-agent/internal/mathx"
+	"github.com/dynasmon/seagull-agent/internal/sources"
 )
 
-func (s *Service) loop(rootCtx context.Context) {
+func (s *Service) loop(rootCtx context.Context) error {
 	pollTicker := time.NewTicker(s.cfg.Interval)
 	defer pollTicker.Stop()
 
@@ -20,11 +20,18 @@ func (s *Service) loop(rootCtx context.Context) {
 
 	for {
 		select {
+		case err := <-s.fatal:
+			return err
 		case <-rootCtx.Done():
 			agentcfg.LogJSON(agentcfg.LevelInfo, "shutdown", map[string]interface{}{
 				"agent_id": s.cfg.AgentID,
 			})
-			return
+			select {
+			case err := <-s.fatal:
+				return err
+			default:
+				return nil
+			}
 		case <-pollTicker.C:
 			s.runAndLog(rootCtx)
 			s.maybeHeartbeat()
@@ -37,7 +44,9 @@ func (s *Service) loop(rootCtx context.Context) {
 func (s *Service) drainSpool(rootCtx context.Context) {
 	delivered, err := s.sender.Flush(rootCtx)
 	if delivered > 0 {
-		s.state.SpoolDeliveredTotal += delivered
+		s.updateState(func(state *SummaryState) {
+			state.SpoolDeliveredTotal += delivered
+		})
 		agentcfg.LogJSON(agentcfg.LevelInfo, "spool_drained", map[string]interface{}{
 			"agent_id":  s.cfg.AgentID,
 			"delivered": delivered,
@@ -45,10 +54,14 @@ func (s *Service) drainSpool(rootCtx context.Context) {
 		})
 	}
 	if err != nil {
-		s.state.SpoolLastError = err.Error()
+		s.updateState(func(state *SummaryState) {
+			state.SpoolLastError = err.Error()
+		})
 		return
 	}
-	s.state.SpoolLastError = ""
+	s.updateState(func(state *SummaryState) {
+		state.SpoolLastError = ""
+	})
 }
 
 func (s *Service) runAndLog(rootCtx context.Context) {
@@ -95,6 +108,8 @@ func (s *Service) logCycle(level agentcfg.LogLevel, res *sources.CycleResult) {
 	fields := map[string]interface{}{
 		"agent_id":              s.cfg.AgentID,
 		"sent":                  res.Sent,
+		"attempted":             res.Attempted,
+		"durable":               res.Durable,
 		"http_status":           res.Status,
 		"send_attempted":        res.SendAttempted,
 		"duration_ms":           res.DurationMS,
@@ -115,8 +130,13 @@ func (s *Service) logCycle(level agentcfg.LogLevel, res *sources.CycleResult) {
 }
 
 func (s *Service) applyToSummary(res *sources.CycleResult) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+
 	s.state.Cycles++
 	s.state.EventsSentTotal += res.Sent
+	s.state.EventsAttemptedTotal += res.Attempted
+	s.state.EventsDurableTotal += res.Durable
 	s.state.SSHAuthEventsTotal += res.SSHAuthEvents
 	s.state.ScanProbesTotal += res.ScanProbesTotal
 	s.state.ScanProbesEffective += res.ScanProbesEffective
@@ -146,6 +166,9 @@ func (s *Service) applyToSummary(res *sources.CycleResult) {
 }
 
 func (s *Service) flushSummary() {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+
 	now := time.Now().UTC()
 	uptime := time.Since(s.state.StartedAt)
 
@@ -176,31 +199,36 @@ func (s *Service) flushSummary() {
 	}
 
 	agentcfg.LogJSON(agentcfg.LevelInfo, "agent_summary", map[string]interface{}{
-		"agent_id":                           s.cfg.AgentID,
-		"scan_mode":                          agentcfg.NormalizeScanMode(s.cfg.ScanMode),
-		"uptime_sec":                         int(uptime.Seconds()),
-		"cycles":                             s.state.Cycles,
-		"events_sent_total":                  s.state.EventsSentTotal,
-		"ssh_auth_events_total":              s.state.SSHAuthEventsTotal,
-		"scan_probes_total":                  s.state.ScanProbesTotal,
-		"scan_probes_effective":              s.state.ScanProbesEffective,
-		"summary_period_sec":                 int(period.Seconds()),
-		"sent_delta":                         sentDelta,
-		"scan_probes_delta":                  scanDelta,
-		"scan_probes_effective_delta":        scanEffDelta,
-		"sent_per_sec":                       mathx.Round2(sentPerSec),
-		"scan_probes_per_sec":                mathx.Round2(scanPerSec),
-		"scan_probes_effective_per_sec":      mathx.Round2(scanEffPerSec),
-		"avg_sent_per_sec":                   mathx.Round2(avgSentPerSec),
-		"max_sent_cycle":                     s.state.MaxSentCycle,
-		"max_scan_cycle":                     s.state.MaxScanCycle,
-		"max_ports_cycle":                    s.state.MaxPortsCycle,
-		"send_attempts_total":                s.state.SendAttemptsTotal,
-		"send_errors_total":                  s.state.SendErrorsTotal,
-		"response_actions_staged_total":      s.state.ResponseActionsStagedTotal,
-		"response_actions_poll_errors_total": s.state.ResponseActionPollErrorsTotal,
-		"last_http_status":                   s.state.LastHTTPStatus,
-		"last_error":                         s.state.LastError,
+		"agent_id":                                s.cfg.AgentID,
+		"scan_mode":                               agentcfg.NormalizeScanMode(s.cfg.ScanMode),
+		"uptime_sec":                              int(uptime.Seconds()),
+		"cycles":                                  s.state.Cycles,
+		"events_sent_total":                       s.state.EventsSentTotal,
+		"events_attempted_total":                  s.state.EventsAttemptedTotal,
+		"events_durable_total":                    s.state.EventsDurableTotal,
+		"ssh_auth_events_total":                   s.state.SSHAuthEventsTotal,
+		"scan_probes_total":                       s.state.ScanProbesTotal,
+		"scan_probes_effective":                   s.state.ScanProbesEffective,
+		"summary_period_sec":                      int(period.Seconds()),
+		"sent_delta":                              sentDelta,
+		"scan_probes_delta":                       scanDelta,
+		"scan_probes_effective_delta":             scanEffDelta,
+		"sent_per_sec":                            mathx.Round2(sentPerSec),
+		"scan_probes_per_sec":                     mathx.Round2(scanPerSec),
+		"scan_probes_effective_per_sec":           mathx.Round2(scanEffPerSec),
+		"avg_sent_per_sec":                        mathx.Round2(avgSentPerSec),
+		"max_sent_cycle":                          s.state.MaxSentCycle,
+		"max_scan_cycle":                          s.state.MaxScanCycle,
+		"max_ports_cycle":                         s.state.MaxPortsCycle,
+		"send_attempts_total":                     s.state.SendAttemptsTotal,
+		"send_errors_total":                       s.state.SendErrorsTotal,
+		"response_actions_staged_total":           s.state.ResponseActionsStagedTotal,
+		"response_actions_poll_errors_total":      s.state.ResponseActionPollErrorsTotal,
+		"response_actions_executed_total":         s.state.ResponseActionsExecutedTotal,
+		"response_action_results_delivered_total": s.state.ResponseActionResultsDeliveredTotal,
+		"response_action_report_errors_total":     s.state.ResponseActionReportErrorsTotal,
+		"last_http_status":                        s.state.LastHTTPStatus,
+		"last_error":                              s.state.LastError,
 	})
 
 	s.state.LastSummaryAt = now
@@ -210,6 +238,9 @@ func (s *Service) flushSummary() {
 }
 
 func (s *Service) maybeHeartbeat() {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+
 	if time.Since(s.state.LastHeartbeatAt) < s.cfg.LogHeartbeatEvery {
 		return
 	}
