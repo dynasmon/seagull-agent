@@ -21,6 +21,7 @@ const (
 	defaultHashMaxBytes   = 2 * 1024 * 1024
 	defaultMinInterval    = 30 * time.Second
 	defaultHashCacheItems = 4096
+	hashCacheSettleWindow = time.Second
 )
 
 type Options struct {
@@ -279,7 +280,8 @@ func (c *Capturer) hashFile(path string, info fs.FileInfo, now time.Time) (strin
 	key := filepath.Clean(path)
 	mod := info.ModTime().UnixNano()
 	if cached, ok := c.hashCache[key]; ok {
-		if cached.size == info.Size() && cached.modUnix == mod && now.Sub(cached.computedAt) <= c.opts.HashCacheTTL {
+		settled := cached.computedAt.UnixNano()-mod >= int64(hashCacheSettleWindow)
+		if settled && cached.size == info.Size() && cached.modUnix == mod && now.Sub(cached.computedAt) <= c.opts.HashCacheTTL {
 			return cached.value, cached.value != ""
 		}
 	}
