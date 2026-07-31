@@ -1,0 +1,149 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.26.5"
+
+jobs:
+  verify:
+    name: verify release source
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: validate release tag
+        run: |
+          source packaging/scripts/lib/common.sh
+          source packaging/scripts/lib/validation.sh
+          validate_semver "${GITHUB_REF_NAME#v}"
+          test "$(git rev-list -n 1 "${GITHUB_REF_NAME}")" = "${GITHUB_SHA}"
+      - name: install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpcap-dev
+      - name: verify source and product lifecycle
+        run: make verify
+      - name: scan reachable dependencies
+        run: make vulncheck
+      - name: scan repository history
+        run: make secret-scan
+
+  package:
+    name: package ${{ matrix.target }}
+    needs: verify
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: linux/amd64
+            runner: ubuntu-22.04
+            artifact: release-linux-amd64
+          - target: linux/arm64
+            runner: ubuntu-22.04-arm
+            artifact: release-linux-arm64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpcap-dev
+      - name: build release package
+        run: |
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          bash build/build.sh \
+            --version "${GITHUB_REF_NAME#v}" \
+            --channel stable \
+            --targets "${{ matrix.target }}" \
+            --dist dist
+      - name: verify package checksums
+        run: cd dist && sha256sum --check SHA256SUMS
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            dist/seagull-agent_*.tar.gz
+            dist/seagull-agent_*.cdx.json
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: attest, sign and publish
+    needs: package
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - name: add protocol contracts and checksums
+        run: |
+          cp protocol/schema/protocol-v1.json dist/seagull-agent-protocol-v1.json
+          cp protocol/schema/compatibility.json dist/seagull-agent-compatibility.json
+          (
+            cd dist
+            find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\0' |
+              LC_ALL=C sort -z |
+              xargs -0 sha256sum > SHA256SUMS
+            sha256sum --check SHA256SUMS
+          )
+      - uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373
+        with:
+          subject-path: |
+            dist/seagull-agent_*.tar.gz
+            dist/seagull-agent_*.cdx.json
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+      - name: sign release checksums
+        run: |
+          cosign sign-blob --yes \
+            --output-signature dist/SHA256SUMS.sig \
+            --output-certificate dist/SHA256SUMS.pem \
+            dist/SHA256SUMS
+      - name: create immutable-ready release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" --json isDraft --jq .isDraft >/tmp/release-draft 2>/dev/null; then
+            test "$(cat /tmp/release-draft)" = "true"
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --draft \
+              --generate-notes \
+              --title "Seagull Agent ${GITHUB_REF_NAME#v}"
+          fi
+          gh release upload "${GITHUB_REF_NAME}" --clobber \
+            dist/seagull-agent_*.tar.gz \
+            dist/seagull-agent_*.cdx.json \
+            dist/seagull-agent-protocol-v1.json \
+            dist/seagull-agent-compatibility.json \
+            dist/SHA256SUMS \
+            dist/SHA256SUMS.sig \
+            dist/SHA256SUMS.pem
+          gh release edit "${GITHUB_REF_NAME}" --draft=false
