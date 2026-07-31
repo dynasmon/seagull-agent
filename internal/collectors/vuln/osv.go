@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dynasmon/Seagull-agent/protocol"
+	"github.com/dynasmon/seagull-agent/protocol"
 )
 
 type OSVOptions struct {
