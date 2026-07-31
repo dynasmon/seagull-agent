@@ -4,7 +4,7 @@ import (
 	"net"
 	"strings"
 
-	"github.com/google/gopacket/layers"
+	"github.com/gopacket/gopacket/layers"
 )
 
 func TCPFlags(t *layers.TCP) string {
