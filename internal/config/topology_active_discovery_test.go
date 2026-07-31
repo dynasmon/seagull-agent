@@ -24,6 +24,7 @@ func TestValidateActiveDiscoveryCIDRsRejectsOverbroadPrivateBase(t *testing.T) {
 }
 
 func TestLoadConfigTopologyActiveDiscoveryDisabledByDefault(t *testing.T) {
+	t.Setenv("SEAGULL_AGENT_ID", "agent-test-1")
 	t.Setenv("SEAGULL_API_URL", "https://127.0.0.1:8443/agent")
 	t.Setenv("SEAGULL_AGENT_BOOTSTRAP_TOKEN_FILE", "")
 	cfg := LoadConfig()
