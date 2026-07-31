@@ -37,7 +37,7 @@ shell-lint:
 	bash build/quality/lint-shell.sh
 
 workflow-lint:
-	$(GO) run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -color=false .github/workflows/*.yml
+	@dir="$$(bash build/quality/shellcheck.sh)"; PATH="$$dir:$$PATH" $(GO) run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -color=false .github/workflows/*.yml
 
 mod-check:
 	$(GO) mod verify
