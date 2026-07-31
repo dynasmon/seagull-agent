@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dynasmon/Seagull-agent/internal/collectors/pcapx"
-	"github.com/dynasmon/Seagull-agent/protocol"
-	"github.com/google/gopacket/layers"
+	"github.com/dynasmon/seagull-agent/internal/collectors/pcapx"
+	"github.com/dynasmon/seagull-agent/protocol"
+	"github.com/gopacket/gopacket/layers"
 )
 
 func TestBufferDedupAndDrain(t *testing.T) {
