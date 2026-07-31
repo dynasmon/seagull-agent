@@ -27,7 +27,7 @@ network access beyond the Seagull server itself.
       --api-url https://siem.example.com:8444/agent \
       --enroll-url https://siem.example.com:8445 \
       --profile sensor \
-      --enroll-token abt.my-host-1.xxxxx \
+      --prompt-enroll-token \
       --ca-file ./server-ca.crt
 
 `--profile sensor` is the default and collects telemetry only. `--profile
@@ -56,12 +56,17 @@ an upgrade or a rollback.
 | `/usr/local/bin/seagull-agent` | Active binary |
 | `/usr/local/lib/seagull/releases/<version>/` | Installed releases |
 | `/etc/seagull/agent.env` | Configuration, mode 0600 |
-| `/etc/seagull/pki/root_ca.crt` | Server trust anchor |
+| `/var/lib/seagull/pki/server-ca.crt` | Rotatable server trust anchor |
 | `/var/lib/seagull/agent.identity.json` | Credential and renewal tokens, mode 0600 |
 | `/var/lib/seagull/pki/client.{crt,key}` | Endpoint-owned client certificate and key |
 | `/var/lib/seagull/spool/` | Durable telemetry backlog |
+| `/var/lib/seagull/response-actions/` | Transactional action and result journal |
 | `/var/lib/seagull/bootstrap.token` | One-time enrollment token, consumed on first enroll |
 | `/var/lib/seagull/agent.release` | Active and previous release |
 
 The private key is generated on the endpoint and never leaves it. The server
 only ever sees a certificate signing request.
+
+Before extraction, verify the release-level `SHA256SUMS` signature and checksum
+as documented in the repository README. The installer independently verifies
+every extracted file against `MANIFEST.sha256`.
