@@ -190,6 +190,8 @@ jobs:
             test -x /staged/usr/local/bin/seagull-agent
             test -d /staged/var/lib/seagull/response-actions
             SEAGULL_INSTALL_ROOT=/staged ./uninstall.sh --purge
+            apt-get install -y --no-install-recommends systemd
+            test ! -d /run/systemd/system
             ./install.sh \
               --agent-id ci-agent-1 \
               --api-url https://siem.invalid:8444/agent \
