@@ -2,10 +2,12 @@ package ssh
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -14,8 +16,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/dynasmon/Seagull-agent/internal/netcontext"
-	"github.com/dynasmon/Seagull-agent/protocol"
+	agentcfg "github.com/dynasmon/seagull-agent/internal/config"
+	"github.com/dynasmon/seagull-agent/internal/netcontext"
+	"github.com/dynasmon/seagull-agent/protocol"
 )
 
 var (
@@ -27,6 +30,7 @@ var (
 
 type AuthLogOptions struct {
 	Path            string
+	CheckpointPath  string
 	MaxBatchSize    int
 	DedupTTL        time.Duration
 	IncludeAccepted bool
@@ -42,14 +46,33 @@ type logDedupEntry struct {
 	lastSeen time.Time
 }
 
+type authLogCheckpoint struct {
+	Version int    `json:"version"`
+	AgentID string `json:"agent_id"`
+	Path    string `json:"path"`
+	Device  uint64 `json:"device"`
+	Inode   uint64 `json:"inode"`
+	Offset  int64  `json:"offset"`
+}
+
+type authLogCaptureState struct {
+	offset     int64
+	lastDevice uint64
+	lastInode  uint64
+	cache      map[dedupKey]logDedupEntry
+}
+
 type AuthLogCapturer struct {
 	agentID string
 	opts    AuthLogOptions
 	hostIP  string
 
-	offset    int64
-	lastInode uint64
-	cache     map[dedupKey]logDedupEntry
+	offset     int64
+	lastDevice uint64
+	lastInode  uint64
+	cache      map[dedupKey]logDedupEntry
+	pending    *authLogCaptureState
+	loadErr    error
 }
 
 func NewAuthLogCapturer(agentID string, opts AuthLogOptions) *AuthLogCapturer {
@@ -63,12 +86,14 @@ func NewAuthLogCapturer(agentID string, opts AuthLogOptions) *AuthLogCapturer {
 		opts.DedupTTL = 30 * time.Second
 	}
 
-	return &AuthLogCapturer{
+	capturer := &AuthLogCapturer{
 		agentID: agentID,
 		opts:    opts,
 		hostIP:  detectPrimaryIP(),
 		cache:   make(map[dedupKey]logDedupEntry, 2048),
 	}
+	capturer.loadErr = capturer.loadCheckpoint()
+	return capturer
 }
 
 func ValidateAuthLogReadable(path string) error {
@@ -122,6 +147,12 @@ func ResolveAuthLogPath(configuredPath string) (string, error) {
 }
 
 func (c *AuthLogCapturer) Capture(now time.Time) ([]protocol.NetEvent, error) {
+	if c.loadErr != nil {
+		return nil, c.loadErr
+	}
+	if c.pending != nil {
+		c.rollback()
+	}
 	f, err := os.Open(c.opts.Path)
 	if err != nil {
 		return nil, fmt.Errorf("open authlog %s: %w", c.opts.Path, err)
@@ -133,11 +164,20 @@ func (c *AuthLogCapturer) Capture(now time.Time) ([]protocol.NetEvent, error) {
 		return nil, fmt.Errorf("stat authlog: %w", err)
 	}
 
-	inode := inodeOf(fi)
-	if c.lastInode != 0 && inode != c.lastInode {
-		// log rotated
+	c.pending = &authLogCaptureState{
+		offset:     c.offset,
+		lastDevice: c.lastDevice,
+		lastInode:  c.lastInode,
+		cache:      cloneDedupCache(c.cache),
+	}
+	device, inode := fileIdentity(fi)
+	if c.lastInode != 0 && (inode != c.lastInode || device != c.lastDevice) {
 		c.offset = 0
 	}
+	if c.offset > fi.Size() {
+		c.offset = 0
+	}
+	c.lastDevice = device
 	c.lastInode = inode
 
 	if c.offset > 0 {
@@ -153,11 +193,13 @@ func (c *AuthLogCapturer) Capture(now time.Time) ([]protocol.NetEvent, error) {
 	out = make([]protocol.NetEvent, 0, c.opts.MaxBatchSize)
 
 	for len(out) < c.opts.MaxBatchSize {
+		lineOffset := c.offset
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			if err == io.EOF {
 				break
 			}
+			c.rollback()
 			return out, fmt.Errorf("read authlog: %w", err)
 		}
 
@@ -172,12 +214,118 @@ func (c *AuthLogCapturer) Capture(now time.Time) ([]protocol.NetEvent, error) {
 			continue
 		}
 
+		eventID := c.eventID(lineOffset, line)
+		ev.EventID = eventID
+		if ev.Extra == nil {
+			ev.Extra = map[string]interface{}{}
+		}
+		ev.Extra["event_id"] = eventID
 		out = append(out, ev)
 	}
 
 	c.pruneDedup(now)
 
 	return out, nil
+}
+
+func (c *AuthLogCapturer) Commit() error {
+	if c == nil || c.pending == nil {
+		return nil
+	}
+	c.pending = nil
+	path := strings.TrimSpace(c.opts.CheckpointPath)
+	if path == "" {
+		return nil
+	}
+	state := authLogCheckpoint{
+		Version: 1,
+		AgentID: strings.TrimSpace(c.agentID),
+		Path:    filepath.Clean(c.opts.Path),
+		Device:  c.lastDevice,
+		Inode:   c.lastInode,
+		Offset:  c.offset,
+	}
+	payload, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("marshal authlog checkpoint: %w", err)
+	}
+	if err := agentcfg.AtomicWriteFile(path, append(payload, '\n'), 0o600); err != nil {
+		return fmt.Errorf("persist authlog checkpoint: %w", err)
+	}
+	return nil
+}
+
+func (c *AuthLogCapturer) Rollback() {
+	if c == nil {
+		return
+	}
+	c.rollback()
+}
+
+func (c *AuthLogCapturer) rollback() {
+	if c.pending == nil {
+		return
+	}
+	c.offset = c.pending.offset
+	c.lastDevice = c.pending.lastDevice
+	c.lastInode = c.pending.lastInode
+	c.cache = c.pending.cache
+	c.pending = nil
+}
+
+func (c *AuthLogCapturer) loadCheckpoint() error {
+	path := strings.TrimSpace(c.opts.CheckpointPath)
+	if path == "" {
+		return nil
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read authlog checkpoint: %w", err)
+	}
+	var state authLogCheckpoint
+	if err := json.Unmarshal(payload, &state); err != nil {
+		return fmt.Errorf("parse authlog checkpoint: %w", err)
+	}
+	if state.Version != 1 {
+		return fmt.Errorf("unsupported authlog checkpoint version %d", state.Version)
+	}
+	if strings.TrimSpace(state.AgentID) != strings.TrimSpace(c.agentID) {
+		return fmt.Errorf("authlog checkpoint agent ID mismatch")
+	}
+	if state.Offset < 0 {
+		return fmt.Errorf("authlog checkpoint offset is invalid")
+	}
+	if filepath.Clean(state.Path) != filepath.Clean(c.opts.Path) {
+		return nil
+	}
+	c.lastDevice = state.Device
+	c.lastInode = state.Inode
+	c.offset = state.Offset
+	return nil
+}
+
+func cloneDedupCache(in map[dedupKey]logDedupEntry) map[dedupKey]logDedupEntry {
+	out := make(map[dedupKey]logDedupEntry, len(in))
+	for key, entry := range in {
+		out[key] = entry
+	}
+	return out
+}
+
+func (c *AuthLogCapturer) eventID(offset int64, line string) string {
+	identity := fmt.Sprintf(
+		"%s\x00%s\x00%d\x00%d\x00%d\x00%s",
+		strings.TrimSpace(c.agentID),
+		filepath.Clean(c.opts.Path),
+		c.lastDevice,
+		c.lastInode,
+		offset,
+		line,
+	)
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(identity)).String()
 }
 
 func (c *AuthLogCapturer) parseLine(now time.Time, line string) (protocol.NetEvent, dedupKey, bool) {
@@ -203,7 +351,6 @@ func (c *AuthLogCapturer) parseLine(now time.Time, line string) (protocol.NetEve
 			Proto:     "sudo",
 			Bytes:     0,
 			Extra: map[string]interface{}{
-				"event_id":    uuid.NewString(),
 				"source":      "auth.log",
 				"action":      "sudo",
 				"username":    user,
@@ -303,7 +450,6 @@ func (c *AuthLogCapturer) newSSHEndpointEvent(now time.Time, srcIP string, dstPo
 	if extra == nil {
 		extra = map[string]interface{}{}
 	}
-	extra["event_id"] = uuid.NewString()
 	extra["source"] = "auth.log"
 
 	return protocol.NetEvent{
@@ -319,12 +465,12 @@ func (c *AuthLogCapturer) newSSHEndpointEvent(now time.Time, srcIP string, dstPo
 	}
 }
 
-func inodeOf(fi os.FileInfo) uint64 {
+func fileIdentity(fi os.FileInfo) (uint64, uint64) {
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	if !ok || st == nil {
-		return 0
+		return 0, 0
 	}
-	return uint64(st.Ino)
+	return uint64(st.Dev), uint64(st.Ino)
 }
 
 func detectPrimaryIP() string {
