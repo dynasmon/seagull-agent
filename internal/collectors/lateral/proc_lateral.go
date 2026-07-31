@@ -3,8 +3,8 @@ package lateral
 import (
 	"time"
 
-	"github.com/dynasmon/Seagull-agent/internal/collectors/proc"
-	"github.com/dynasmon/Seagull-agent/protocol"
+	"github.com/dynasmon/seagull-agent/internal/collectors/proc"
+	"github.com/dynasmon/seagull-agent/protocol"
 )
 
 func lateralConfidence(kind string, dstPort int, stateHex string) int {
