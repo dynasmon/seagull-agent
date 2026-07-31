@@ -1,10 +1,9 @@
-//go:build integration
-
 package integration
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,12 +12,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dynasmon/Seagull-agent/internal/certrenew"
-	agentcfg "github.com/dynasmon/Seagull-agent/internal/config"
-	"github.com/dynasmon/Seagull-agent/internal/controlplane"
-	"github.com/dynasmon/Seagull-agent/internal/enrollment"
-	"github.com/dynasmon/Seagull-agent/internal/sources"
-	"github.com/dynasmon/Seagull-agent/protocol"
+	"github.com/dynasmon/seagull-agent/internal/certrenew"
+	agentcfg "github.com/dynasmon/seagull-agent/internal/config"
+	"github.com/dynasmon/seagull-agent/internal/controlplane"
+	"github.com/dynasmon/seagull-agent/internal/enrollment"
+	"github.com/dynasmon/seagull-agent/internal/sources"
+	"github.com/dynasmon/seagull-agent/protocol"
 )
 
 func TestFreshEnrollmentPersistsIdentityCertificateAndTrustAnchor(t *testing.T) {
@@ -191,14 +190,29 @@ func TestRevokedCredentialRecoversThroughTheRenewalToken(t *testing.T) {
 }
 
 func TestUnsupportedProtocolIsReportedStructurally(t *testing.T) {
-	negotiated, incompatible := protocol.Negotiate(&protocol.Descriptor{
+	server := newFakeControlPlane(t)
+	defer server.Close()
+
+	dir := t.TempDir()
+	cfg := baseConfig(dir, server.URL)
+	writeFile(t, cfg.BootstrapTokenFile, "abt.agent-1.token")
+	_, client := newEnrolledManager(t, cfg, server)
+
+	server.setProtocolDescriptor(protocol.Descriptor{
 		ProtocolVersion:    9,
 		MinSupported:       9,
 		MaxSupported:       9,
 		EventSchemaVersion: 9,
+		MinEventSchema:     9,
+		MaxEventSchema:     9,
 	})
-	if incompatible == nil {
-		t.Fatal("a future-only server must be reported as incompatible")
+	negotiated, err := client.Heartbeat(context.Background(), protocol.HeartbeatRequest{
+		Status:          "ok",
+		ProtocolVersion: protocol.Version,
+	})
+	var incompatible *protocol.Incompatibility
+	if !errors.As(err, &incompatible) {
+		t.Fatalf("expected structured incompatibility, got %v", err)
 	}
 	if incompatible.Kind != protocol.IncompatibleProtocolTooOld {
 		t.Fatalf("kind=%s want %s", incompatible.Kind, protocol.IncompatibleProtocolTooOld)
@@ -207,8 +221,10 @@ func TestUnsupportedProtocolIsReportedStructurally(t *testing.T) {
 		t.Fatal("an incompatible negotiation must not yield a usable protocol version")
 	}
 
-	if _, err := protocol.Negotiate(&protocol.Descriptor{
-		ProtocolVersion: 1, MinSupported: 1, MaxSupported: 1, EventSchemaVersion: 1,
+	server.setProtocolDescriptor(protocol.LocalDescriptor())
+	if _, err := client.Heartbeat(context.Background(), protocol.HeartbeatRequest{
+		Status:          "ok",
+		ProtocolVersion: protocol.Version,
 	}); err != nil {
 		t.Fatalf("the current server must be compatible: %v", err)
 	}
@@ -290,6 +306,7 @@ type fakeControlPlane struct {
 	csrCount     int
 	replayCount  int
 	issuedSerial int64
+	descriptor   protocol.Descriptor
 }
 
 func newFakeControlPlane(t *testing.T) *fakeControlPlane {
@@ -300,6 +317,7 @@ func newFakeControlPlane(t *testing.T) *fakeControlPlane {
 		rejected:    map[string]bool{},
 		revoked:     map[string]bool{},
 		credentials: map[string]bool{},
+		descriptor:  protocol.LocalDescriptor(),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/enroll", f.handleEnroll)
@@ -414,7 +432,16 @@ func (f *fakeControlPlane) handleHeartbeat(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "invalid agent credential", http.StatusUnauthorized)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	f.mu.Lock()
+	descriptor := f.descriptor
+	f.mu.Unlock()
+	writeJSON(w, http.StatusOK, descriptor)
+}
+
+func (f *fakeControlPlane) setProtocolDescriptor(descriptor protocol.Descriptor) {
+	f.mu.Lock()
+	f.descriptor = descriptor
+	f.mu.Unlock()
 }
 
 func (f *fakeControlPlane) authorized(r *http.Request) bool {
