@@ -21,8 +21,8 @@ import (
 	"syscall"
 	"time"
 
-	agentcfg "github.com/dynasmon/Seagull-agent/internal/config"
-	"github.com/dynasmon/Seagull-agent/protocol"
+	agentcfg "github.com/dynasmon/seagull-agent/internal/config"
+	"github.com/dynasmon/seagull-agent/protocol"
 )
 
 type ExecuteOptions struct {
@@ -37,6 +37,7 @@ type ExecuteOptions struct {
 	AgentStartedAt       time.Time
 	Now                  time.Time
 	FirewallTool         string
+	QuarantineDir        string
 	AllowShellExec       bool
 	ShellExecAllowlist   []string
 }
@@ -191,6 +192,7 @@ func Execute(action protocol.ResponseAction, opts ExecuteOptions) ExecuteResult 
 		return out
 	case "run_shell_command":
 		result, err := runShellCommand(action, opts, now)
+		out.Result = result
 		if err != nil {
 			out.Error = err.Error()
 			return out
@@ -952,12 +954,13 @@ func processMatchesName(pid int, comm string, want string) bool {
 }
 
 type firewallPayload struct {
-	ip       string
-	isV6     bool
-	port     int
-	protocol string
-	comment  string
-	dryRun   bool
+	ip            string
+	isV6          bool
+	port          int
+	protocol      string
+	comment       string
+	legacyComment string
+	dryRun        bool
 }
 
 func parseFirewallPayload(raw json.RawMessage) (firewallPayload, error) {
@@ -1002,7 +1005,11 @@ func parseFirewallPayload(raw json.RawMessage) (firewallPayload, error) {
 		}
 		out.port = port
 	}
-	out.comment = sanitizeFirewallComment(payload.Comment)
+	if out.protocol != "" && out.port == 0 {
+		return out, fmt.Errorf("payload.protocol requires payload.port")
+	}
+	out.legacyComment = sanitizeFirewallComment(payload.Comment)
+	out.comment = scopedFirewallComment(out.legacyComment, out)
 	if payload.DryRun != nil {
 		out.dryRun = *payload.DryRun
 	}
@@ -1028,6 +1035,16 @@ func sanitizeFirewallComment(raw *string) string {
 		out = out[:64]
 	}
 	return out
+}
+
+func scopedFirewallComment(label string, payload firewallPayload) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%s|%d", label, payload.ip, payload.protocol, payload.port)))
+	suffix := hex.EncodeToString(sum[:6])
+	maxLabel := 64 - len(suffix) - 1
+	if len(label) > maxLabel {
+		label = label[:maxLabel]
+	}
+	return label + "_" + suffix
 }
 
 func DetectFirewallTool() string {
@@ -1109,6 +1126,8 @@ func runBlockOutboundIP(action protocol.ResponseAction, opts ExecuteOptions, now
 		"action":         actionMeta(action),
 		"firewall_tool":  previewTool,
 		"rule_text":      ruleText,
+		"rule_id":        p.comment,
+		"comment":        p.legacyComment,
 		"rule_added":     false,
 		"dry_run":        p.dryRun,
 	}
@@ -1145,6 +1164,8 @@ func runUnblockOutboundIP(action protocol.ResponseAction, opts ExecuteOptions, n
 		"executed_at":    now.UTC().Format(time.RFC3339),
 		"action":         actionMeta(action),
 		"firewall_tool":  previewTool,
+		"rule_id":        p.comment,
+		"comment":        p.legacyComment,
 		"rules_removed":  0,
 		"dry_run":        p.dryRun,
 	}
@@ -1171,6 +1192,19 @@ func runUnblockOutboundIP(action protocol.ResponseAction, opts ExecuteOptions, n
 }
 
 func iptablesDeleteLoop(p firewallPayload) (int, error) {
+	removed, err := iptablesDeleteComment(p, p.comment)
+	if err != nil {
+		return removed, err
+	}
+	if p.legacyComment == "" || p.legacyComment == p.comment {
+		return removed, nil
+	}
+	legacyRemoved, err := iptablesDeleteComment(p, p.legacyComment)
+	return removed + legacyRemoved, err
+}
+
+func iptablesDeleteComment(p firewallPayload, comment string) (int, error) {
+	p.comment = comment
 	bin, args, _ := buildIptablesRule(p, "-D")
 	removed := 0
 	for i := 0; i < 128; i++ {
@@ -1197,6 +1231,8 @@ func nftDeleteByComment(p firewallPayload) (int, error) {
 		return 0, fmt.Errorf("nft list failed: %s", firewallErr(out, err))
 	}
 	handles := parseNftHandles(out, p.comment)
+	handles = append(handles, parseLegacyNftHandles(out, p)...)
+	handles = uniqueInts(handles)
 	removed := 0
 	for _, h := range handles {
 		if _, derr := runCommand("nft", []string{"delete", "rule", "inet", nftTableName, nftChainName, "handle", strconv.Itoa(h)}); derr == nil {
@@ -1213,21 +1249,65 @@ func parseNftHandles(listOutput string, comment string) []int {
 		if !strings.Contains(line, needle) {
 			continue
 		}
-		idx := strings.LastIndex(line, "handle ")
-		if idx < 0 {
-			continue
+		if handle, ok := parseNftHandle(line); ok {
+			handles = append(handles, handle)
 		}
-		fields := strings.Fields(strings.TrimSpace(line[idx+len("handle "):]))
-		if len(fields) == 0 {
-			continue
-		}
-		h, err := strconv.Atoi(fields[0])
-		if err != nil {
-			continue
-		}
-		handles = append(handles, h)
 	}
 	return handles
+}
+
+func parseLegacyNftHandles(listOutput string, payload firewallPayload) []int {
+	if payload.legacyComment == "" || payload.legacyComment == payload.comment {
+		return nil
+	}
+	commentNeedle := fmt.Sprintf("comment %q", payload.legacyComment)
+	addressNeedle := fmt.Sprintf("%s daddr %s", nftFamilyExpr(payload.isV6), payload.ip)
+	portNeedle := ""
+	if payload.port > 0 {
+		portNeedle = fmt.Sprintf("%s dport %d", payload.protocol, payload.port)
+	}
+	handles := make([]int, 0)
+	for _, line := range strings.Split(listOutput, "\n") {
+		if !strings.Contains(line, commentNeedle) || !strings.Contains(line, addressNeedle) {
+			continue
+		}
+		if portNeedle != "" && !strings.Contains(line, portNeedle) {
+			continue
+		}
+		if handle, ok := parseNftHandle(line); ok {
+			handles = append(handles, handle)
+		}
+	}
+	return handles
+}
+
+func parseNftHandle(line string) (int, bool) {
+	idx := strings.LastIndex(line, "handle ")
+	if idx < 0 {
+		return 0, false
+	}
+	fields := strings.Fields(strings.TrimSpace(line[idx+len("handle "):]))
+	if len(fields) == 0 {
+		return 0, false
+	}
+	handle, err := strconv.Atoi(fields[0])
+	if err != nil {
+		return 0, false
+	}
+	return handle, true
+}
+
+func uniqueInts(values []int) []int {
+	seen := make(map[int]struct{}, len(values))
+	out := make([]int, 0, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func ensureNftChain() error {
@@ -1270,28 +1350,25 @@ func runCommand(bin string, args []string) (string, error) {
 }
 
 type quarantineFilePayload struct {
-	path          string
-	quarantineDir string
-	computeHash   bool
-	dryRun        bool
+	path        string
+	computeHash bool
+	dryRun      bool
 }
 
-var quarantineForbiddenPrefixes = []string{"/proc", "/sys", "/dev", "/run", "/etc"}
+var quarantineForbiddenPrefixes = []string{"/proc", "/sys", "/dev", "/run", "/etc", "/boot", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/var/lib/seagull"}
 
 func parseQuarantineFilePayload(raw json.RawMessage) (quarantineFilePayload, error) {
 	out := quarantineFilePayload{
-		quarantineDir: "/var/lib/seagull/quarantine",
-		computeHash:   true,
+		computeHash: true,
 	}
 	trimmed := strings.TrimSpace(string(raw))
 	if trimmed == "" || trimmed == "null" {
 		return out, fmt.Errorf("payload.path is required")
 	}
 	var payload struct {
-		Path          *string `json:"path"`
-		QuarantineDir *string `json:"quarantine_dir"`
-		ComputeHash   *bool   `json:"compute_hash"`
-		DryRun        *bool   `json:"dry_run"`
+		Path        *string `json:"path"`
+		ComputeHash *bool   `json:"compute_hash"`
+		DryRun      *bool   `json:"dry_run"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return out, fmt.Errorf("invalid payload JSON: %w", err)
@@ -1300,9 +1377,6 @@ func parseQuarantineFilePayload(raw json.RawMessage) (quarantineFilePayload, err
 		return out, fmt.Errorf("payload.path is required")
 	}
 	out.path = filepath.Clean(strings.TrimSpace(*payload.Path))
-	if payload.QuarantineDir != nil && strings.TrimSpace(*payload.QuarantineDir) != "" {
-		out.quarantineDir = filepath.Clean(strings.TrimSpace(*payload.QuarantineDir))
-	}
 	if payload.ComputeHash != nil {
 		out.computeHash = *payload.ComputeHash
 	}
@@ -1332,14 +1406,20 @@ func runQuarantineFile(action protocol.ResponseAction, opts ExecuteOptions, now 
 	if verr := validateQuarantinePath(p.path); verr != nil {
 		return nil, verr
 	}
-	info, err := os.Lstat(p.path)
+	target, info, err := openQuarantineTarget(p.path)
 	if err != nil {
 		return nil, fmt.Errorf("stat target failed: %w", err)
 	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("payload.path is not a regular file")
+	defer target.Close()
+	quarantineDir := strings.TrimSpace(opts.QuarantineDir)
+	if quarantineDir == "" {
+		quarantineDir = "/var/lib/seagull/quarantine"
 	}
-	dest := filepath.Join(p.quarantineDir, fmt.Sprintf("%s.%d.quar", filepath.Base(p.path), now.Unix()))
+	if !filepath.IsAbs(quarantineDir) {
+		return nil, fmt.Errorf("local quarantine directory must be absolute")
+	}
+	quarantineDir = filepath.Clean(quarantineDir)
+	dest := filepath.Join(quarantineDir, fmt.Sprintf("action-%020d.quar", action.ID))
 	result := map[string]interface{}{
 		"schema_version":     "v1",
 		"executed_at":        now.UTC().Format(time.RFC3339),
@@ -1352,7 +1432,7 @@ func runQuarantineFile(action protocol.ResponseAction, opts ExecuteOptions, now 
 		"dry_run":            p.dryRun,
 	}
 	if p.computeHash {
-		sum, herr := sha256File(p.path)
+		sum, herr := sha256OpenFile(target)
 		if herr != nil {
 			return nil, fmt.Errorf("hash target failed: %w", herr)
 		}
@@ -1361,71 +1441,160 @@ func runQuarantineFile(action protocol.ResponseAction, opts ExecuteOptions, now 
 	if p.dryRun {
 		return result, nil
 	}
-	if err := os.MkdirAll(p.quarantineDir, 0o700); err != nil {
+	if err := prepareQuarantineDirectory(quarantineDir); err != nil {
 		return nil, fmt.Errorf("create quarantine dir failed: %w", err)
 	}
-	if err := os.Chmod(p.quarantineDir, 0o700); err != nil {
-		return nil, fmt.Errorf("chmod quarantine dir failed: %w", err)
-	}
-	if err := moveFile(p.path, dest); err != nil {
+	if err := copyQuarantineTarget(target, dest); err != nil {
 		return nil, fmt.Errorf("quarantine move failed: %w", err)
 	}
-	if err := os.Chmod(dest, 0o000); err != nil {
-		return nil, fmt.Errorf("chmod quarantine file failed: %w", err)
+	current, err := os.Lstat(p.path)
+	if err != nil || !os.SameFile(info, current) {
+		_ = os.Remove(dest)
+		if err != nil {
+			return nil, fmt.Errorf("revalidate quarantine target: %w", err)
+		}
+		return nil, fmt.Errorf("quarantine target changed during execution")
+	}
+	if err := os.Remove(p.path); err != nil {
+		_ = os.Remove(dest)
+		return nil, fmt.Errorf("remove quarantine target: %w", err)
+	}
+	if err := syncResponseDirectory(filepath.Dir(p.path)); err != nil {
+		return nil, fmt.Errorf("persist quarantine target removal: %w", err)
 	}
 	result["quarantined"] = true
 	result["permissions_after"] = "0000"
 	return result, nil
 }
 
-func moveFile(src string, dst string) error {
-	if err := os.Rename(src, dst); err == nil {
-		return nil
-	} else if !errors.Is(err, syscall.EXDEV) {
-		return err
+func openQuarantineTarget(path string) (*os.File, os.FileInfo, error) {
+	initial, err := os.Lstat(path)
+	if err != nil {
+		return nil, nil, err
 	}
-	if err := copyFile(src, dst); err != nil {
-		return err
+	if !initial.Mode().IsRegular() {
+		return nil, nil, fmt.Errorf("payload.path is not a regular file")
 	}
-	return os.Remove(src)
+	target, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	opened, err := target.Stat()
+	if err != nil {
+		target.Close()
+		return nil, nil, err
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(initial, opened) {
+		target.Close()
+		return nil, nil, fmt.Errorf("quarantine target changed during validation")
+	}
+	return target, opened, nil
 }
 
-func copyFile(src string, dst string) error {
-	in, err := os.Open(src)
+func prepareQuarantineDirectory(path string) error {
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
 	if err != nil {
 		return err
 	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("quarantine path is not a directory")
 	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		return err
-	}
-	return out.Close()
+	return os.Chmod(path, 0o700)
 }
 
-func sha256File(path string) (string, error) {
-	f, err := os.Open(path)
+func copyQuarantineTarget(source *os.File, destination string) error {
+	if _, err := source.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
+		return err
+	}
+	complete := false
+	defer func() {
+		output.Close()
+		if !complete {
+			_ = os.Remove(destination)
+		}
+	}()
+	if _, err := io.Copy(output, source); err != nil {
+		return err
+	}
+	if err := output.Sync(); err != nil {
+		return err
+	}
+	if err := output.Chmod(0o000); err != nil {
+		return err
+	}
+	if err := output.Close(); err != nil {
+		return err
+	}
+	if err := syncResponseDirectory(filepath.Dir(destination)); err != nil {
+		return err
+	}
+	complete = true
+	return nil
+}
+
+func syncResponseDirectory(path string) error {
+	directory, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
+}
+
+func sha256OpenFile(source *os.File) (string, error) {
+	if _, err := source.Seek(0, io.SeekStart); err != nil {
 		return "", err
 	}
-	defer f.Close()
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	if _, err := io.Copy(h, source); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 const maxShellOutputBytes = 1 << 20
+const maxShellArguments = 128
+const maxShellArgumentBytes = 4096
+const maxShellCommandBytes = 65536
 
 type shellCommandPayload struct {
 	command        string
+	arguments      []string
 	timeoutSeconds int
 	workingDir     string
+}
+
+type boundedOutput struct {
+	buffer    bytes.Buffer
+	truncated bool
+}
+
+func (b *boundedOutput) Write(data []byte) (int, error) {
+	available := maxShellOutputBytes - b.buffer.Len()
+	if available > 0 {
+		if available > len(data) {
+			available = len(data)
+		}
+		_, _ = b.buffer.Write(data[:available])
+	}
+	if available < len(data) {
+		b.truncated = true
+	}
+	return len(data), nil
+}
+
+func (b *boundedOutput) String() string {
+	if !b.truncated {
+		return b.buffer.String()
+	}
+	return b.buffer.String() + "\n[truncated]"
 }
 
 func parseShellCommandPayload(raw json.RawMessage) (shellCommandPayload, error) {
@@ -1435,17 +1604,52 @@ func parseShellCommandPayload(raw json.RawMessage) (shellCommandPayload, error) 
 		return out, fmt.Errorf("payload.command is required")
 	}
 	var payload struct {
-		Command        *string `json:"command"`
-		TimeoutSeconds *int    `json:"timeout_seconds"`
-		WorkingDir     *string `json:"working_dir"`
+		Command        *string   `json:"command"`
+		Arguments      *[]string `json:"arguments"`
+		TimeoutSeconds *int      `json:"timeout_seconds"`
+		WorkingDir     *string   `json:"working_dir"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return out, fmt.Errorf("invalid payload JSON: %w", err)
 	}
-	if payload.Command == nil || strings.TrimSpace(*payload.Command) == "" {
-		return out, fmt.Errorf("payload.command is required")
+	if payload.Command != nil && payload.Arguments != nil {
+		return out, fmt.Errorf("payload.command and payload.arguments are mutually exclusive")
 	}
-	out.command = strings.TrimSpace(*payload.Command)
+	switch {
+	case payload.Arguments != nil:
+		out.arguments = append([]string(nil), (*payload.Arguments)...)
+	case payload.Command != nil:
+		out.arguments = strings.Fields(strings.TrimSpace(*payload.Command))
+	default:
+		return out, fmt.Errorf("payload.command or payload.arguments is required")
+	}
+	if len(out.arguments) == 0 {
+		return out, fmt.Errorf("payload command is empty")
+	}
+	if len(out.arguments) > maxShellArguments {
+		return out, fmt.Errorf("payload command exceeds %d arguments", maxShellArguments)
+	}
+	totalBytes := 0
+	for _, argument := range out.arguments {
+		if argument == "" {
+			return out, fmt.Errorf("payload command contains an empty argument")
+		}
+		if strings.IndexByte(argument, 0) >= 0 {
+			return out, fmt.Errorf("payload command contains a null byte")
+		}
+		if len(argument) > maxShellArgumentBytes {
+			return out, fmt.Errorf("payload command argument exceeds %d bytes", maxShellArgumentBytes)
+		}
+		totalBytes += len(argument)
+	}
+	if totalBytes > maxShellCommandBytes {
+		return out, fmt.Errorf("payload command exceeds %d bytes", maxShellCommandBytes)
+	}
+	encoded, err := json.Marshal(out.arguments)
+	if err != nil {
+		return out, fmt.Errorf("encode payload command: %w", err)
+	}
+	out.command = string(encoded)
 	if payload.TimeoutSeconds != nil {
 		out.timeoutSeconds = clamp(*payload.TimeoutSeconds, 1, 300)
 	}
@@ -1459,35 +1663,20 @@ func parseShellCommandPayload(raw json.RawMessage) (shellCommandPayload, error) 
 	return out, nil
 }
 
-func shellCommandFirstToken(command string) string {
-	fields := strings.Fields(command)
-	if len(fields) == 0 {
-		return ""
-	}
-	return fields[0]
-}
-
-func shellCommandAllowed(command string, allowlist []string) bool {
+func shellCommandAllowed(executable string, allowlist []string) bool {
 	if len(allowlist) == 0 {
-		return true
-	}
-	firstToken := shellCommandFirstToken(command)
-	if firstToken == "" {
 		return false
 	}
-	base := filepath.Base(firstToken)
 	for _, entry := range allowlist {
-		e := strings.TrimSpace(entry)
-		if e == "" {
+		candidate := strings.TrimSpace(entry)
+		if !filepath.IsAbs(candidate) {
 			continue
 		}
-		if strings.Contains(e, " ") {
-			if strings.HasPrefix(command, e) {
-				return true
-			}
+		resolved, err := filepath.EvalSymlinks(filepath.Clean(candidate))
+		if err != nil {
 			continue
 		}
-		if firstToken == e || base == e {
+		if resolved == executable {
 			return true
 		}
 	}
@@ -1510,11 +1699,27 @@ func auditShellExec(opts ExecuteOptions, action protocol.ResponseAction, command
 	agentcfg.LogJSON(agentcfg.LevelInfo, "response_action.shell_exec", fields)
 }
 
-func truncateShellOutput(s string) string {
-	if len(s) <= maxShellOutputBytes {
-		return s
+func resolveShellExecutable(value string) (string, error) {
+	resolved, err := exec.LookPath(value)
+	if err != nil {
+		return "", fmt.Errorf("resolve command executable: %w", err)
 	}
-	return s[:maxShellOutputBytes] + "\n[truncated]"
+	resolved, err = filepath.Abs(resolved)
+	if err != nil {
+		return "", fmt.Errorf("resolve command executable path: %w", err)
+	}
+	resolved, err = filepath.EvalSymlinks(resolved)
+	if err != nil {
+		return "", fmt.Errorf("resolve command executable symlink: %w", err)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("stat command executable: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return "", fmt.Errorf("command executable is not an executable regular file")
+	}
+	return resolved, nil
 }
 
 func runShellCommand(action protocol.ResponseAction, opts ExecuteOptions, now time.Time) (map[string]interface{}, error) {
@@ -1522,20 +1727,25 @@ func runShellCommand(action protocol.ResponseAction, opts ExecuteOptions, now ti
 	if err != nil {
 		return nil, err
 	}
-	firstToken := shellCommandFirstToken(p.command)
 	if !opts.AllowShellExec {
 		auditShellExec(opts, action, p.command, -1, false, "shell exec disabled by agent config")
 		return nil, fmt.Errorf("shell exec is disabled on this agent")
 	}
-	if !shellCommandAllowed(p.command, opts.ShellExecAllowlist) {
+	executable, err := resolveShellExecutable(p.arguments[0])
+	if err != nil {
+		auditShellExec(opts, action, p.command, -1, false, err.Error())
+		return nil, err
+	}
+	if !shellCommandAllowed(executable, opts.ShellExecAllowlist) {
 		auditShellExec(opts, action, p.command, -1, false, "command not permitted by allowlist")
-		return nil, fmt.Errorf("command %q is not permitted by the shell exec allowlist", firstToken)
+		return nil, fmt.Errorf("executable %q is not permitted by the shell exec allowlist", executable)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(p.timeoutSeconds)*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-c", p.command)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd := exec.CommandContext(ctx, executable, p.arguments[1:]...)
+	cmd.Env = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C.UTF-8", "LC_ALL=C.UTF-8"}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return nil
@@ -1546,7 +1756,7 @@ func runShellCommand(action protocol.ResponseAction, opts ExecuteOptions, now ti
 	if p.workingDir != "" {
 		cmd.Dir = p.workingDir
 	}
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr boundedOutput
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
@@ -1572,15 +1782,22 @@ func runShellCommand(action protocol.ResponseAction, opts ExecuteOptions, now ti
 		"executed_at":     now.UTC().Format(time.RFC3339),
 		"action":          actionMeta(action),
 		"command":         p.command,
+		"executable":      executable,
 		"exit_code":       exitCode,
-		"stdout":          truncateShellOutput(stdout.String()),
-		"stderr":          truncateShellOutput(stderr.String()),
+		"stdout":          stdout.String(),
+		"stderr":          stderr.String(),
 		"timed_out":       timedOut,
 		"duration_ms":     durationMs,
 		"command_allowed": true,
 	}
 	if p.workingDir != "" {
 		result["working_dir"] = p.workingDir
+	}
+	if timedOut {
+		return result, fmt.Errorf("command timed out")
+	}
+	if runErr != nil {
+		return result, fmt.Errorf("command exited with status %d", exitCode)
 	}
 	return result, nil
 }
