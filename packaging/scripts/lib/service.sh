@@ -27,10 +27,10 @@ service_derive_capabilities() {
   local caps=()
 
   if service_pcap_required "${sources}" "${lateral_mode}"; then
-    caps+=(CAP_NET_RAW CAP_NET_ADMIN)
+    caps+=(CAP_NET_RAW)
   fi
   if [[ "${profile}" == "managed" ]]; then
-    caps+=(CAP_NET_RAW CAP_NET_ADMIN CAP_KILL CAP_DAC_READ_SEARCH CAP_FOWNER)
+    caps+=(CAP_NET_ADMIN CAP_KILL CAP_DAC_OVERRIDE CAP_FOWNER)
   fi
   if [[ "${#caps[@]}" -eq 0 ]]; then
     return 0
@@ -48,6 +48,15 @@ service_write_profile_dropin() {
     printf 'Environment=SEAGULL_AGENT_PROFILE=%s\n' "${profile}"
     printf 'AmbientCapabilities=\n'
     printf 'CapabilityBoundingSet=\n'
+    if [[ "${profile}" == "managed" ]]; then
+      printf 'PrivateTmp=false\n'
+      printf 'ProtectHome=false\n'
+      printf 'ProtectSystem=full\n'
+    else
+      printf 'PrivateTmp=true\n'
+      printf 'ProtectHome=true\n'
+      printf 'ProtectSystem=strict\n'
+    fi
     if [[ -n "${capabilities}" ]]; then
       printf 'AmbientCapabilities=%s\n' "${capabilities}"
       printf 'CapabilityBoundingSet=%s\n' "${capabilities}"
@@ -62,8 +71,7 @@ service_write_profile_dropin() {
 }
 
 service_install_unit() {
-  local unit_source="$1"
-  install -m 0644 "${unit_source}" "${UNIT_PATH}"
+  [[ -f "${UNIT_PATH}" ]] || die "systemd unit is not installed at ${UNIT_PATH}"
   if ! systemd_available; then
     return 0
   fi
@@ -88,16 +96,21 @@ service_restart() {
 
 service_wait_healthy() {
   local timeout="${1:-20}"
+  local require_identity="${2:-0}"
   systemd_available || return 0
   local waited=0
+  local stable=0
   while [[ "${waited}" -lt "${timeout}" ]]; do
     if systemctl is-active --quiet "${SERVICE_NAME}"; then
-      sleep 2
-      waited=$((waited + 2))
-      if systemctl is-active --quiet "${SERVICE_NAME}"; then
+      stable=$((stable + 1))
+      if [[ "${require_identity}" == "1" ]] && ! state_enrollment_complete; then
+        stable=0
+      fi
+      if [[ "${stable}" -ge 3 ]]; then
         return 0
       fi
-      continue
+    else
+      stable=0
     fi
     sleep 1
     waited=$((waited + 1))
