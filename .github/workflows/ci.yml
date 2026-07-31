@@ -84,7 +84,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpcap-dev
       - name: build release-equivalent package
         run: |
-          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          export SOURCE_DATE_EPOCH
           bash build/build.sh \
             --version "0.0.0-ci.${GITHUB_RUN_NUMBER}" \
             --channel dev \
@@ -161,10 +162,13 @@ jobs:
       - name: install runtime dependencies
         run: apt-get update && apt-get install -y --no-install-recommends ${{ matrix.packages }}
       - name: install and remove the release artifact
+        shell: bash
         run: |
           set -euo pipefail
-          test ! -e /usr/bin/go
-          ! command -v go
+          if command -v go >/dev/null 2>&1; then
+            echo "the runtime image must not provide go" >&2
+            exit 1
+          fi
           cd dist
           sha256sum --check SHA256SUMS
           archive="$(find . -maxdepth 1 -name '${{ matrix.archive }}' -print -quit)"
@@ -218,7 +222,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpcap-dev
       - name: compare independent builds
         run: |
-          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          export SOURCE_DATE_EPOCH
           bash build/build.sh --version 0.0.0-repro --channel dev --targets linux/amd64 --dist dist-a
           bash build/build.sh --version 0.0.0-repro --channel dev --targets linux/amd64 --dist dist-b
           cmp dist-a/seagull-agent_0.0.0-repro_linux_amd64.tar.gz dist-b/seagull-agent_0.0.0-repro_linux_amd64.tar.gz
