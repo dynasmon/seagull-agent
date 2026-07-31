@@ -1,6 +1,6 @@
 [Unit]
 Description=Seagull Agent
-Documentation=https://github.com/dynasmon/Seagull-agent
+Documentation=https://github.com/dynasmon/seagull-agent
 After=network-online.target
 Wants=network-online.target
 
@@ -15,6 +15,7 @@ ExecStart=/usr/local/bin/seagull-agent
 Restart=always
 RestartSec=5
 TimeoutStopSec=20
+UMask=0077
 
 StateDirectory=seagull
 LogsDirectory=seagull
@@ -31,6 +32,7 @@ ProtectHome=true
 ProtectSystem=strict
 ProtectKernelTunables=true
 ProtectKernelModules=true
+ProtectKernelLogs=true
 ProtectControlGroups=true
 ProtectClock=true
 ProtectHostname=true
