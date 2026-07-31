@@ -19,12 +19,13 @@ import (
 )
 
 const (
-	defaultProcRoot      = "/proc"
-	defaultStartTimeHz   = 100.0
-	defaultCmdlineMax    = 2048
-	defaultMaxBatch      = 200
-	defaultHashMaxBytes  = 25 * 1024 * 1024
-	defaultHashCacheSize = 4096
+	defaultProcRoot       = "/proc"
+	defaultStartTimeHz    = 100.0
+	defaultCmdlineMax     = 2048
+	defaultMaxBatch       = 200
+	defaultHashMaxBytes   = 25 * 1024 * 1024
+	defaultHashCacheSize  = 4096
+	hashCacheSettleWindow = time.Second
 )
 
 var (
@@ -608,7 +609,8 @@ func (c *Capturer) hashExecutable(path string, now time.Time) (string, bool) {
 	modUnix := st.ModTime().UnixNano()
 
 	if cached, ok := c.hashCache[key]; ok {
-		if cached.size == st.Size() && cached.modUnix == modUnix && now.Sub(cached.computedAt) <= c.opts.HashCacheTTL {
+		settled := cached.computedAt.UnixNano()-modUnix >= int64(hashCacheSettleWindow)
+		if settled && cached.size == st.Size() && cached.modUnix == modUnix && now.Sub(cached.computedAt) <= c.opts.HashCacheTTL {
 			return cached.sha256, cached.sha256 != ""
 		}
 	}
