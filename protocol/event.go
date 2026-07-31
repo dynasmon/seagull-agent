@@ -3,6 +3,7 @@ package protocol
 import "time"
 
 type NetEvent struct {
+	EventID       string    `json:"event_id,omitempty"`
 	AgentID       string    `json:"agent_id"`
 	EventType     string    `json:"event_type"`
 	SchemaVersion int       `json:"schema_version"`
