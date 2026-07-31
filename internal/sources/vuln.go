@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dynasmon/Seagull-agent/internal/collectors/syscollector"
-	"github.com/dynasmon/Seagull-agent/internal/collectors/vuln"
-	"github.com/dynasmon/Seagull-agent/internal/jitter"
-	"github.com/dynasmon/Seagull-agent/protocol"
+	"github.com/dynasmon/seagull-agent/internal/collectors/syscollector"
+	"github.com/dynasmon/seagull-agent/internal/collectors/vuln"
+	"github.com/dynasmon/seagull-agent/internal/jitter"
+	"github.com/dynasmon/seagull-agent/protocol"
 )
 
 type VulnScannerStatus struct {
