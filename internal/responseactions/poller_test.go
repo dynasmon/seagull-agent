@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dynasmon/Seagull-agent/protocol"
+	"github.com/dynasmon/seagull-agent/protocol"
 )
 
 func TestStartPollingStagesActions(t *testing.T) {
