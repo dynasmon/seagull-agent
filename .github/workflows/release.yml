@@ -68,7 +68,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpcap-dev
       - name: build release package
         run: |
-          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          export SOURCE_DATE_EPOCH
           bash build/build.sh \
             --version "${GITHUB_REF_NAME#v}" \
             --channel stable \
@@ -111,7 +112,8 @@ jobs:
             cd dist
             find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\0' |
               LC_ALL=C sort -z |
-              xargs -0 sha256sum > SHA256SUMS
+              xargs -0 sha256sum > "${RUNNER_TEMP}/SHA256SUMS"
+            mv "${RUNNER_TEMP}/SHA256SUMS" SHA256SUMS
             sha256sum --check SHA256SUMS
           )
       - uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373

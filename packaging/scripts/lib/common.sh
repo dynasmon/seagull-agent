@@ -55,11 +55,15 @@ have() {
   command -v "$1" >/dev/null 2>&1
 }
 
+systemd_booted() {
+  [[ -d /run/systemd/system ]]
+}
+
 systemd_available() {
   if is_staged_root; then
     return 1
   fi
-  have systemctl
+  have systemctl && systemd_booted
 }
 
 require_systemd() {
@@ -68,6 +72,9 @@ require_systemd() {
   fi
   if ! have systemctl; then
     die "systemd is required by this installer"
+  fi
+  if ! systemd_booted; then
+    warn "systemd is not the running init system; installing without service activation"
   fi
 }
 
