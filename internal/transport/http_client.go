@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -41,6 +42,13 @@ type reloadingTLSMaterial struct {
 func NewHTTPClient(timeout time.Duration, tlsOpts TLSOptions) (*http.Client, error) {
 	if timeout <= 0 {
 		timeout = 10 * time.Second
+	}
+	tlsOpts.CAFile = strings.TrimSpace(tlsOpts.CAFile)
+	tlsOpts.CertFile = strings.TrimSpace(tlsOpts.CertFile)
+	tlsOpts.KeyFile = strings.TrimSpace(tlsOpts.KeyFile)
+	tlsOpts.ServerName = strings.TrimSpace(tlsOpts.ServerName)
+	if tlsOpts.CAFile != "" && tlsOpts.ServerName == "" {
+		return nil, errors.New("TLS server name is required with a custom CA")
 	}
 
 	baseTransport := &http.Transport{
@@ -83,7 +91,7 @@ func NewHTTPClient(timeout time.Duration, tlsOpts TLSOptions) (*http.Client, err
 			tlsCfg.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
 				cert, err := materials.clientCertificate()
 				if err != nil {
-					return &tls.Certificate{}, nil
+					return nil, err
 				}
 				return cert, nil
 			}
@@ -135,10 +143,7 @@ func (m *reloadingTLSMaterial) rootCAs() (*x509.CertPool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read TLS CA file: %w", err)
 	}
-	roots, err := x509.SystemCertPool()
-	if err != nil || roots == nil {
-		roots = x509.NewCertPool()
-	}
+	roots := x509.NewCertPool()
 	if ok := roots.AppendCertsFromPEM(caPEM); !ok {
 		return nil, fmt.Errorf("append TLS CA certs: invalid PEM")
 	}
