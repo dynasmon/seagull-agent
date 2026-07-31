@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dynasmon/Seagull-agent/internal/controlplane"
-	"github.com/dynasmon/Seagull-agent/protocol"
+	"github.com/dynasmon/seagull-agent/internal/controlplane"
+	"github.com/dynasmon/seagull-agent/protocol"
 )
 
 func TestListPendingResponseActionsOK(t *testing.T) {
