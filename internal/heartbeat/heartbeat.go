@@ -1,0 +1,67 @@
+package heartbeat
+
+import (
+	"context"
+	"time"
+
+	"github.com/dynasmon/seagull-agent/internal/jitter"
+	"github.com/dynasmon/seagull-agent/protocol"
+)
+
+type Config struct {
+	AgentID string
+	Every   time.Duration
+	Jitter  time.Duration
+	Timeout time.Duration
+}
+
+type Deps struct {
+	Build   func() protocol.HeartbeatRequest
+	Send    func(context.Context, protocol.HeartbeatRequest) error
+	OnError func(error)
+}
+
+func Start(ctx context.Context, cfg Config, deps Deps) {
+	if deps.Build == nil || deps.Send == nil {
+		return
+	}
+
+	every := cfg.Every
+	if every <= 0 {
+		every = 30 * time.Second
+	}
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+
+	go func() {
+		initialDelay := jitter.Stable(cfg.AgentID, "control.heartbeat", cfg.Jitter)
+		if initialDelay > 0 {
+			t := time.NewTimer(initialDelay)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return
+			case <-t.C:
+			}
+		}
+
+		t := time.NewTicker(every)
+		defer t.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				reqCtx, cancel := context.WithTimeout(ctx, timeout)
+				err := deps.Send(reqCtx, deps.Build())
+				cancel()
+				if err != nil && deps.OnError != nil {
+					deps.OnError(err)
+				}
+			}
+		}
+	}()
+}

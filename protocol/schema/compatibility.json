@@ -1,0 +1,31 @@
+{
+  "$id": "https://github.com/dynasmon/Seagull-agent/protocol/schema/compatibility.json",
+  "title": "Seagull agent and platform compatibility window",
+  "protocol_version": 1,
+  "event_schema_version": 1,
+  "agent": {
+    "speaks_protocol": 1,
+    "accepts_server_protocol": { "min": 1, "max": 1 },
+    "emits_event_schema": 1
+  },
+  "server": {
+    "oldest_supported_agent_protocol": 1,
+    "newest_supported_agent_protocol": 1,
+    "accepts_event_schema": { "min": 1, "max": 1 }
+  },
+  "rules": {
+    "unknown_response_fields": "ignored",
+    "unknown_request_fields": "ignored",
+    "unknown_capabilities": "reported and ignored",
+    "missing_optional_capability": "treated as unsupported",
+    "absent_protocol_version": "treated as protocol 1",
+    "absent_server_descriptor": "treated as protocol 1, negotiation marked degraded",
+    "unsupported_protocol_version": "server answers HTTP 426 and the agent stops retrying that operation",
+    "unsupported_response_action": "agent answers with status failed and an unsupported_action_type error",
+    "privileged_action_on_sensor_profile": "agent refuses locally regardless of server intent"
+  },
+  "independent_release": {
+    "server_upgrade_requires_agent_upgrade": false,
+    "agent_upgrade_requires_server_upgrade": false
+  }
+}
