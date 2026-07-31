@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"os"
 	"reflect"
 	"sort"
 	"testing"
@@ -9,23 +10,26 @@ import (
 )
 
 func TestContractMatchesCompiledVersions(t *testing.T) {
-	contract, err := LoadContract()
-	if err != nil {
-		t.Fatalf("load contract: %v", err)
-	}
+	contract := loadContract(t)
 	if contract.ProtocolVersion != Version {
 		t.Fatalf("contract protocol_version=%d but code Version=%d", contract.ProtocolVersion, Version)
 	}
 	if contract.EventSchemaVersion != EventSchemaVersion {
 		t.Fatalf("contract event_schema_version=%d but code EventSchemaVersion=%d", contract.EventSchemaVersion, EventSchemaVersion)
 	}
+	if contract.MinEventSchema != MinEventSchema || contract.MaxEventSchema != MaxEventSchema {
+		t.Fatalf(
+			"contract event schema range=%d..%d but code range=%d..%d",
+			contract.MinEventSchema,
+			contract.MaxEventSchema,
+			MinEventSchema,
+			MaxEventSchema,
+		)
+	}
 }
 
 func TestCompatibilityWindowMatchesCompiledVersions(t *testing.T) {
-	window, err := LoadCompatibility()
-	if err != nil {
-		t.Fatalf("load compatibility: %v", err)
-	}
+	window := loadCompatibility(t)
 	if window.Agent.SpeaksProtocol != Version {
 		t.Fatalf("compatibility agent.speaks_protocol=%d but Version=%d", window.Agent.SpeaksProtocol, Version)
 	}
@@ -38,6 +42,16 @@ func TestCompatibilityWindowMatchesCompiledVersions(t *testing.T) {
 	if window.Agent.EmitsEventSchema != EventSchemaVersion {
 		t.Fatalf("compatibility emits_event_schema=%d but EventSchemaVersion=%d", window.Agent.EmitsEventSchema, EventSchemaVersion)
 	}
+	if window.Agent.SupportsEventSchema.Min != MinEventSchema ||
+		window.Agent.SupportsEventSchema.Max != MaxEventSchema {
+		t.Fatalf(
+			"compatibility agent event range=%d..%d but code range=%d..%d",
+			window.Agent.SupportsEventSchema.Min,
+			window.Agent.SupportsEventSchema.Max,
+			MinEventSchema,
+			MaxEventSchema,
+		)
+	}
 	if window.IndependentRelease.ServerUpgradeRequiresAgentUpgrade {
 		t.Fatal("the compatibility window must not require agent upgrades alongside server upgrades")
 	}
@@ -47,19 +61,13 @@ func TestCompatibilityWindowMatchesCompiledVersions(t *testing.T) {
 }
 
 func TestContractResponseActionsMatchCode(t *testing.T) {
-	contract, err := LoadContract()
-	if err != nil {
-		t.Fatalf("load contract: %v", err)
-	}
+	contract := loadContract(t)
 	assertSameSet(t, "orchestration", contract.ResponseActions.Orchestration, OrchestrationActions())
 	assertSameSet(t, "privileged", contract.ResponseActions.Privileged, PrivilegedActions())
 }
 
 func TestContractProfilesMatchCode(t *testing.T) {
-	contract, err := LoadContract()
-	if err != nil {
-		t.Fatalf("load contract: %v", err)
-	}
+	contract := loadContract(t)
 	sensor, ok := contract.Profiles[ProfileSensor]
 	if !ok {
 		t.Fatal("contract does not declare the sensor profile")
@@ -86,15 +94,15 @@ func TestContractProfilesMatchCode(t *testing.T) {
 }
 
 func TestContractCoversEveryMessageTypeTheAgentSends(t *testing.T) {
-	contract, err := LoadContract()
-	if err != nil {
-		t.Fatalf("load contract: %v", err)
-	}
+	contract := loadContract(t)
 	for _, name := range []string{
 		"EnrollRequest", "EnrollResponse", "Credential", "Descriptor",
 		"CertificateRenewRequest", "CertificateRenewal", "HeartbeatRequest",
 		"NetEvent", "NetEventBatch", "InventorySnapshot", "PackageEntry",
+		"EventIngestAcknowledgement", "InventoryAcknowledgement",
 		"ResponseAction", "ResponseActionList", "ResponseActionExecutionResult",
+		"ErrorResponse", "RemoteConfig", "VulnerabilityScan",
+		"VulnerabilityFinding", "VulnerabilityBatch", "VulnerabilityAcknowledgement",
 	} {
 		if _, ok := contract.Defs[name]; !ok {
 			t.Fatalf("contract is missing a definition for %s", name)
@@ -103,10 +111,7 @@ func TestContractCoversEveryMessageTypeTheAgentSends(t *testing.T) {
 }
 
 func TestEveryContractPropertyExistsOnItsGoType(t *testing.T) {
-	contract, err := LoadContract()
-	if err != nil {
-		t.Fatalf("load contract: %v", err)
-	}
+	contract := loadContract(t)
 
 	cases := map[string]interface{}{
 		"EnrollRequest":                 EnrollRequest{},
@@ -117,10 +122,18 @@ func TestEveryContractPropertyExistsOnItsGoType(t *testing.T) {
 		"CertificateRenewal":            CertificateRenewal{},
 		"HeartbeatRequest":              HeartbeatRequest{},
 		"NetEvent":                      NetEvent{},
+		"EventIngestAcknowledgement":    EventIngestAcknowledgement{},
 		"InventorySnapshot":             InventorySnapshot{},
+		"InventoryAcknowledgement":      InventoryAcknowledgement{},
 		"PackageEntry":                  PackageEntry{},
 		"ResponseAction":                ResponseAction{},
+		"ResponseActionList":            ResponseActionList{},
 		"ResponseActionExecutionResult": ResponseActionExecutionResult{},
+		"ErrorResponse":                 ErrorResponse{},
+		"VulnerabilityScan":             VulnerabilityScan{},
+		"VulnerabilityFinding":          VulnerabilityFinding{},
+		"VulnerabilityBatch":            VulnerabilityBatch{},
+		"VulnerabilityAcknowledgement":  VulnerabilityAcknowledgement{},
 	}
 
 	for name, value := range cases {
@@ -149,10 +162,7 @@ func TestEveryContractPropertyExistsOnItsGoType(t *testing.T) {
 }
 
 func TestContractEndpointsCoverTheClientSurface(t *testing.T) {
-	contract, err := LoadContract()
-	if err != nil {
-		t.Fatalf("load contract: %v", err)
-	}
+	contract := loadContract(t)
 	for name, want := range map[string]string{
 		"enroll":                   "/enroll",
 		"heartbeat":                "/agents/heartbeat",
@@ -172,6 +182,44 @@ func TestContractEndpointsCoverTheClientSurface(t *testing.T) {
 		if endpoint.Path != want {
 			t.Fatalf("contract endpoint %s path=%q want %q", name, endpoint.Path, want)
 		}
+	}
+}
+
+func TestContractDefinesResponseActionCapabilityNegotiation(t *testing.T) {
+	contract := loadContract(t)
+	heartbeatRaw, ok := contract.Defs["HeartbeatRequest"]
+	if !ok {
+		t.Fatal("contract is missing HeartbeatRequest")
+	}
+	var heartbeat struct {
+		Properties map[string]struct {
+			Ref string `json:"$ref"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(heartbeatRaw, &heartbeat); err != nil {
+		t.Fatalf("parse HeartbeatRequest: %v", err)
+	}
+	if heartbeat.Properties["capabilities"].Ref != "#/$defs/AgentCapabilities" {
+		t.Fatalf("heartbeat capabilities do not reference AgentCapabilities")
+	}
+	capabilitiesRaw, ok := contract.Defs["AgentCapabilities"]
+	if !ok {
+		t.Fatal("contract is missing AgentCapabilities")
+	}
+	var capabilities struct {
+		Properties           map[string]json.RawMessage `json:"properties"`
+		AdditionalProperties bool                       `json:"additionalProperties"`
+	}
+	if err := json.Unmarshal(capabilitiesRaw, &capabilities); err != nil {
+		t.Fatalf("parse AgentCapabilities: %v", err)
+	}
+	for _, field := range []string{"profile", "response_actions", "response_action_types", "shell_exec"} {
+		if _, ok := capabilities.Properties[field]; !ok {
+			t.Fatalf("AgentCapabilities is missing %s", field)
+		}
+	}
+	if !capabilities.AdditionalProperties {
+		t.Fatal("AgentCapabilities must allow future optional capabilities")
 	}
 }
 
@@ -262,4 +310,30 @@ func assertSameSet(t *testing.T, label string, want, got []string) {
 			t.Fatalf("%s action set mismatch: contract=%v code=%v", label, a, b)
 		}
 	}
+}
+
+func loadContract(t *testing.T) Contract {
+	t.Helper()
+	document, err := os.ReadFile("schema/protocol-v1.json")
+	if err != nil {
+		t.Fatalf("read contract: %v", err)
+	}
+	contract, err := ParseContract(document)
+	if err != nil {
+		t.Fatalf("load contract: %v", err)
+	}
+	return contract
+}
+
+func loadCompatibility(t *testing.T) CompatibilityWindow {
+	t.Helper()
+	document, err := os.ReadFile("schema/compatibility.json")
+	if err != nil {
+		t.Fatalf("read compatibility: %v", err)
+	}
+	window, err := ParseCompatibility(document)
+	if err != nil {
+		t.Fatalf("load compatibility: %v", err)
+	}
+	return window
 }
