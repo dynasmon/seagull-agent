@@ -19,6 +19,8 @@ const (
 	ActionUnblockOutboundIP    = "unblock_outbound_ip"
 	ActionQuarantineFile       = "quarantine_file"
 	ActionRunShellCommand      = "run_shell_command"
+	ResponseActionPending      = "pending"
+	ResponseActionDelivered    = "delivered"
 )
 
 var ErrInvalidResponseAction = errors.New("invalid response action")
@@ -67,6 +69,9 @@ func (a *ResponseAction) Normalize() error {
 	}
 	if a.Status == "" {
 		return fmt.Errorf("%w: empty status", ErrInvalidResponseAction)
+	}
+	if a.Status != ResponseActionPending && a.Status != ResponseActionDelivered {
+		return fmt.Errorf("%w: unsupported status %q", ErrInvalidResponseAction, a.Status)
 	}
 	if a.RequestedAt.IsZero() {
 		return fmt.Errorf("%w: empty requested_at", ErrInvalidResponseAction)
