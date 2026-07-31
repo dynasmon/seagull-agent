@@ -1,20 +1,78 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/dynasmon/Seagull-agent/protocol/schema/protocol-v1.json",
+  "$id": "https://github.com/dynasmon/seagull-agent/protocol/schema/protocol-v1.json",
   "title": "Seagull agent control and data plane contract",
   "protocol_version": 1,
   "event_schema_version": 1,
+  "min_event_schema": 1,
+  "max_event_schema": 1,
   "endpoints": {
-    "enroll": { "method": "POST", "path": "/enroll", "listener": "enrollment", "request": "#/$defs/EnrollRequest", "response": "#/$defs/EnrollResponse" },
-    "heartbeat": { "method": "POST", "path": "/agents/heartbeat", "listener": "mtls", "request": "#/$defs/HeartbeatRequest" },
-    "config": { "method": "GET", "path": "/agents/config", "listener": "mtls" },
-    "credential_rotate": { "method": "POST", "path": "/agents/credential/rotate", "listener": "mtls", "response": "#/$defs/Credential" },
-    "certificate_renew": { "method": "POST", "path": "/agents/certificate/renew", "listener": "mtls", "request": "#/$defs/CertificateRenewRequest", "response": "#/$defs/CertificateRenewal" },
-    "response_actions_pending": { "method": "GET", "path": "/agents/response-actions/pending", "listener": "mtls", "response": "#/$defs/ResponseActionList" },
-    "response_actions_results": { "method": "POST", "path": "/agents/response-actions/results", "listener": "mtls", "request": "#/$defs/ResponseActionExecutionResult" },
-    "ingest_events": { "method": "POST", "path": "/ingest/events", "listener": "mtls", "request": "#/$defs/NetEventBatch" },
-    "ingest_inventory": { "method": "POST", "path": "/inventory", "listener": "mtls", "request": "#/$defs/InventorySnapshot" },
-    "ingest_vuln": { "method": "POST", "path": "/vuln/ingest", "listener": "mtls" }
+    "enroll": {
+      "method": "POST",
+      "path": "/enroll",
+      "listener": "enrollment",
+      "request": "#/$defs/EnrollRequest",
+      "response": "#/$defs/EnrollResponse"
+    },
+    "heartbeat": {
+      "method": "POST",
+      "path": "/agents/heartbeat",
+      "listener": "agent_authenticated",
+      "request": "#/$defs/HeartbeatRequest",
+      "response": "#/$defs/Descriptor"
+    },
+    "config": {
+      "method": "GET",
+      "path": "/agents/config",
+      "listener": "agent_authenticated",
+      "response": "#/$defs/RemoteConfig"
+    },
+    "credential_rotate": {
+      "method": "POST",
+      "path": "/agents/credential/rotate",
+      "listener": "agent_authenticated",
+      "response": "#/$defs/Credential"
+    },
+    "certificate_renew": {
+      "method": "POST",
+      "path": "/agents/certificate/renew",
+      "listener": "agent_authenticated",
+      "request": "#/$defs/CertificateRenewRequest",
+      "response": "#/$defs/CertificateRenewal"
+    },
+    "response_actions_pending": {
+      "method": "GET",
+      "path": "/agents/response-actions/pending",
+      "listener": "agent_authenticated",
+      "response": "#/$defs/ResponseActionList"
+    },
+    "response_actions_results": {
+      "method": "POST",
+      "path": "/agents/response-actions/results",
+      "listener": "agent_authenticated",
+      "request": "#/$defs/ResponseActionExecutionResult"
+    },
+    "ingest_events": {
+      "method": "POST",
+      "path": "/ingest/events",
+      "listener": "agent_authenticated",
+      "request": "#/$defs/NetEventBatch",
+      "response": "#/$defs/EventIngestAcknowledgement"
+    },
+    "ingest_inventory": {
+      "method": "POST",
+      "path": "/inventory",
+      "listener": "agent_authenticated",
+      "request": "#/$defs/InventorySnapshot",
+      "response": "#/$defs/InventoryAcknowledgement"
+    },
+    "ingest_vuln": {
+      "method": "POST",
+      "path": "/vuln/ingest",
+      "listener": "agent_authenticated",
+      "request": "#/$defs/VulnerabilityBatch",
+      "response": "#/$defs/VulnerabilityAcknowledgement"
+    }
   },
   "headers": {
     "agent_id": "X-Agent-ID",
@@ -23,8 +81,23 @@
     "batch_id": "X-Seagull-Batch-Id"
   },
   "profiles": {
-    "sensor": { "response_actions": false, "default": true },
-    "managed": { "response_actions": true, "default": false }
+    "sensor": {
+      "response_actions": false,
+      "default": true
+    },
+    "managed": {
+      "response_actions": true,
+      "default": false
+    }
+  },
+  "configuration": {
+    "revision_field": "revision",
+    "revision_type": "monotonic_integer",
+    "missing_revision_on_fresh_install": "accepted",
+    "missing_revision_after_persisted_config": "rejected",
+    "lower_revision": "rejected",
+    "same_revision_same_content": "idempotent",
+    "same_revision_different_content": "rejected"
   },
   "response_actions": {
     "orchestration": [
@@ -39,162 +112,1172 @@
       "unblock_outbound_ip",
       "quarantine_file",
       "run_shell_command"
-    ]
+    ],
+    "payloads": {
+      "collect_triage_bundle": "#/$defs/TriageBundlePayload",
+      "refresh_runtime_config": "#/$defs/EmptyActionPayload",
+      "trigger_inventory_snapshot": "#/$defs/InventoryActionPayload",
+      "trigger_topology_discovery": "#/$defs/EmptyActionPayload",
+      "kill_process": "#/$defs/KillProcessPayload",
+      "block_outbound_ip": "#/$defs/FirewallPayload",
+      "unblock_outbound_ip": "#/$defs/FirewallPayload",
+      "quarantine_file": "#/$defs/QuarantineFilePayload",
+      "run_shell_command": "#/$defs/ShellCommandPayload"
+    }
   },
   "$defs": {
     "EnrollRequest": {
       "type": "object",
-      "required": ["agent_id"],
+      "required": [
+        "agent_id"
+      ],
       "properties": {
-        "agent_id": { "type": "string", "minLength": 1, "maxLength": 64 },
-        "hostname": { "type": "string", "maxLength": 255 },
-        "os": { "type": "string", "maxLength": 128 },
-        "arch": { "type": "string", "maxLength": 32 },
-        "version": { "type": "string", "maxLength": 64 },
-        "protocol_version": { "type": "integer", "minimum": 0, "maximum": 1000 },
-        "profile": { "type": "string", "enum": ["sensor", "managed"] },
-        "csr_pem": { "type": "string", "minLength": 1, "maxLength": 16384 }
-      }
+        "enrollment_id": {
+          "type": "string",
+          "minLength": 36,
+          "maxLength": 36,
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+        },
+        "agent_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        },
+        "hostname": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "os": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "arch": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "version": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "protocol_version": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000
+        },
+        "profile": {
+          "type": "string",
+          "enum": [
+            "sensor",
+            "managed"
+          ]
+        },
+        "csr_pem": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        }
+      },
+      "additionalProperties": true
     },
     "EnrollResponse": {
       "type": "object",
-      "required": ["agent_id", "credential"],
+      "required": [
+        "agent_id",
+        "config",
+        "credential"
+      ],
       "properties": {
-        "agent_id": { "type": "string" },
-        "config": { "type": "object" },
-        "credential": { "$ref": "#/$defs/Credential" },
-        "certificate": { "oneOf": [{ "$ref": "#/$defs/CertificateRenewal" }, { "type": "null" }] },
-        "protocol": { "oneOf": [{ "$ref": "#/$defs/Descriptor" }, { "type": "null" }] }
-      }
+        "agent_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        },
+        "config": {
+          "$ref": "#/$defs/RemoteConfig"
+        },
+        "credential": {
+          "$ref": "#/$defs/Credential"
+        },
+        "certificate": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CertificateRenewal"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "protocol": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Descriptor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": true
     },
     "Credential": {
       "type": "object",
-      "required": ["credential", "expires_at"],
+      "required": [
+        "credential",
+        "expires_at"
+      ],
       "properties": {
-        "credential": { "type": "string", "minLength": 1 },
-        "expires_at": { "type": "string" },
-        "max_uses": { "type": "integer", "minimum": 0 },
-        "used_uses": { "type": "integer", "minimum": 0 },
-        "renewal_token": { "type": "string" },
-        "renewal_token_expires_at": { "type": "string" }
-      }
+        "credential": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "max_uses": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "used_uses": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "renewal_token": {
+          "type": "string"
+        },
+        "renewal_token_expires_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": true
     },
     "Descriptor": {
       "type": "object",
-      "required": ["protocol_version", "min_supported", "max_supported", "event_schema_version"],
+      "required": [
+        "protocol_version",
+        "min_supported",
+        "max_supported",
+        "event_schema_version"
+      ],
       "properties": {
-        "protocol_version": { "type": "integer", "minimum": 1 },
-        "min_supported": { "type": "integer", "minimum": 1 },
-        "max_supported": { "type": "integer", "minimum": 1 },
-        "event_schema_version": { "type": "integer", "minimum": 1 },
-        "server_time": { "type": "string" }
-      }
+        "protocol_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "min_supported": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_supported": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "event_schema_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "min_event_schema": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_event_schema": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "server_time": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": true
+    },
+    "ErrorResponse": {
+      "type": "object",
+      "required": [
+        "error",
+        "kind",
+        "agent_protocol_version",
+        "server_protocol_version",
+        "min_supported",
+        "max_supported",
+        "agent_event_schema_version",
+        "event_schema_version",
+        "min_event_schema",
+        "max_event_schema",
+        "message"
+      ],
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "protocol_version_too_old",
+            "protocol_version_too_new",
+            "event_schema_unsupported",
+            "server_descriptor_invalid"
+          ]
+        },
+        "agent_protocol_version": {
+          "type": "integer"
+        },
+        "server_protocol_version": {
+          "type": "integer"
+        },
+        "min_supported": {
+          "type": "integer"
+        },
+        "max_supported": {
+          "type": "integer"
+        },
+        "agent_event_schema_version": {
+          "type": "integer"
+        },
+        "event_schema_version": {
+          "type": "integer"
+        },
+        "min_event_schema": {
+          "type": "integer"
+        },
+        "max_event_schema": {
+          "type": "integer"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "RemoteConfig": {
+      "type": "object",
+      "properties": {
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "modules": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": true
     },
     "CertificateRenewRequest": {
       "type": "object",
-      "required": ["csr_pem"],
-      "properties": { "csr_pem": { "type": "string", "minLength": 1, "maxLength": 16384 } }
+      "required": [
+        "csr_pem"
+      ],
+      "properties": {
+        "csr_pem": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        }
+      },
+      "additionalProperties": true
     },
     "CertificateRenewal": {
       "type": "object",
-      "required": ["certificate_pem", "ca_pem", "serial_hex", "not_before", "not_after"],
+      "required": [
+        "certificate_pem",
+        "ca_pem",
+        "serial_hex",
+        "not_before",
+        "not_after"
+      ],
       "properties": {
-        "agent_id": { "type": "string" },
-        "certificate_pem": { "type": "string" },
-        "ca_pem": { "type": "string" },
-        "server_ca_pem": { "type": "string" },
-        "serial_hex": { "type": "string" },
-        "not_before": { "type": "string" },
-        "not_after": { "type": "string" }
-      }
+        "agent_id": {
+          "type": "string"
+        },
+        "certificate_pem": {
+          "type": "string"
+        },
+        "ca_pem": {
+          "type": "string"
+        },
+        "server_ca_pem": {
+          "type": "string"
+        },
+        "serial_hex": {
+          "type": "string"
+        },
+        "not_before": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "not_after": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": true
+    },
+    "AgentCapabilities": {
+      "type": "object",
+      "properties": {
+        "profile": {
+          "type": "string",
+          "enum": [
+            "sensor",
+            "managed"
+          ]
+        },
+        "response_actions": {
+          "type": "boolean"
+        },
+        "response_action_types": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32
+          }
+        },
+        "shell_exec": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": true
     },
     "HeartbeatRequest": {
       "type": "object",
-      "required": ["status"],
+      "required": [
+        "status"
+      ],
       "properties": {
-        "status": { "type": "string", "maxLength": 32 },
-        "uptime_seconds": { "type": "integer", "minimum": 0 },
-        "agent_version": { "type": "string", "maxLength": 64 },
-        "protocol_version": { "type": "integer", "minimum": 0, "maximum": 1000 },
-        "profile": { "type": "string", "enum": ["sensor", "managed"] },
-        "capabilities": { "type": "object" },
-        "modules": { "type": "object" },
-        "metrics": { "type": "object" }
-      }
+        "status": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "uptime_seconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "agent_version": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "protocol_version": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000
+        },
+        "profile": {
+          "type": "string",
+          "enum": [
+            "sensor",
+            "managed"
+          ]
+        },
+        "capabilities": {
+          "$ref": "#/$defs/AgentCapabilities"
+        },
+        "modules": {
+          "type": "object"
+        },
+        "metrics": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": true
     },
     "NetEvent": {
       "type": "object",
-      "required": ["agent_id", "event_type", "schema_version", "timestamp", "extra"],
+      "required": [
+        "agent_id",
+        "event_type",
+        "schema_version",
+        "timestamp",
+        "extra"
+      ],
       "properties": {
-        "agent_id": { "type": "string", "minLength": 1 },
-        "event_type": { "type": "string", "minLength": 1 },
-        "schema_version": { "type": "integer", "minimum": 1, "maximum": 16 },
-        "timestamp": { "type": "string" },
-        "src_ip": { "type": "string" },
-        "dst_ip": { "type": "string" },
-        "src_port": { "type": "integer", "minimum": 0, "maximum": 65535 },
-        "dst_port": { "type": "integer", "minimum": 0, "maximum": 65535 },
-        "proto": { "type": "string" },
-        "bytes": { "type": "integer", "minimum": 0 },
-        "extra": { "type": "object" }
-      }
+        "event_id": {
+          "type": "string",
+          "minLength": 36,
+          "maxLength": 36,
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "agent_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        },
+        "event_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "schema_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "src_ip": {
+          "type": "string"
+        },
+        "dst_ip": {
+          "type": "string"
+        },
+        "src_port": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "dst_port": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "proto": {
+          "type": "string"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "extra": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
     },
-    "NetEventBatch": { "type": "array", "items": { "$ref": "#/$defs/NetEvent" } },
+    "NetEventBatch": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/NetEvent"
+      },
+      "maxItems": 10000
+    },
+    "EventIngestAcknowledgement": {
+      "type": "object",
+      "required": [
+        "accepted",
+        "durable",
+        "received"
+      ],
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "durable": {
+          "type": "boolean"
+        },
+        "received": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "enqueued": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stored": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "duplicate": {
+          "type": "boolean"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "rollups_written": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": true
+    },
     "PackageEntry": {
       "type": "object",
-      "required": ["name", "version"],
+      "required": [
+        "name",
+        "version"
+      ],
       "properties": {
-        "name": { "type": "string", "minLength": 1, "maxLength": 255 },
-        "version": { "type": "string", "minLength": 1, "maxLength": 255 },
-        "arch": { "type": "string", "maxLength": 64 }
-      }
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "arch": {
+          "type": "string",
+          "maxLength": 64
+        }
+      },
+      "additionalProperties": true
     },
     "InventorySnapshot": {
       "type": "object",
-      "required": ["schema_version", "os", "packages", "extra"],
+      "required": [
+        "schema_version",
+        "os",
+        "packages",
+        "extra"
+      ],
       "properties": {
-        "schema_version": { "type": "integer", "minimum": 1, "maximum": 16 },
-        "collected_at": { "type": "string" },
-        "os": { "type": "object" },
-        "packages": { "type": "array", "items": { "$ref": "#/$defs/PackageEntry" } },
-        "packages_hash": { "type": "string", "maxLength": 64 },
-        "packages_count": { "type": "integer", "minimum": 0 },
-        "manager": { "type": "string", "maxLength": 32 },
-        "extra": { "type": "object" }
-      }
+        "schema_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1
+        },
+        "collected_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "os": {
+          "type": "object"
+        },
+        "packages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PackageEntry"
+          }
+        },
+        "packages_hash": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "packages_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "manager": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "extra": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": true
+    },
+    "InventoryAcknowledgement": {
+      "type": "object",
+      "required": [
+        "accepted",
+        "durable",
+        "stored"
+      ],
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "durable": {
+          "type": "boolean"
+        },
+        "duplicate": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "stored": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": true
+    },
+    "VulnerabilityScan": {
+      "type": "object",
+      "required": [
+        "tool"
+      ],
+      "properties": {
+        "scan_uuid": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "tool_version": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "lifecycle_state": {
+          "type": "string"
+        },
+        "current_phase": {
+          "type": "string"
+        },
+        "queued_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "acknowledged_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "started_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "finished_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "last_progress_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "trigger_source": {
+          "type": "string"
+        },
+        "error_summary": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "object"
+        },
+        "config": {
+          "type": "object"
+        },
+        "stats": {
+          "type": "object"
+        },
+        "phase_timestamps": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "VulnerabilityFinding": {
+      "type": "object",
+      "required": [
+        "asset_key",
+        "source",
+        "severity",
+        "confidence",
+        "title"
+      ],
+      "properties": {
+        "asset_key": {
+          "type": "string"
+        },
+        "asset_agent_id": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        },
+        "asset": {
+          "type": "object"
+        },
+        "source": {
+          "type": "string"
+        },
+        "external_id": {
+          "type": "string"
+        },
+        "fingerprint": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "string"
+        },
+        "confidence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "remediation": {
+          "type": "string"
+        },
+        "cve": {
+          "type": "string"
+        },
+        "cwe": {
+          "type": "string"
+        },
+        "cvss": {
+          "type": "string"
+        },
+        "location": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "evidence": {
+          "type": "object"
+        },
+        "last_seen_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": true
+    },
+    "VulnerabilityBatch": {
+      "type": "object",
+      "required": [
+        "findings"
+      ],
+      "properties": {
+        "scan": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/VulnerabilityScan"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/VulnerabilityFinding"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "VulnerabilityAcknowledgement": {
+      "type": "object",
+      "required": [
+        "accepted",
+        "durable",
+        "received_findings",
+        "stored_findings"
+      ],
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "durable": {
+          "type": "boolean"
+        },
+        "duplicate": {
+          "type": "boolean"
+        },
+        "scan_id": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "scan_uuid": {
+          "type": "string"
+        },
+        "lifecycle_state": {
+          "type": "string"
+        },
+        "current_phase": {
+          "type": "string"
+        },
+        "received_findings": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stored_findings": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": true
     },
     "ResponseAction": {
       "type": "object",
-      "required": ["id", "action_type", "agent_id", "status", "requested_at"],
+      "required": [
+        "id",
+        "action_type",
+        "agent_id",
+        "status",
+        "requested_at"
+      ],
       "properties": {
-        "id": { "type": "integer", "minimum": 1 },
-        "action_type": { "type": "string", "minLength": 1 },
-        "agent_id": { "type": "string", "minLength": 1 },
-        "status": { "type": "string", "minLength": 1 },
-        "payload": { "type": "object" },
-        "requested_at": { "type": "string" },
-        "expires_at": { "type": ["string", "null"] }
-      }
+        "id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "action_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "agent_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "delivered"
+          ]
+        },
+        "payload": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "requested_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "expires_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": true
     },
     "ResponseActionList": {
       "type": "object",
       "properties": {
-        "items": { "type": "array", "items": { "$ref": "#/$defs/ResponseAction" } },
-        "actions": { "type": "array", "items": { "$ref": "#/$defs/ResponseAction" } }
-      }
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ResponseAction"
+          }
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ResponseAction"
+          }
+        }
+      },
+      "additionalProperties": true
     },
     "ResponseActionExecutionResult": {
       "type": "object",
-      "required": ["response_action_id", "status"],
+      "required": [
+        "response_action_id",
+        "status"
+      ],
       "properties": {
-        "response_action_id": { "type": "integer", "minimum": 1 },
-        "agent_id": { "type": "string", "maxLength": 64 },
-        "status": { "type": "string", "enum": ["running", "success", "failed"] },
-        "result_payload": { "type": "object" },
-        "error": { "type": "string", "maxLength": 4000 },
-        "started_at": { "type": ["string", "null"] },
-        "finished_at": { "type": ["string", "null"] }
-      }
+        "response_action_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "agent_id": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "running",
+            "success",
+            "failed"
+          ]
+        },
+        "result_payload": {
+          "type": "object"
+        },
+        "error": {
+          "type": "string",
+          "maxLength": 4000
+        },
+        "started_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "finished_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": true
+    },
+    "EmptyActionPayload": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "TriageBundlePayload": {
+      "type": "object",
+      "properties": {
+        "collectors": {
+          "type": "object",
+          "properties": {
+            "runtime": {
+              "type": "boolean"
+            },
+            "host": {
+              "type": "boolean"
+            },
+            "processes": {
+              "type": "boolean"
+            },
+            "network": {
+              "type": "boolean"
+            },
+            "auth_log": {
+              "type": "boolean"
+            },
+            "recent_events": {
+              "type": "boolean"
+            },
+            "effective_config": {
+              "type": "boolean"
+            }
+          }
+        },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "max_auth_log_lines": {
+              "type": "integer",
+              "minimum": 10,
+              "maximum": 5000
+            },
+            "max_processes": {
+              "type": "integer",
+              "minimum": 10,
+              "maximum": 2000
+            },
+            "max_connections": {
+              "type": "integer",
+              "minimum": 10,
+              "maximum": 2000
+            },
+            "max_event_count": {
+              "type": "integer",
+              "minimum": 10,
+              "maximum": 5000
+            }
+          }
+        },
+        "redaction": {
+          "type": "object",
+          "properties": {
+            "mask_secrets": {
+              "type": "boolean"
+            }
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "InventoryActionPayload": {
+      "type": "object",
+      "properties": {
+        "limits": {
+          "type": "object",
+          "properties": {
+            "max_processes": {
+              "type": "integer",
+              "minimum": 10,
+              "maximum": 2000
+            },
+            "max_connections": {
+              "type": "integer",
+              "minimum": 10,
+              "maximum": 2000
+            }
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "KillProcessPayload": {
+      "type": "object",
+      "required": [
+        "target"
+      ],
+      "properties": {
+        "target": {
+          "type": "object",
+          "oneOf": [
+            {
+              "required": [
+                "pid"
+              ]
+            },
+            {
+              "required": [
+                "name"
+              ]
+            }
+          ],
+          "properties": {
+            "pid": {
+              "type": "integer",
+              "minimum": 2
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "signal": {
+          "type": "string",
+          "enum": [
+            "SIGTERM",
+            "SIGKILL",
+            "SIGINT",
+            "SIGHUP",
+            "SIGQUIT",
+            "SIGSTOP",
+            "SIGCONT",
+            "SIGUSR1",
+            "SIGUSR2"
+          ]
+        },
+        "dry_run": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": true
+    },
+    "FirewallPayload": {
+      "type": "object",
+      "required": [
+        "ip"
+      ],
+      "properties": {
+        "ip": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "protocol": {
+          "type": "string",
+          "enum": [
+            "tcp",
+            "udp"
+          ]
+        },
+        "comment": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "dry_run": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": true
+    },
+    "QuarantineFilePayload": {
+      "type": "object",
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "compute_hash": {
+          "type": "boolean"
+        },
+        "dry_run": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": true
+    },
+    "ShellCommandPayload": {
+      "type": "object",
+      "oneOf": [
+        {
+          "required": [
+            "command"
+          ]
+        },
+        {
+          "required": [
+            "arguments"
+          ]
+        }
+      ],
+      "properties": {
+        "command": {
+          "type": "string",
+          "minLength": 1
+        },
+        "arguments": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 300
+        },
+        "working_dir": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
     }
   }
 }

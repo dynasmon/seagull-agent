@@ -17,6 +17,7 @@ type PersistedIdentityState struct {
 	PreviousRenewalToken          string `json:"previous_renewal_token,omitempty"`
 	PreviousRenewalTokenExpiresAt string `json:"previous_renewal_token_expires_at,omitempty"`
 	LastRecoveryMethod            string `json:"last_recovery_method,omitempty"`
+	BootstrapTokenConsumed        bool   `json:"bootstrap_token_consumed,omitempty"`
 	UpdatedAt                     string `json:"updated_at,omitempty"`
 }
 

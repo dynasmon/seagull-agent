@@ -5,9 +5,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dynasmon/Seagull-agent/internal/certrenew"
-	agentcfg "github.com/dynasmon/Seagull-agent/internal/config"
-	"github.com/dynasmon/Seagull-agent/internal/jitter"
+	"github.com/dynasmon/seagull-agent/internal/certrenew"
+	agentcfg "github.com/dynasmon/seagull-agent/internal/config"
+	"github.com/dynasmon/seagull-agent/internal/jitter"
 )
 
 func (s *Service) startCertificateRotation(rootCtx context.Context) {
@@ -48,8 +48,7 @@ func (s *Service) startCertificateRotation(rootCtx context.Context) {
 func (s *Service) maybeRenewCertificate(rootCtx context.Context) {
 	needed, current, err := certrenew.NeedsRenewal(s.cfg.TLSCertFile, s.cfg.CertRotateBefore, time.Now().UTC())
 	if err != nil {
-		s.state.CertRenewErrorsTotal++
-		s.state.CertLastRenewError = err.Error()
+		s.recordCertificateRenewError(err)
 		agentcfg.LogJSON(agentcfg.LevelWarn, "agent_certificate_inspect_failed", map[string]interface{}{
 			"agent_id":  s.cfg.AgentID,
 			"cert_file": s.cfg.TLSCertFile,
@@ -63,8 +62,7 @@ func (s *Service) maybeRenewCertificate(rootCtx context.Context) {
 
 	keyPEM, csrPEM, err := certrenew.NewKeyAndCSR(s.cfg.AgentID)
 	if err != nil {
-		s.state.CertRenewErrorsTotal++
-		s.state.CertLastRenewError = err.Error()
+		s.recordCertificateRenewError(err)
 		agentcfg.LogJSON(agentcfg.LevelWarn, "agent_certificate_csr_failed", map[string]interface{}{
 			"agent_id": s.cfg.AgentID,
 			"error":    err.Error(),
@@ -76,8 +74,7 @@ func (s *Service) maybeRenewCertificate(rootCtx context.Context) {
 	renewed, err := s.cp.RenewCertificate(ctx, string(csrPEM))
 	cancel()
 	if err != nil {
-		s.state.CertRenewErrorsTotal++
-		s.state.CertLastRenewError = err.Error()
+		s.recordCertificateRenewError(err)
 		agentcfg.LogJSON(agentcfg.LevelWarn, "agent_certificate_renew_failed", map[string]interface{}{
 			"agent_id":       s.cfg.AgentID,
 			"current_serial": current.SerialHex,
@@ -88,10 +85,14 @@ func (s *Service) maybeRenewCertificate(rootCtx context.Context) {
 		return
 	}
 
-	if err := certrenew.PersistPair([]byte(renewed.CertificatePEM), keyPEM, s.cfg.TLSCertFile, s.cfg.TLSKeyFile); err != nil {
-		s.state.CertRenewErrorsTotal++
-		s.state.CertLastRenewError = err.Error()
-		agentcfg.LogJSON(agentcfg.LevelWarn, "agent_certificate_persist_failed", map[string]interface{}{
+	if _, err := certrenew.ValidateIssuedPair(
+		[]byte(renewed.CertificatePEM),
+		keyPEM,
+		s.cfg.AgentID,
+		time.Now().UTC(),
+	); err != nil {
+		s.recordCertificateRenewError(err)
+		agentcfg.LogJSON(agentcfg.LevelWarn, "agent_certificate_validation_failed", map[string]interface{}{
 			"agent_id": s.cfg.AgentID,
 			"error":    err.Error(),
 		})
@@ -99,11 +100,13 @@ func (s *Service) maybeRenewCertificate(rootCtx context.Context) {
 	}
 
 	if changed, err := certrenew.PersistServerCA(renewed.ServerCAPEM, s.cfg.TLSCAFile); err != nil {
+		s.recordCertificateRenewError(err)
 		agentcfg.LogJSON(agentcfg.LevelWarn, "agent_server_ca_persist_failed", map[string]interface{}{
 			"agent_id": s.cfg.AgentID,
 			"path":     s.cfg.TLSCAFile,
 			"error":    err.Error(),
 		})
+		return
 	} else if changed {
 		agentcfg.LogJSON(agentcfg.LevelInfo, "agent_server_ca_rotated", map[string]interface{}{
 			"agent_id": s.cfg.AgentID,
@@ -111,12 +114,33 @@ func (s *Service) maybeRenewCertificate(rootCtx context.Context) {
 		})
 	}
 
-	s.state.CertRenewalsTotal++
-	s.state.CertLastRenewError = ""
+	if err := certrenew.PersistPair([]byte(renewed.CertificatePEM), keyPEM, s.cfg.AgentID, s.cfg.TLSCertFile, s.cfg.TLSKeyFile); err != nil {
+		s.recordCertificateRenewError(err)
+		agentcfg.LogJSON(agentcfg.LevelWarn, "agent_certificate_persist_failed", map[string]interface{}{
+			"agent_id": s.cfg.AgentID,
+			"error":    err.Error(),
+		})
+		return
+	}
+	if s.httpClient != nil {
+		s.httpClient.CloseIdleConnections()
+	}
+
+	s.updateState(func(state *SummaryState) {
+		state.CertRenewalsTotal++
+		state.CertLastRenewError = ""
+	})
 	agentcfg.LogJSON(agentcfg.LevelInfo, "agent_certificate_renewed", map[string]interface{}{
 		"agent_id":        s.cfg.AgentID,
 		"previous_serial": current.SerialHex,
 		"serial":          renewed.SerialHex,
 		"not_after":       strings.TrimSpace(renewed.NotAfter),
+	})
+}
+
+func (s *Service) recordCertificateRenewError(err error) {
+	s.updateState(func(state *SummaryState) {
+		state.CertRenewErrorsTotal++
+		state.CertLastRenewError = err.Error()
 	})
 }

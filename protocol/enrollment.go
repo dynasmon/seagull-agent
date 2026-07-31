@@ -1,6 +1,7 @@
 package protocol
 
 type EnrollRequest struct {
+	EnrollmentID    string `json:"enrollment_id,omitempty"`
 	AgentID         string `json:"agent_id"`
 	Hostname        string `json:"hostname,omitempty"`
 	OS              string `json:"os,omitempty"`

@@ -12,6 +12,7 @@ const (
 	MaxSupportedServer = 1
 	EventSchemaVersion = 1
 	MinEventSchema     = 1
+	MaxEventSchema     = 1
 )
 
 type Descriptor struct {
@@ -19,6 +20,8 @@ type Descriptor struct {
 	MinSupported       int    `json:"min_supported"`
 	MaxSupported       int    `json:"max_supported"`
 	EventSchemaVersion int    `json:"event_schema_version"`
+	MinEventSchema     int    `json:"min_event_schema,omitempty"`
+	MaxEventSchema     int    `json:"max_event_schema,omitempty"`
 	ServerTime         string `json:"server_time,omitempty"`
 }
 
@@ -39,7 +42,11 @@ type Incompatibility struct {
 	ServerMax         int                 `json:"server_max_supported"`
 	AgentEventSchema  int                 `json:"agent_event_schema"`
 	ServerEventSchema int                 `json:"server_event_schema"`
+	ServerMinEvent    int                 `json:"server_min_event_schema"`
+	ServerMaxEvent    int                 `json:"server_max_event_schema"`
+	HTTPStatus        int                 `json:"http_status,omitempty"`
 	Detail            string              `json:"detail"`
+	ServerResponse    string              `json:"server_response,omitempty"`
 }
 
 func (i *Incompatibility) Error() string {
@@ -62,6 +69,8 @@ func LocalDescriptor() Descriptor {
 		MinSupported:       MinSupportedServer,
 		MaxSupported:       MaxSupportedServer,
 		EventSchemaVersion: EventSchemaVersion,
+		MinEventSchema:     MinEventSchema,
+		MaxEventSchema:     MaxEventSchema,
 	}
 }
 
@@ -124,10 +133,44 @@ func Negotiate(server *Descriptor) (Negotiation, *Incompatibility) {
 	}
 
 	serverEventSchema := server.EventSchemaVersion
-	if serverEventSchema <= 0 {
-		serverEventSchema = EventSchemaVersion
+	serverMinEvent := server.MinEventSchema
+	serverMaxEvent := server.MaxEventSchema
+	if serverMinEvent <= 0 && serverMaxEvent <= 0 {
+		if serverEventSchema <= 0 {
+			serverEventSchema = EventSchemaVersion
+		}
+		serverMinEvent = serverEventSchema
+		serverMaxEvent = serverEventSchema
 	}
-	if serverEventSchema < MinEventSchema {
+	if serverMinEvent <= 0 || serverMaxEvent <= 0 || serverMinEvent > serverMaxEvent {
+		return Negotiation{}, &Incompatibility{
+			Kind:              IncompatibleServerAdvertise,
+			AgentProtocol:     local.ProtocolVersion,
+			ServerProtocol:    server.ProtocolVersion,
+			ServerMin:         serverMin,
+			ServerMax:         serverMax,
+			AgentEventSchema:  local.EventSchemaVersion,
+			ServerEventSchema: serverEventSchema,
+			ServerMinEvent:    server.MinEventSchema,
+			ServerMaxEvent:    server.MaxEventSchema,
+			Detail:            "server advertised an unusable supported event schema range",
+		}
+	}
+	if serverEventSchema > 0 && (serverEventSchema < serverMinEvent || serverEventSchema > serverMaxEvent) {
+		return Negotiation{}, &Incompatibility{
+			Kind:              IncompatibleServerAdvertise,
+			AgentProtocol:     local.ProtocolVersion,
+			ServerProtocol:    server.ProtocolVersion,
+			ServerMin:         serverMin,
+			ServerMax:         serverMax,
+			AgentEventSchema:  local.EventSchemaVersion,
+			ServerEventSchema: serverEventSchema,
+			ServerMinEvent:    serverMinEvent,
+			ServerMaxEvent:    serverMaxEvent,
+			Detail:            "server event schema version is outside its advertised supported range",
+		}
+	}
+	if MaxEventSchema < serverMinEvent || MinEventSchema > serverMaxEvent {
 		return Negotiation{}, &Incompatibility{
 			Kind:              IncompatibleEventSchema,
 			AgentProtocol:     local.ProtocolVersion,
@@ -136,23 +179,28 @@ func Negotiate(server *Descriptor) (Negotiation, *Incompatibility) {
 			ServerMax:         serverMax,
 			AgentEventSchema:  local.EventSchemaVersion,
 			ServerEventSchema: serverEventSchema,
+			ServerMinEvent:    serverMinEvent,
+			ServerMaxEvent:    serverMaxEvent,
 			Detail: fmt.Sprintf(
-				"server accepts event schema %d but the agent emits %d",
-				serverEventSchema, local.EventSchemaVersion,
+				"agent supports event schemas %d..%d but the server accepts %d..%d",
+				MinEventSchema, MaxEventSchema, serverMinEvent, serverMaxEvent,
 			),
 		}
 	}
 
+	negotiatedEventSchema := local.EventSchemaVersion
+	if negotiatedEventSchema > serverMaxEvent {
+		negotiatedEventSchema = serverMaxEvent
+	}
 	negotiated := Negotiation{
 		ProtocolVersion:    local.ProtocolVersion,
-		EventSchemaVersion: local.EventSchemaVersion,
+		EventSchemaVersion: negotiatedEventSchema,
 	}
-	if serverEventSchema < local.EventSchemaVersion {
-		negotiated.EventSchemaVersion = serverEventSchema
+	if negotiatedEventSchema < local.EventSchemaVersion {
 		negotiated.Degraded = true
 		negotiated.Notes = append(negotiated.Notes, fmt.Sprintf(
 			"emitting event schema %d because the server accepts at most %d",
-			serverEventSchema, serverEventSchema,
+			negotiatedEventSchema, serverMaxEvent,
 		))
 	}
 	return negotiated, nil

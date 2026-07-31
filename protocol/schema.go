@@ -1,21 +1,15 @@
 package protocol
 
 import (
-	_ "embed"
 	"encoding/json"
 	"fmt"
-	"sync"
 )
-
-//go:embed schema/protocol-v1.json
-var contractDocument []byte
-
-//go:embed schema/compatibility.json
-var compatibilityDocument []byte
 
 type Contract struct {
 	ProtocolVersion    int                         `json:"protocol_version"`
 	EventSchemaVersion int                         `json:"event_schema_version"`
+	MinEventSchema     int                         `json:"min_event_schema"`
+	MaxEventSchema     int                         `json:"max_event_schema"`
 	Endpoints          map[string]ContractEndpoint `json:"endpoints"`
 	Headers            map[string]string           `json:"headers"`
 	Profiles           map[string]ContractProfile  `json:"profiles"`
@@ -50,7 +44,11 @@ type CompatibilityWindow struct {
 			Min int `json:"min"`
 			Max int `json:"max"`
 		} `json:"accepts_server_protocol"`
-		EmitsEventSchema int `json:"emits_event_schema"`
+		EmitsEventSchema    int `json:"emits_event_schema"`
+		SupportsEventSchema struct {
+			Min int `json:"min"`
+			Max int `json:"max"`
+		} `json:"supports_event_schema"`
 	} `json:"agent"`
 	Server struct {
 		OldestSupportedAgentProtocol int `json:"oldest_supported_agent_protocol"`
@@ -67,42 +65,18 @@ type CompatibilityWindow struct {
 	} `json:"independent_release"`
 }
 
-var (
-	contractOnce sync.Once
-	contract     Contract
-	contractErr  error
-
-	compatibilityOnce sync.Once
-	compatibility     CompatibilityWindow
-	compatibilityErr  error
-)
-
-func ContractDocument() []byte {
-	out := make([]byte, len(contractDocument))
-	copy(out, contractDocument)
-	return out
+func ParseContract(document []byte) (Contract, error) {
+	var contract Contract
+	if err := json.Unmarshal(document, &contract); err != nil {
+		return Contract{}, fmt.Errorf("parse protocol contract: %w", err)
+	}
+	return contract, nil
 }
 
-func CompatibilityDocument() []byte {
-	out := make([]byte, len(compatibilityDocument))
-	copy(out, compatibilityDocument)
-	return out
-}
-
-func LoadContract() (Contract, error) {
-	contractOnce.Do(func() {
-		if err := json.Unmarshal(contractDocument, &contract); err != nil {
-			contractErr = fmt.Errorf("parse protocol contract: %w", err)
-		}
-	})
-	return contract, contractErr
-}
-
-func LoadCompatibility() (CompatibilityWindow, error) {
-	compatibilityOnce.Do(func() {
-		if err := json.Unmarshal(compatibilityDocument, &compatibility); err != nil {
-			compatibilityErr = fmt.Errorf("parse compatibility window: %w", err)
-		}
-	})
-	return compatibility, compatibilityErr
+func ParseCompatibility(document []byte) (CompatibilityWindow, error) {
+	var compatibility CompatibilityWindow
+	if err := json.Unmarshal(document, &compatibility); err != nil {
+		return CompatibilityWindow{}, fmt.Errorf("parse compatibility window: %w", err)
+	}
+	return compatibility, nil
 }
