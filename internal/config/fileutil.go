@@ -1,30 +1,46 @@
 package agentcfg
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
 func AtomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fmt.Errorf("atomic write path is empty")
+	}
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return fmt.Errorf("mkdir %s: %w", dir, err)
 	}
 
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
+	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return fmt.Errorf("open temp file: %w", err)
 	}
-	_, werr := f.Write(data)
-	_ = f.Sync()
+	tmp := f.Name()
+	if err := f.Chmod(perm); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("chmod temp file: %w", err)
+	}
+	_, werr := io.Copy(f, bytes.NewReader(data))
+	syncErr := f.Sync()
 	cerr := f.Close()
 	if werr != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("write temp file: %w", werr)
+	}
+	if syncErr != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("sync temp file: %w", syncErr)
 	}
 	if cerr != nil {
 		_ = os.Remove(tmp)
@@ -33,6 +49,18 @@ func AtomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("rename temp file: %w", err)
+	}
+	directory, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open parent directory: %w", err)
+	}
+	syncErr = directory.Sync()
+	cerr = directory.Close()
+	if syncErr != nil {
+		return fmt.Errorf("sync parent directory: %w", syncErr)
+	}
+	if cerr != nil {
+		return fmt.Errorf("close parent directory: %w", cerr)
 	}
 	return nil
 }
@@ -74,6 +102,9 @@ func ToInt64(v interface{}) (int64, bool) {
 	case int64:
 		return t, true
 	case float64:
+		if math.IsNaN(t) || math.IsInf(t, 0) || math.Trunc(t) != t || t < math.MinInt64 || t > math.MaxInt64 {
+			return 0, false
+		}
 		return int64(t), true
 	case json.Number:
 		i, err := t.Int64()
