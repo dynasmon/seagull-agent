@@ -3,8 +3,8 @@ package sources
 import (
 	"time"
 
-	"github.com/dynasmon/Seagull-agent/internal/mathx"
-	"github.com/dynasmon/Seagull-agent/protocol"
+	"github.com/dynasmon/seagull-agent/internal/mathx"
+	"github.com/dynasmon/seagull-agent/protocol"
 )
 
 type ScanStats struct {
