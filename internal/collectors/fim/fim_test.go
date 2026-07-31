@@ -19,6 +19,47 @@ func TestClassifyPathCategory(t *testing.T) {
 	}
 }
 
+func TestDiffDetectsSameSizeRewriteWithUnchangedModTime(t *testing.T) {
+	td := t.TempDir()
+	target := filepath.Join(td, "test.service")
+	if err := os.WriteFile(target, []byte("a=1\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("stat file: %v", err)
+	}
+	stamp := info.ModTime()
+
+	c := New("agent-fim", Options{
+		WatchPaths:  []string{target},
+		MinInterval: 0,
+		HashEnabled: true,
+	})
+	now := time.Now().UTC()
+	if first, err := c.Capture(now); err != nil || len(first) != 0 {
+		t.Fatalf("baseline capture events=%d err=%v", len(first), err)
+	}
+
+	if err := os.WriteFile(target, []byte("a=2\n"), 0o644); err != nil {
+		t.Fatalf("modify file: %v", err)
+	}
+	if err := os.Chtimes(target, stamp, stamp); err != nil {
+		t.Fatalf("restore modification time: %v", err)
+	}
+
+	modified, err := c.Capture(now.Add(31 * time.Second))
+	if err != nil {
+		t.Fatalf("second capture: %v", err)
+	}
+	if len(modified) != 1 {
+		t.Fatalf("expected one modify event got=%d", len(modified))
+	}
+	if modified[0].Extra["action"] != "modify" {
+		t.Fatalf("expected action=modify got=%v", modified[0].Extra["action"])
+	}
+}
+
 func TestDiffCreateModifyDelete(t *testing.T) {
 	td := t.TempDir()
 	target := filepath.Join(td, "test.service")
