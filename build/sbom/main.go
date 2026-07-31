@@ -83,10 +83,10 @@ func main() {
 			}},
 			Component: component{
 				Type:    "application",
-				BOMRef:  "pkg:golang/github.com/dynasmon/Seagull-agent@" + *version,
+				BOMRef:  "pkg:golang/github.com/dynasmon/seagull-agent@" + *version,
 				Name:    *name,
 				Version: *version,
-				PURL:    "pkg:golang/github.com/dynasmon/Seagull-agent@" + *version,
+				PURL:    "pkg:golang/github.com/dynasmon/seagull-agent@" + *version,
 				Hashes:  []hashRef{{Alg: "SHA-256", Content: digest}},
 				Properties: []property{
 					{Name: "seagull:go.version", Value: goVersion},
@@ -144,7 +144,7 @@ func readBuildModules(binary string) ([]component, string, error) {
 				Version: moduleVersion,
 				PURL:    ref,
 			}
-			if len(fields) >= 5 && strings.HasPrefix(fields[3], "h1:") {
+			if len(fields) >= 4 && strings.HasPrefix(fields[3], "h1:") {
 				entry.Properties = append(entry.Properties, property{Name: "go:mod:h1", Value: fields[3]})
 			}
 			seen[ref] = entry
