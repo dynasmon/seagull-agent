@@ -61,6 +61,44 @@ func TestHashExecutableCache(t *testing.T) {
 	}
 }
 
+func TestHashExecutableDetectsSameSizeRewriteWithUnchangedModTime(t *testing.T) {
+	td := t.TempDir()
+	bin := filepath.Join(td, "tool.bin")
+	if err := os.WriteFile(bin, []byte("hello-world"), 0o755); err != nil {
+		t.Fatalf("write binary: %v", err)
+	}
+	info, err := os.Stat(bin)
+	if err != nil {
+		t.Fatalf("stat binary: %v", err)
+	}
+	stamp := info.ModTime()
+
+	c := New("agent-1", Options{
+		HashExecutables: true,
+		HashMaxBytes:    1024,
+	})
+	now := time.Now().UTC()
+	original, ok := c.hashExecutable(bin, now)
+	if !ok || original == "" {
+		t.Fatalf("expected first hash")
+	}
+
+	if err := os.WriteFile(bin, []byte("hello-w0rld"), 0o755); err != nil {
+		t.Fatalf("rewrite binary: %v", err)
+	}
+	if err := os.Chtimes(bin, stamp, stamp); err != nil {
+		t.Fatalf("restore modification time: %v", err)
+	}
+
+	replaced, ok := c.hashExecutable(bin, now.Add(10*time.Second))
+	if !ok || replaced == "" {
+		t.Fatalf("expected a hash for the replaced binary")
+	}
+	if replaced == original {
+		t.Fatal("replaced binary reported the previous hash")
+	}
+}
+
 func TestCaptureSkipsInitialSnapshotByDefault(t *testing.T) {
 	td := t.TempDir()
 	procRoot := filepath.Join(td, "proc")
