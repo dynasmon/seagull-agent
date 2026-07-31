@@ -9,14 +9,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
-	"github.com/google/gopacket/pcap"
+	"github.com/gopacket/gopacket"
+	"github.com/gopacket/gopacket/layers"
+	"github.com/gopacket/gopacket/pcap"
 
-	"github.com/dynasmon/Seagull-agent/internal/collectors/pcapx"
-	"github.com/dynasmon/Seagull-agent/internal/mathx"
-	"github.com/dynasmon/Seagull-agent/internal/netcontext"
-	"github.com/dynasmon/Seagull-agent/protocol"
+	"github.com/dynasmon/seagull-agent/internal/collectors/pcapx"
+	"github.com/dynasmon/seagull-agent/internal/mathx"
+	"github.com/dynasmon/seagull-agent/internal/netcontext"
+	"github.com/dynasmon/seagull-agent/protocol"
 )
 
 type PcapDDoSOptions struct {
