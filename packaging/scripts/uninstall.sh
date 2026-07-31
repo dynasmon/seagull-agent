@@ -36,6 +36,7 @@ done
 main() {
   require_root
   layout_init
+  acquire_install_lock
 
   if systemd_available; then
     systemctl disable --now "${SERVICE_NAME}" >/dev/null 2>&1 || true
@@ -44,11 +45,13 @@ main() {
   fi
 
   service_remove_unit
+  layout_configure_log_read ""
   rm -f "$(rooted /etc/systemd/system/seagull-agent-ca-sync.service)"
   rm -f "$(rooted /etc/systemd/system/seagull-agent-ca-sync.timer)"
   rm -f "$(rooted /usr/local/lib/seagull/seagull-agent-sync-ca.sh)"
   rm -f "${BIN_PATH}"
   rm -rf "${RELEASE_DIR}"
+  rm -f "${RELEASE_STATE_PATH}"
 
   if [[ "${PURGE}" == "1" ]]; then
     rm -rf "${CONFIG_DIR}" "${STATE_DIR}" "${LOG_DIR}"
