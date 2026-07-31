@@ -74,3 +74,33 @@ require_systemd() {
 package_dir() {
   printf '%s' "${SEAGULL_PACKAGE_DIR:?package directory is not set}"
 }
+
+atomic_replace_from_stdin() {
+  local path="$1"
+  local mode="$2"
+  local dir
+  dir="$(dirname -- "${path}")"
+  install -d -m 0755 "${dir}"
+  local tmp
+  tmp="$(mktemp "${dir}/.$(basename -- "${path}").XXXXXX")"
+  if ! cat > "${tmp}"; then
+    rm -f "${tmp}"
+    return 1
+  fi
+  chmod "${mode}" "${tmp}"
+  if [[ -e "${path}" ]]; then
+    chown --reference="${path}" "${tmp}" 2>/dev/null || true
+  fi
+  sync -f "${tmp}" 2>/dev/null || sync
+  mv -f "${tmp}" "${path}"
+  sync -f "${dir}" 2>/dev/null || sync
+}
+
+acquire_install_lock() {
+  have flock || die "flock is required"
+  install -d -m 0755 "$(dirname -- "${LOCK_PATH}")"
+  exec {SEAGULL_LOCK_FD}>"${LOCK_PATH}"
+  if ! flock -n "${SEAGULL_LOCK_FD}"; then
+    die "another seagull-agent package operation is running"
+  fi
+}

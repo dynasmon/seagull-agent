@@ -2,15 +2,18 @@ package sources
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
-	agentcfg "github.com/dynasmon/Seagull-agent/internal/config"
-	"github.com/dynasmon/Seagull-agent/protocol"
+	agentcfg "github.com/dynasmon/seagull-agent/internal/config"
+	"github.com/dynasmon/seagull-agent/protocol"
 )
 
 type CycleResult struct {
 	Sent          int
+	Attempted     int
+	Durable       int
 	Status        int
 	DurationMS    int64
 	Error         string
@@ -35,6 +38,8 @@ func (m *Manager) RunOnce(rootCtx context.Context) *CycleResult {
 	events := make([]protocol.NetEvent, 0, 1024)
 	scanRaw := make([]protocol.NetEvent, 0, 1024)
 	ddosEvs := make([]protocol.NetEvent, 0, 64)
+	authCaptured := 0
+	authCaptureActive := false
 
 	if m.authCapturer != nil {
 		evs, err := m.authCapturer.Capture(time.Now().UTC())
@@ -43,8 +48,12 @@ func (m *Manager) RunOnce(rootCtx context.Context) *CycleResult {
 				"agent_id": m.cfg.AgentID,
 				"error":    err.Error(),
 			})
-		} else if len(evs) > 0 {
-			events = append(events, evs...)
+		} else {
+			authCaptureActive = true
+			authCaptured = len(evs)
+			if len(evs) > 0 {
+				events = append(events, evs...)
+			}
 		}
 	}
 
@@ -150,11 +159,17 @@ func (m *Manager) RunOnce(rootCtx context.Context) *CycleResult {
 	}
 
 	if len(events) == 0 {
+		checkpointError := ""
+		if authCaptureActive {
+			if err := m.authCapturer.Commit(); err != nil {
+				checkpointError = err.Error()
+			}
+		}
 		return &CycleResult{
 			Sent:          0,
 			Status:        0,
 			DurationMS:    time.Since(start).Milliseconds(),
-			Error:         "",
+			Error:         checkpointError,
 			SendAttempted: false,
 
 			SSHAuthEvents: sshAuthEvents,
@@ -173,12 +188,21 @@ func (m *Manager) RunOnce(rootCtx context.Context) *CycleResult {
 
 	normalizeEvents(events, m.cfg.AgentID)
 	ctx, cancel := context.WithTimeout(rootCtx, m.cfg.HTTPTimeout)
-	status, err := m.sender.SendEvents(ctx, events)
+	delivery, err := m.sender.SendEvents(ctx, events)
 	cancel()
+	if authCaptureActive {
+		if delivery.Durable >= authCaptured {
+			err = errors.Join(err, m.authCapturer.Commit())
+		} else {
+			m.authCapturer.Rollback()
+		}
+	}
 
 	res := &CycleResult{
-		Sent:          len(events),
-		Status:        status,
+		Sent:          delivery.Delivered,
+		Attempted:     len(events),
+		Durable:       delivery.Durable,
+		Status:        delivery.Status,
 		DurationMS:    time.Since(start).Milliseconds(),
 		SendAttempted: true,
 

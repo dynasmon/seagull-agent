@@ -1,20 +1,59 @@
 migrate_legacy_installation() {
   migrate_legacy_pki_layout
+  migrate_legacy_ca_layout
   migrate_legacy_token_layout
   migrate_legacy_profile
   migrate_drop_repo_ca_sync
 }
 
+migrate_legacy_ca_layout() {
+  local legacy_ca="${PKI_DIR}/root_ca.crt"
+  local configured
+  configured="$(env_value SEAGULL_TLS_CA_FILE "${ENV_PATH}")"
+  if [[ -f "${legacy_ca}" ]]; then
+    if [[ -f "${CA_PATH}" ]]; then
+      cmp -s "${legacy_ca}" "${CA_PATH}" || die "legacy and migrated server trust anchors conflict"
+    else
+      install -m 0644 "${legacy_ca}" "${CA_PATH}"
+    fi
+    own "${CA_PATH}"
+    rm -f "${legacy_ca}"
+    log "migrated the server trust anchor to ${CA_PATH}"
+  fi
+  if [[ "${configured}" == "/etc/seagull/pki/root_ca.crt" ]]; then
+    set_env_value SEAGULL_TLS_CA_FILE "${CA_PATH#$(install_root)}" "${ENV_PATH}"
+    log "rewrote the legacy server CA path in ${ENV_PATH}"
+  fi
+}
+
 migrate_legacy_pki_layout() {
   local legacy_cert="${PKI_DIR}/agent.crt"
   local legacy_key="${PKI_DIR}/agent.key"
+  local migrated=0
 
-  if [[ -f "${legacy_cert}" && -f "${legacy_key}" && ! -f "${CLIENT_CERT_PATH}" ]]; then
+  if [[ -f "${legacy_cert}" || -f "${legacy_key}" ]]; then
     install -d -m 0700 "${RUNTIME_PKI_DIR}"
-    install -m 0644 "${legacy_cert}" "${CLIENT_CERT_PATH}"
-    install -m 0600 "${legacy_key}" "${CLIENT_KEY_PATH}"
+  fi
+  if [[ -f "${legacy_cert}" ]]; then
+    if [[ -f "${CLIENT_CERT_PATH}" ]]; then
+      cmp -s "${legacy_cert}" "${CLIENT_CERT_PATH}" || die "legacy and migrated client certificates conflict"
+    else
+      install -m 0644 "${legacy_cert}" "${CLIENT_CERT_PATH}"
+    fi
     own "${CLIENT_CERT_PATH}"
+    migrated=1
+  fi
+  if [[ -f "${legacy_key}" ]]; then
+    if [[ -f "${CLIENT_KEY_PATH}" ]]; then
+      cmp -s "${legacy_key}" "${CLIENT_KEY_PATH}" || die "legacy and migrated client private keys conflict"
+    else
+      install -m 0600 "${legacy_key}" "${CLIENT_KEY_PATH}"
+    fi
     own "${CLIENT_KEY_PATH}"
+    migrated=1
+  fi
+  if [[ "${migrated}" == "1" ]]; then
+    [[ -f "${CLIENT_CERT_PATH}" && -f "${CLIENT_KEY_PATH}" ]] || die "legacy client identity is incomplete"
     rm -f "${legacy_cert}" "${legacy_key}"
     log "migrated client certificate to ${RUNTIME_PKI_DIR}"
   fi
@@ -31,9 +70,13 @@ migrate_legacy_pki_layout() {
 
 migrate_legacy_token_layout() {
   local legacy_token="${CONFIG_DIR}/bootstrap.token"
-  if [[ -f "${legacy_token}" && ! -s "${TOKEN_PATH}" ]]; then
-    install -d -m 0755 "$(dirname -- "${TOKEN_PATH}")"
-    install -m 0600 "${legacy_token}" "${TOKEN_PATH}"
+  if [[ -f "${legacy_token}" ]]; then
+    if [[ -s "${TOKEN_PATH}" ]]; then
+      cmp -s "${legacy_token}" "${TOKEN_PATH}" || die "legacy and migrated bootstrap tokens conflict"
+    else
+      install -d -m 0755 "$(dirname -- "${TOKEN_PATH}")"
+      install -m 0600 "${legacy_token}" "${TOKEN_PATH}"
+    fi
     own "${TOKEN_PATH}"
     rm -f "${legacy_token}"
     log "migrated bootstrap token to ${TOKEN_PATH}"
@@ -52,9 +95,12 @@ migrate_legacy_profile() {
 }
 
 migrate_drop_repo_ca_sync() {
-  local script="$(rooted /usr/local/lib/seagull/seagull-agent-sync-ca.sh)"
-  local unit="$(rooted /etc/systemd/system/seagull-agent-ca-sync.service)"
-  local timer="$(rooted /etc/systemd/system/seagull-agent-ca-sync.timer)"
+  local script
+  local unit
+  local timer
+  script="$(rooted /usr/local/lib/seagull/seagull-agent-sync-ca.sh)"
+  unit="$(rooted /etc/systemd/system/seagull-agent-ca-sync.service)"
+  timer="$(rooted /etc/systemd/system/seagull-agent-ca-sync.timer)"
 
   if [[ ! -f "${script}" && ! -f "${unit}" && ! -f "${timer}" ]]; then
     return 0

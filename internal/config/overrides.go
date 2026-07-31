@@ -12,17 +12,16 @@ func ApplyAgentRuntimeOverrides(cfg *Config, raw map[string]interface{}) {
 	if cfg == nil {
 		return
 	}
+	if cfg.AllowedSources == nil {
+		cfg.AllowedSources = append([]string(nil), cfg.Sources...)
+	}
 	modules := asMap(raw["modules"])
 	if modules == nil {
 		return
 	}
 	if dd := asMap(modules["ddos"]); dd != nil {
 		if enabled, ok := asBool(dd["enabled"]); ok {
-			if enabled {
-				cfg.Sources = ensureSource(cfg.Sources, "ddos")
-			} else {
-				cfg.Sources = removeSource(cfg.Sources, "ddos")
-			}
+			applySourceState(cfg, "ddos", enabled)
 		}
 
 		if s, ok := asString(dd["iface"]); ok {
@@ -120,11 +119,7 @@ func ApplyAgentRuntimeOverrides(cfg *Config, raw map[string]interface{}) {
 
 	if pe := asMap(modules["proc_exec"]); pe != nil {
 		if enabled, ok := asBool(pe["enabled"]); ok {
-			if enabled {
-				cfg.Sources = ensureSource(cfg.Sources, "proc_exec")
-			} else {
-				cfg.Sources = removeSource(cfg.Sources, "proc_exec")
-			}
+			applySourceState(cfg, "proc_exec", enabled)
 		}
 		cfg.ProcExecEvery = asDuration(pe["every"], cfg.ProcExecEvery)
 		if n, ok := asInt(pe["max_batch"]); ok && n > 0 {
@@ -170,11 +165,7 @@ func ApplyAgentRuntimeOverrides(cfg *Config, raw map[string]interface{}) {
 
 	if fm := asMap(modules["fim"]); fm != nil {
 		if enabled, ok := asBool(fm["enabled"]); ok {
-			if enabled {
-				cfg.Sources = ensureSource(cfg.Sources, "fim")
-			} else {
-				cfg.Sources = removeSource(cfg.Sources, "fim")
-			}
+			applySourceState(cfg, "fim", enabled)
 		}
 		cfg.FIMEvery = asDuration(fm["every"], cfg.FIMEvery)
 		if n, ok := asInt(fm["max_batch"]); ok && n > 0 {
@@ -202,11 +193,7 @@ func ApplyAgentRuntimeOverrides(cfg *Config, raw map[string]interface{}) {
 
 	if l7m := asMap(modules["l7"]); l7m != nil {
 		if enabled, ok := asBool(l7m["enabled"]); ok {
-			if enabled {
-				cfg.Sources = ensureSource(cfg.Sources, "l7")
-			} else {
-				cfg.Sources = removeSource(cfg.Sources, "l7")
-			}
+			applySourceState(cfg, "l7", enabled)
 		}
 		if s, ok := asString(l7m["iface"]); ok {
 			cfg.L7Iface = s
@@ -219,10 +206,18 @@ func ApplyAgentRuntimeOverrides(cfg *Config, raw map[string]interface{}) {
 			cfg.L7MaxPayloadBytes = n
 		}
 		if b, ok := asBool(l7m["include_payload"]); ok {
-			cfg.L7IncludePayload = b
+			cfg.L7IncludePayload = cfg.L7IncludePayload && b
 		}
 	}
 	sanitizeL7Config(cfg)
+}
+
+func applySourceState(cfg *Config, source string, enabled bool) {
+	if enabled && Contains(cfg.AllowedSources, source) {
+		cfg.Sources = ensureSource(cfg.Sources, source)
+		return
+	}
+	cfg.Sources = removeSource(cfg.Sources, source)
 }
 
 func ensureSource(sources []string, source string) []string {

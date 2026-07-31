@@ -6,12 +6,13 @@ import (
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/dynasmon/Seagull-agent/protocol"
+	"github.com/dynasmon/seagull-agent/protocol"
 )
 
 const (
@@ -28,6 +29,7 @@ type Config struct {
 	APIURL         string
 	EnrollURL      string
 	Sources        []string
+	AllowedSources []string
 	Interval       time.Duration
 	HTTPTimeout    time.Duration
 	SenderMaxBatch int
@@ -50,6 +52,7 @@ type Config struct {
 	RenewalTokenExpiresAt         string
 	PreviousRenewalToken          string
 	PreviousRenewalTokenExpiresAt string
+	BootstrapTokenConsumed        bool
 
 	TLSCAFile     string
 	TLSCertFile   string
@@ -69,6 +72,10 @@ type Config struct {
 	CertRotateEvery           time.Duration
 	CertRotateBefore          time.Duration
 	ResponseActionStageMax    int
+	ResponseActionJournalDir  string
+	ResponseActionJournalMax  int
+	ResponseActionJournalSize int64
+	ResponseQuarantineDir     string
 	AllowShellExec            bool
 	ShellExecAllowlist        []string
 
@@ -94,6 +101,7 @@ type Config struct {
 	VulnEmitSummaryEvent bool
 
 	AuthLogPath         string
+	AuthCheckpointFile  string
 	AuthIncludeAccepted bool
 	AuthDedupTTL        time.Duration
 
@@ -203,19 +211,37 @@ type Config struct {
 }
 
 func LoadConfig() Config {
-	agentID := getEnv("SEAGULL_AGENT_ID", "agent-unknown")
+	agentID := strings.TrimSpace(getEnv("SEAGULL_AGENT_ID", ""))
+	if err := ValidateAgentID(agentID); err != nil {
+		log.Fatalf("[AGENT] SEAGULL_AGENT_ID is invalid: %v", err)
+	}
 	apiURL := strings.TrimSpace(getEnv("SEAGULL_API_URL", ""))
 	if apiURL == "" {
 		log.Fatal("[AGENT] SEAGULL_API_URL is required")
 	}
+	if err := ValidateEndpointURL("SEAGULL_API_URL", apiURL); err != nil {
+		log.Fatalf("[AGENT] %v", err)
+	}
 	enrollURL := strings.TrimSpace(getEnv("SEAGULL_ENROLL_URL", ""))
+	if enrollURL != "" {
+		if err := ValidateEndpointURL("SEAGULL_ENROLL_URL", enrollURL); err != nil {
+			log.Fatalf("[AGENT] %v", err)
+		}
+	}
 	sources := splitCSVLower(getEnv("SEAGULL_SOURCES", defaultL7Sources))
+	if err := ValidateSources(sources); err != nil {
+		log.Fatalf("[AGENT] SEAGULL_SOURCES is invalid: %v", err)
+	}
 
 	interval := parseDuration(getEnv("SEAGULL_POLL_INTERVAL", "1s"), 1*time.Second)
 	httpTimeout := parseDuration(getEnv("SEAGULL_HTTP_TIMEOUT", "10s"), 10*time.Second)
 	senderMaxBatch := parseInt(getEnv("SEAGULL_SENDER_MAX_BATCH", "300"), 300)
 
-	profile := protocol.NormalizeProfile(getEnv("SEAGULL_AGENT_PROFILE", protocol.ProfileSensor))
+	profileValue := strings.ToLower(strings.TrimSpace(getEnv("SEAGULL_AGENT_PROFILE", protocol.ProfileSensor)))
+	if err := ValidateProfile(profileValue); err != nil {
+		log.Fatalf("[AGENT] SEAGULL_AGENT_PROFILE is invalid: %v", err)
+	}
+	profile := protocol.NormalizeProfile(profileValue)
 
 	spoolDir := strings.TrimSpace(getEnv("SEAGULL_AGENT_SPOOL_DIR", "/var/lib/seagull/spool"))
 	if !parseBool(getEnv("SEAGULL_AGENT_SPOOL_ENABLED", "true"), true) {
@@ -234,6 +260,7 @@ func LoadConfig() Config {
 	renewalTokenExpiresAt := ""
 	previousRenewalToken := ""
 	previousRenewalTokenExpiresAt := ""
+	bootstrapTokenConsumed := false
 
 	if state, err := LoadIdentityState(agentIdentityStateFile, agentID); err != nil {
 		LogJSON(LevelWarn, "identity_state_load_failed", map[string]interface{}{
@@ -252,6 +279,7 @@ func LoadConfig() Config {
 		renewalTokenExpiresAt = strings.TrimSpace(state.RenewalTokenExpiresAt)
 		previousRenewalToken = strings.TrimSpace(state.PreviousRenewalToken)
 		previousRenewalTokenExpiresAt = strings.TrimSpace(state.PreviousRenewalTokenExpiresAt)
+		bootstrapTokenConsumed = state.BootstrapTokenConsumed
 	}
 
 	if agentCredential == "" && credentialFile != "" {
@@ -284,8 +312,18 @@ func LoadConfig() Config {
 	certRotateEvery := parseDuration(getEnv("SEAGULL_CONTROL_CERT_ROTATE_EVERY", "1h"), time.Hour)
 	certRotateBefore := parseDuration(getEnv("SEAGULL_CONTROL_CERT_ROTATE_BEFORE", "720h"), 720*time.Hour)
 	responseActionStageMax := parseInt(getEnv("SEAGULL_RESPONSE_ACTION_STAGE_MAX", "512"), 512)
+	responseActionJournalDir := strings.TrimSpace(getEnv("SEAGULL_RESPONSE_ACTION_JOURNAL_DIR", "/var/lib/seagull/response-actions"))
+	responseActionJournalMax := clampInt(parseInt(getEnv("SEAGULL_RESPONSE_ACTION_JOURNAL_MAX_ITEMS", "2048"), 2048), 64, 10000)
+	responseActionJournalSize := int64(clampInt(parseInt(getEnv("SEAGULL_RESPONSE_ACTION_JOURNAL_MAX_BYTES", "67108864"), 67108864), 8388608, 1073741824))
+	responseQuarantineDir := filepath.Clean(strings.TrimSpace(getEnv("SEAGULL_RESPONSE_QUARANTINE_DIR", "/var/lib/seagull/quarantine")))
+	if !filepath.IsAbs(responseQuarantineDir) {
+		log.Fatal("[AGENT] SEAGULL_RESPONSE_QUARANTINE_DIR must be absolute")
+	}
 	allowShellExec := parseBool(getEnv("SEAGULL_RESPONSE_ALLOW_SHELL_EXEC", "false"), false)
 	shellExecAllowlist := splitCSV(getEnv("SEAGULL_RESPONSE_SHELL_EXEC_ALLOWLIST", ""))
+	if err := ValidateShellExec(profile, allowShellExec, shellExecAllowlist); err != nil {
+		log.Fatalf("[AGENT] response shell execution configuration is invalid: %v", err)
+	}
 
 	syscollectEvery := parseDuration(getEnv("SEAGULL_SYSCOLLECT_EVERY", "5m"), 5*time.Minute)
 	syscollectStartupJitter := parseDuration(getEnv("SEAGULL_SYSCOLLECT_STARTUP_JITTER", "45s"), 45*time.Second)
@@ -309,6 +347,7 @@ func LoadConfig() Config {
 	vulnEmitSummaryEvent := parseBool(getEnv("SEAGULL_VULN_EMIT_SUMMARY_EVENT", "true"), true)
 
 	logPath := getEnv("SEAGULL_AUTHLOG_PATH", "/var/log/auth.log")
+	authCheckpointFile := getEnv("SEAGULL_AUTHLOG_CHECKPOINT_FILE", "/var/lib/seagull/checkpoints/authlog.json")
 	includeAccepted := parseBool(getEnv("SEAGULL_AUTHLOG_INCLUDE_ACCEPTED", "false"), false)
 	authDedupTTL := parseDuration(getEnv("SEAGULL_AUTHLOG_DEDUP_TTL", "30s"), 30*time.Second)
 
@@ -443,6 +482,7 @@ func LoadConfig() Config {
 		APIURL:         apiURL,
 		EnrollURL:      enrollURL,
 		Sources:        sources,
+		AllowedSources: append([]string(nil), sources...),
 		Interval:       interval,
 		HTTPTimeout:    httpTimeout,
 		SenderMaxBatch: senderMaxBatch,
@@ -465,6 +505,7 @@ func LoadConfig() Config {
 		RenewalTokenExpiresAt:         renewalTokenExpiresAt,
 		PreviousRenewalToken:          previousRenewalToken,
 		PreviousRenewalTokenExpiresAt: previousRenewalTokenExpiresAt,
+		BootstrapTokenConsumed:        bootstrapTokenConsumed,
 
 		TLSCAFile:     tlsCAFile,
 		TLSCertFile:   tlsCertFile,
@@ -484,6 +525,10 @@ func LoadConfig() Config {
 		CertRotateEvery:           certRotateEvery,
 		CertRotateBefore:          certRotateBefore,
 		ResponseActionStageMax:    responseActionStageMax,
+		ResponseActionJournalDir:  responseActionJournalDir,
+		ResponseActionJournalMax:  responseActionJournalMax,
+		ResponseActionJournalSize: responseActionJournalSize,
+		ResponseQuarantineDir:     responseQuarantineDir,
 		AllowShellExec:            allowShellExec,
 		ShellExecAllowlist:        shellExecAllowlist,
 
@@ -509,6 +554,7 @@ func LoadConfig() Config {
 		VulnEmitSummaryEvent: vulnEmitSummaryEvent,
 
 		AuthLogPath:         logPath,
+		AuthCheckpointFile:  authCheckpointFile,
 		AuthIncludeAccepted: includeAccepted,
 		AuthDedupTTL:        authDedupTTL,
 

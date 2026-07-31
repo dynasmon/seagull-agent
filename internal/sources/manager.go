@@ -6,16 +6,16 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dynasmon/Seagull-agent/internal/collectors/ddos"
-	"github.com/dynasmon/Seagull-agent/internal/collectors/fim"
-	"github.com/dynasmon/Seagull-agent/internal/collectors/l7"
-	"github.com/dynasmon/Seagull-agent/internal/collectors/lateral"
-	"github.com/dynasmon/Seagull-agent/internal/collectors/proc"
-	"github.com/dynasmon/Seagull-agent/internal/collectors/procexec"
-	"github.com/dynasmon/Seagull-agent/internal/collectors/scan"
-	"github.com/dynasmon/Seagull-agent/internal/collectors/ssh"
-	agentcfg "github.com/dynasmon/Seagull-agent/internal/config"
-	"github.com/dynasmon/Seagull-agent/internal/sender"
+	"github.com/dynasmon/seagull-agent/internal/collectors/ddos"
+	"github.com/dynasmon/seagull-agent/internal/collectors/fim"
+	"github.com/dynasmon/seagull-agent/internal/collectors/l7"
+	"github.com/dynasmon/seagull-agent/internal/collectors/lateral"
+	"github.com/dynasmon/seagull-agent/internal/collectors/proc"
+	"github.com/dynasmon/seagull-agent/internal/collectors/procexec"
+	"github.com/dynasmon/seagull-agent/internal/collectors/scan"
+	"github.com/dynasmon/seagull-agent/internal/collectors/ssh"
+	agentcfg "github.com/dynasmon/seagull-agent/internal/config"
+	"github.com/dynasmon/seagull-agent/internal/sender"
 )
 
 type Manager struct {
@@ -120,6 +120,7 @@ func NewManager(cfg agentcfg.Config, rootCtx context.Context, stop context.Cance
 			}
 			m.authCapturer = ssh.NewAuthLogCapturer(cfg.AgentID, ssh.AuthLogOptions{
 				Path:            resolvedPath,
+				CheckpointPath:  cfg.AuthCheckpointFile,
 				MaxBatchSize:    200,
 				DedupTTL:        cfg.AuthDedupTTL,
 				IncludeAccepted: cfg.AuthIncludeAccepted,

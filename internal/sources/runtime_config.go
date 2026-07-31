@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -11,7 +12,12 @@ import (
 	"sync"
 	"time"
 
-	agentcfg "github.com/dynasmon/Seagull-agent/internal/config"
+	agentcfg "github.com/dynasmon/seagull-agent/internal/config"
+)
+
+var (
+	ErrStaleConfigRevision    = errors.New("stale remote configuration revision")
+	ErrConfigRevisionConflict = errors.New("conflicting remote configuration revision")
 )
 
 type SyscollectorConfig struct {
@@ -63,6 +69,7 @@ type RuntimeConfig struct {
 	vulnDef  VulnScannerConfig
 	topoDef  TopologyDiscoveryConfig
 	changed  chan struct{}
+	loadErr  error
 }
 
 func NewRuntimeConfig(
@@ -79,9 +86,15 @@ func NewRuntimeConfig(
 		topoDef:  topologyDefaults,
 		changed:  make(chan struct{}, 1),
 	}
-	_ = rc.loadFromFile()
+	rc.loadErr = rc.loadFromFile()
 	rc.hash = rc.computeHashLocked()
 	return rc
+}
+
+func (r *RuntimeConfig) LoadError() error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.loadErr
 }
 
 func (r *RuntimeConfig) Changed() <-chan struct{} {
@@ -92,6 +105,12 @@ func (r *RuntimeConfig) Hash() string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.hash
+}
+
+func (r *RuntimeConfig) Revision() int64 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return configRevision(r.raw)
 }
 
 func (r *RuntimeConfig) Raw() map[string]interface{} {
@@ -108,15 +127,44 @@ func (r *RuntimeConfig) Apply(raw map[string]interface{}) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.raw = agentcfg.DeepCopyMap(raw)
-	newHash := r.computeHashLocked()
+	next := agentcfg.DeepCopyMap(raw)
+	currentRevision, currentHasRevision, currentRevisionErr := parseConfigRevision(r.raw)
+	if currentRevisionErr != nil {
+		return false, currentRevisionErr
+	}
+	nextRevision, nextHasRevision, nextRevisionErr := parseConfigRevision(next)
+	if nextRevisionErr != nil {
+		return false, nextRevisionErr
+	}
+	currentHash := r.hash
+	newHash := configHash(next)
+
 	if newHash == r.hash {
 		return false, nil
 	}
+	if len(r.raw) > 0 && !currentHasRevision && !nextHasRevision {
+		return false, fmt.Errorf("%w: current configuration has no revision", ErrStaleConfigRevision)
+	}
+	if currentHasRevision {
+		if !nextHasRevision || nextRevision < currentRevision {
+			return false, fmt.Errorf(
+				"%w: current=%d received=%d",
+				ErrStaleConfigRevision,
+				currentRevision,
+				nextRevision,
+			)
+		}
+		if nextRevision == currentRevision && newHash != currentHash {
+			return false, fmt.Errorf(
+				"%w: revision=%d",
+				ErrConfigRevisionConflict,
+				nextRevision,
+			)
+		}
+	}
 
-	r.hash = newHash
 	if r.path != "" {
-		b, err := json.Marshal(r.raw)
+		b, err := json.Marshal(next)
 		if err != nil {
 			return false, fmt.Errorf("marshal runtime config: %w", err)
 		}
@@ -124,6 +172,9 @@ func (r *RuntimeConfig) Apply(raw map[string]interface{}) (bool, error) {
 			return false, err
 		}
 	}
+
+	r.raw = next
+	r.hash = newHash
 
 	select {
 	case r.changed <- struct{}{}:
@@ -149,7 +200,7 @@ func (r *RuntimeConfig) Syscollector() SyscollectorConfig {
 	}
 
 	if v, ok := sys["enabled"].(bool); ok {
-		cfg.Enabled = v
+		cfg.Enabled = cfg.Enabled && v
 	}
 	if s, ok := sys["every"].(string); ok {
 		if d, err := time.ParseDuration(s); err == nil && d > 0 {
@@ -167,13 +218,6 @@ func (r *RuntimeConfig) Syscollector() SyscollectorConfig {
 	if n, ok := agentcfg.ToInt64(sys["max_packages"]); ok && n > 0 {
 		cfg.MaxPackages = int(n)
 	}
-	if s, ok := sys["host_root"].(string); ok {
-		s = strings.TrimSpace(s)
-		if s != "" {
-			cfg.HostRoot = s
-		}
-	}
-
 	return cfg
 }
 
@@ -193,7 +237,7 @@ func (r *RuntimeConfig) VulnScanner() VulnScannerConfig {
 	}
 
 	if b, ok := v["enabled"].(bool); ok {
-		cfg.Enabled = b
+		cfg.Enabled = cfg.Enabled && b
 	}
 	if s, ok := v["every"].(string); ok {
 		if d, err := time.ParseDuration(s); err == nil && d > 0 {
@@ -243,13 +287,6 @@ func (r *RuntimeConfig) VulnScanner() VulnScannerConfig {
 	if n, ok := agentcfg.ToInt64(v["max_output_bytes"]); ok && n > 0 {
 		cfg.MaxOutputBytes = n
 	}
-	if s, ok := v["host_root"].(string); ok {
-		s = strings.TrimSpace(s)
-		if s != "" {
-			cfg.HostRoot = s
-		}
-	}
-
 	return cfg
 }
 
@@ -269,24 +306,24 @@ func (r *RuntimeConfig) TopologyDiscovery() (TopologyDiscoveryConfig, error) {
 	}
 
 	if b, ok := v["enabled"].(bool); ok {
-		cfg.Enabled = b
+		cfg.Enabled = cfg.Enabled && b
 	}
 	if b, ok := v["allow_public"].(bool); ok {
-		cfg.AllowPublic = b
+		cfg.AllowPublic = cfg.AllowPublic && b
 	}
 	if s, ok := v["every"].(string); ok {
-		if d, err := time.ParseDuration(s); err == nil && d > 0 {
+		if d, err := time.ParseDuration(s); err == nil && d >= cfg.Every {
 			cfg.Every = d
 		}
 	}
-	if n, ok := agentcfg.ToInt64(v["max_hosts"]); ok && n > 0 {
+	if n, ok := agentcfg.ToInt64(v["max_hosts"]); ok && n > 0 && (cfg.MaxHosts <= 0 || n <= int64(cfg.MaxHosts)) {
 		cfg.MaxHosts = int(n)
 	}
-	if n, ok := agentcfg.ToInt64(v["rate_limit"]); ok && n > 0 {
+	if n, ok := agentcfg.ToInt64(v["rate_limit"]); ok && n > 0 && (cfg.RateLimit <= 0 || n <= int64(cfg.RateLimit)) {
 		cfg.RateLimit = int(n)
 	}
 	if s, ok := v["timeout"].(string); ok {
-		if d, err := time.ParseDuration(s); err == nil && d > 0 {
+		if d, err := time.ParseDuration(s); err == nil && d > 0 && (cfg.Timeout <= 0 || d <= cfg.Timeout) {
 			cfg.Timeout = d
 		}
 	}
@@ -295,10 +332,37 @@ func (r *RuntimeConfig) TopologyDiscovery() (TopologyDiscoveryConfig, error) {
 		if err != nil {
 			return cfg, err
 		}
+		if len(r.topoDef.CIDRs) > 0 && !cidrsWithin(cidrs, r.topoDef.CIDRs) {
+			return cfg, fmt.Errorf("remote topology CIDRs exceed the local discovery policy")
+		}
 		cfg.CIDRs = cidrs
 	}
 
 	return cfg, nil
+}
+
+func cidrsWithin(requested []*net.IPNet, allowed []*net.IPNet) bool {
+	for _, candidate := range requested {
+		if candidate == nil || candidate.IP == nil {
+			return false
+		}
+		ones, bits := candidate.Mask.Size()
+		permitted := false
+		for _, boundary := range allowed {
+			if boundary == nil || boundary.IP == nil {
+				continue
+			}
+			boundaryOnes, boundaryBits := boundary.Mask.Size()
+			if bits == boundaryBits && ones >= boundaryOnes && boundary.Contains(candidate.IP) {
+				permitted = true
+				break
+			}
+		}
+		if !permitted {
+			return false
+		}
+	}
+	return true
 }
 
 func stringSliceValue(v interface{}) []string {
@@ -343,21 +407,54 @@ func (r *RuntimeConfig) loadFromFile() error {
 	}
 	b, err := os.ReadFile(r.path)
 	if err != nil {
-		return nil
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read persisted runtime config: %w", err)
 	}
 	var obj map[string]interface{}
 	if err := json.Unmarshal(b, &obj); err != nil {
-		return nil
+		return fmt.Errorf("parse persisted runtime config: %w", err)
+	}
+	if obj == nil {
+		return fmt.Errorf("persisted runtime config must be an object")
+	}
+	if _, _, err := parseConfigRevision(obj); err != nil {
+		return err
 	}
 	r.raw = agentcfg.DeepCopyMap(obj)
 	return nil
 }
 
 func (r *RuntimeConfig) computeHashLocked() string {
-	b, err := json.Marshal(r.raw)
+	return configHash(r.raw)
+}
+
+func configHash(raw map[string]interface{}) string {
+	b, err := json.Marshal(raw)
 	if err != nil {
 		return ""
 	}
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
+}
+
+func configRevision(raw map[string]interface{}) int64 {
+	revision, present, err := parseConfigRevision(raw)
+	if err != nil || !present {
+		return 0
+	}
+	return revision
+}
+
+func parseConfigRevision(raw map[string]interface{}) (int64, bool, error) {
+	value, present := raw["revision"]
+	if !present {
+		return 0, false, nil
+	}
+	revision, ok := agentcfg.ToInt64(value)
+	if !ok || revision < 1 {
+		return 0, true, fmt.Errorf("remote configuration revision must be a positive integer")
+	}
+	return revision, true, nil
 }

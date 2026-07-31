@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/dynasmon/Seagull-agent/protocol"
+	"github.com/dynasmon/seagull-agent/protocol"
 )
 
 var (
@@ -100,5 +100,7 @@ func Summary() map[string]interface{} {
 		"min_server_protocol":  protocol.MinSupportedServer,
 		"max_server_protocol":  protocol.MaxSupportedServer,
 		"event_schema_version": protocol.EventSchemaVersion,
+		"min_event_schema":     protocol.MinEventSchema,
+		"max_event_schema":     protocol.MaxEventSchema,
 	}
 }

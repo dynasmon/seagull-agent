@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dynasmon/Seagull-agent/internal/agentauth"
-	"github.com/dynasmon/Seagull-agent/protocol"
+	"github.com/dynasmon/seagull-agent/internal/agentauth"
+	"github.com/dynasmon/seagull-agent/protocol"
 )
 
 var (
@@ -24,6 +24,55 @@ var (
 		"/agents/response/actions/results",
 	}
 )
+
+const (
+	maxResponseBytes  = 4 << 20
+	maxErrorBodyBytes = 4 << 10
+)
+
+type HTTPError struct {
+	Operation  string
+	StatusCode int
+	Body       string
+}
+
+func responseExcerpt(body []byte) string {
+	trimmed := bytes.TrimSpace(body)
+	truncated := len(trimmed) > maxErrorBodyBytes
+	if truncated {
+		trimmed = trimmed[:maxErrorBodyBytes]
+	}
+	value := strings.ToValidUTF8(string(trimmed), "\uFFFD")
+	value = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, value)
+	value = strings.Join(strings.Fields(value), " ")
+	if value == "" {
+		value = "<empty>"
+	}
+	if truncated {
+		value += " [truncated]"
+	}
+	return value
+}
+
+func newHTTPError(operation string, statusCode int, body []byte) *HTTPError {
+	return &HTTPError{
+		Operation:  operation,
+		StatusCode: statusCode,
+		Body:       responseExcerpt(body),
+	}
+}
+
+func (e *HTTPError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return fmt.Sprintf("%s failed status=%d body=%s", e.Operation, e.StatusCode, e.Body)
+}
 
 type Client struct {
 	baseURL        string
@@ -77,7 +126,10 @@ func (c *Client) do(ctx context.Context, method, path, name string, body []byte)
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, err := readResponse(resp.Body)
+	if err != nil {
+		return resp.StatusCode, nil, fmt.Errorf("%s response: %w", name, err)
+	}
 	return resp.StatusCode, respBody, nil
 }
 
@@ -118,9 +170,15 @@ func (c *Client) Enroll(ctx context.Context, req protocol.EnrollRequest) (protoc
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, err := readResponse(resp.Body)
+	if err != nil {
+		return out, fmt.Errorf("enroll response: %w", err)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return out, fmt.Errorf("enroll failed status=%d body=%s", resp.StatusCode, string(body))
+		if incompatible, ok := protocol.DecodeIncompatibility(resp.StatusCode, body); ok {
+			return out, incompatible
+		}
+		return out, newHTTPError("enroll", resp.StatusCode, body)
 	}
 
 	if err := json.Unmarshal(body, &out); err != nil {
@@ -130,19 +188,55 @@ func (c *Client) Enroll(ctx context.Context, req protocol.EnrollRequest) (protoc
 	return out, nil
 }
 
-func (c *Client) Heartbeat(ctx context.Context, hb protocol.HeartbeatRequest) error {
+func readResponse(body io.Reader) ([]byte, error) {
+	payload, err := io.ReadAll(io.LimitReader(body, maxResponseBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(payload) > maxResponseBytes {
+		return nil, fmt.Errorf("body exceeds %d bytes", maxResponseBytes)
+	}
+	return payload, nil
+}
+
+func (c *Client) Heartbeat(ctx context.Context, hb protocol.HeartbeatRequest) (protocol.Negotiation, error) {
 	payload, err := json.Marshal(hb)
 	if err != nil {
-		return fmt.Errorf("marshal heartbeat: %w", err)
+		return protocol.Negotiation{}, fmt.Errorf("marshal heartbeat: %w", err)
 	}
-	status, _, err := c.do(ctx, http.MethodPost, "/agents/heartbeat", "heartbeat", payload)
+	status, body, err := c.do(ctx, http.MethodPost, "/agents/heartbeat", "heartbeat", payload)
 	if err != nil {
-		return err
+		return protocol.Negotiation{}, err
 	}
 	if status < 200 || status >= 300 {
-		return fmt.Errorf("heartbeat failed status=%d", status)
+		if incompatible, ok := protocol.DecodeIncompatibility(status, body); ok {
+			return protocol.Negotiation{}, incompatible
+		}
+		return protocol.Negotiation{}, newHTTPError("heartbeat", status, body)
 	}
-	return nil
+
+	if len(bytes.TrimSpace(body)) == 0 {
+		negotiated, incompatible := protocol.Negotiate(nil)
+		if incompatible != nil {
+			return protocol.Negotiation{}, incompatible
+		}
+		return negotiated, nil
+	}
+
+	var descriptor protocol.Descriptor
+	if err := json.Unmarshal(body, &descriptor); err != nil || descriptor.ProtocolVersion <= 0 {
+		negotiated, incompatible := protocol.Negotiate(nil)
+		if incompatible != nil {
+			return protocol.Negotiation{}, incompatible
+		}
+		return negotiated, nil
+	}
+
+	negotiated, incompatible := protocol.Negotiate(&descriptor)
+	if incompatible != nil {
+		return protocol.Negotiation{}, incompatible
+	}
+	return negotiated, nil
 }
 
 func (c *Client) GetConfig(ctx context.Context) (map[string]interface{}, error) {
@@ -151,7 +245,7 @@ func (c *Client) GetConfig(ctx context.Context) (map[string]interface{}, error) 
 		return nil, err
 	}
 	if status < 200 || status >= 300 {
-		return nil, fmt.Errorf("config failed status=%d body=%s", status, string(body))
+		return nil, newHTTPError("config", status, body)
 	}
 	if len(body) == 0 {
 		return map[string]interface{}{}, nil
@@ -173,7 +267,7 @@ func (c *Client) RotateCredential(ctx context.Context) (protocol.Credential, err
 		return out, err
 	}
 	if status < 200 || status >= 300 {
-		return out, fmt.Errorf("rotate credential failed status=%d body=%s", status, string(body))
+		return out, newHTTPError("rotate credential", status, body)
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
 		return out, fmt.Errorf("unmarshal rotate response: %w", err)
@@ -192,7 +286,7 @@ func (c *Client) RenewCertificate(ctx context.Context, csrPEM string) (protocol.
 		return out, err
 	}
 	if status < 200 || status >= 300 {
-		return out, fmt.Errorf("certificate renew failed status=%d body=%s", status, string(body))
+		return out, newHTTPError("certificate renew", status, body)
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
 		return out, fmt.Errorf("unmarshal certificate renew response: %w", err)
@@ -235,7 +329,7 @@ func (c *Client) listPendingResponseActionsPath(ctx context.Context, path string
 		return []protocol.ResponseAction{}, nil
 	}
 	if status < 200 || status >= 300 {
-		return nil, fmt.Errorf("response actions failed status=%d body=%s", status, string(body))
+		return nil, newHTTPError("response actions", status, body)
 	}
 	if len(bytes.TrimSpace(body)) == 0 {
 		return []protocol.ResponseAction{}, nil
@@ -309,7 +403,7 @@ func (c *Client) ReportResponseActionResult(ctx context.Context, in protocol.Res
 		if status >= 200 && status < 300 {
 			return nil
 		}
-		err = fmt.Errorf("response action result failed status=%d body=%s", status, string(body))
+		err = newHTTPError("response action result", status, body)
 		if status == http.StatusNotFound {
 			lastErr = err
 			continue
