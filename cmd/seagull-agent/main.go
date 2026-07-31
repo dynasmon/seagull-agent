@@ -2,30 +2,40 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 
-	"github.com/dynasmon/Seagull-agent/internal/buildinfo"
-	agentcfg "github.com/dynasmon/Seagull-agent/internal/config"
-	agentruntime "github.com/dynasmon/Seagull-agent/internal/runtime"
-	"github.com/dynasmon/Seagull-agent/internal/transport"
+	"github.com/dynasmon/seagull-agent/internal/buildinfo"
+	"github.com/dynasmon/seagull-agent/internal/certrenew"
+	agentcfg "github.com/dynasmon/seagull-agent/internal/config"
+	agentruntime "github.com/dynasmon/seagull-agent/internal/runtime"
+	"github.com/dynasmon/seagull-agent/internal/transport"
 )
 
 func main() {
-	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "version") {
-		fmt.Println(buildinfo.String())
+	handled, err := executeCommand(os.Args[1:], os.Stdout)
+	if err != nil {
+		log.Fatalf("[AGENT] command error: %v", err)
+	}
+	if handled {
 		return
 	}
 	cfg := agentcfg.LoadConfig()
+	if err := certrenew.RecoverPair(strings.TrimSpace(cfg.TLSCertFile), strings.TrimSpace(cfg.TLSKeyFile)); err != nil {
+		log.Fatalf("[AGENT] TLS client recovery error: %v", err)
+	}
 	httpClient, err := transport.NewHTTPClient(cfg.HTTPTimeout, transport.TLSOptions{
 		CAFile:     strings.TrimSpace(cfg.TLSCAFile),
 		CertFile:   strings.TrimSpace(cfg.TLSCertFile),
 		KeyFile:    strings.TrimSpace(cfg.TLSKeyFile),
-		ServerName: strings.TrimSpace(cfg.TLSServerName),
+		ServerName: resolveTLSServerName(cfg.APIURL, cfg.TLSServerName),
 	})
 	if err != nil {
 		log.Fatalf("[AGENT] TLS client init error: %v", err)
@@ -45,4 +55,44 @@ func main() {
 	if err := svc.Run(rootCtx); err != nil {
 		log.Fatalf("[AGENT] run error: %v", err)
 	}
+}
+
+func executeCommand(args []string, stdout io.Writer) (bool, error) {
+	if len(args) == 0 {
+		return false, nil
+	}
+	switch args[0] {
+	case "--version", "version":
+		if len(args) != 1 {
+			return true, errors.New("version does not accept arguments")
+		}
+		_, err := fmt.Fprintln(stdout, buildinfo.String())
+		return true, err
+	case "validate-ca":
+		if len(args) != 2 {
+			return true, errors.New("validate-ca requires one PEM file path")
+		}
+		bundle, err := os.ReadFile(args[1])
+		if err != nil {
+			return true, fmt.Errorf("read server CA bundle: %w", err)
+		}
+		if err := certrenew.ValidateServerCA(string(bundle)); err != nil {
+			return true, err
+		}
+		_, err = fmt.Fprintln(stdout, "valid server CA bundle")
+		return true, err
+	default:
+		return true, fmt.Errorf("unknown command %q", args[0])
+	}
+}
+
+func resolveTLSServerName(apiURL string, configured string) string {
+	if serverName := strings.TrimSpace(configured); serverName != "" {
+		return serverName
+	}
+	parsed, err := url.Parse(strings.TrimSpace(apiURL))
+	if err != nil {
+		return ""
+	}
+	return parsed.Hostname()
 }
