@@ -1,0 +1,212 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+      - "feat/**"
+      - "fix/**"
+      - "refact/**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.26.5"
+
+jobs:
+  verify:
+    name: source and product verification
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpcap-dev
+      - name: verify source and product lifecycle
+        run: make verify
+
+  vulnerabilities:
+    name: vulnerability analysis
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpcap-dev
+      - name: scan reachable dependencies
+        run: make vulncheck
+      - name: scan repository history
+        run: make secret-scan
+
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux/amd64
+            runner: ubuntu-22.04
+            artifact: package-linux-amd64
+          - target: linux/arm64
+            runner: ubuntu-22.04-arm
+            artifact: package-linux-arm64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpcap-dev
+      - name: build release-equivalent package
+        run: |
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          bash build/build.sh \
+            --version "0.0.0-ci.${GITHUB_RUN_NUMBER}" \
+            --channel dev \
+            --targets "${{ matrix.target }}" \
+            --dist dist
+      - name: verify package checksums
+        run: cd dist && sha256sum --check SHA256SUMS
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  artifact-runtime:
+    name: runtime ${{ matrix.distribution }} ${{ matrix.target }}
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    container:
+      image: ${{ matrix.image }}
+      options: --user 0
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distribution: debian-12
+            image: debian:12
+            packages: ca-certificates libpcap0.8
+            target: linux/amd64
+            runner: ubuntu-22.04
+            artifact: package-linux-amd64
+            archive: seagull-agent_*_linux_amd64.tar.gz
+          - distribution: debian-12
+            image: debian:12
+            packages: ca-certificates libpcap0.8
+            target: linux/arm64
+            runner: ubuntu-22.04-arm
+            artifact: package-linux-arm64
+            archive: seagull-agent_*_linux_arm64.tar.gz
+          - distribution: ubuntu-22.04
+            image: ubuntu:22.04
+            packages: ca-certificates libpcap0.8
+            target: linux/amd64
+            runner: ubuntu-22.04
+            artifact: package-linux-amd64
+            archive: seagull-agent_*_linux_amd64.tar.gz
+          - distribution: ubuntu-22.04
+            image: ubuntu:22.04
+            packages: ca-certificates libpcap0.8
+            target: linux/arm64
+            runner: ubuntu-22.04-arm
+            artifact: package-linux-arm64
+            archive: seagull-agent_*_linux_arm64.tar.gz
+          - distribution: ubuntu-24.04
+            image: ubuntu:24.04
+            packages: ca-certificates libpcap0.8t64
+            target: linux/amd64
+            runner: ubuntu-24.04
+            artifact: package-linux-amd64
+            archive: seagull-agent_*_linux_amd64.tar.gz
+          - distribution: ubuntu-24.04
+            image: ubuntu:24.04
+            packages: ca-certificates libpcap0.8t64
+            target: linux/arm64
+            runner: ubuntu-24.04-arm
+            artifact: package-linux-arm64
+            archive: seagull-agent_*_linux_arm64.tar.gz
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist
+      - name: install runtime dependencies
+        run: apt-get update && apt-get install -y --no-install-recommends ${{ matrix.packages }}
+      - name: install and remove the release artifact
+        run: |
+          set -euo pipefail
+          test ! -e /usr/bin/go
+          ! command -v go
+          cd dist
+          sha256sum --check SHA256SUMS
+          archive="$(find . -maxdepth 1 -name '${{ matrix.archive }}' -print -quit)"
+          test -n "${archive}"
+          mkdir /package
+          tar xzf "${archive}" -C /package
+          package="$(find /package -mindepth 1 -maxdepth 1 -type d -name 'seagull-agent_*' -print -quit)"
+          test -n "${package}"
+          (
+            cd "${package}"
+            sha256sum --check MANIFEST.sha256
+            ./seagull-agent --version
+            SEAGULL_INSTALL_ROOT=/staged ./install.sh \
+              --agent-id ci-agent-1 \
+              --api-url https://siem.invalid:8444/agent \
+              --enroll-url https://siem.invalid:8445 \
+              --enroll-token abt.ci-agent-1.placeholder000000 \
+              --no-start
+            test -x /staged/usr/local/bin/seagull-agent
+            test -d /staged/var/lib/seagull/response-actions
+            SEAGULL_INSTALL_ROOT=/staged ./uninstall.sh --purge
+          )
+
+  reproducibility:
+    name: reproducible artifacts
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpcap-dev
+      - name: compare independent builds
+        run: |
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          bash build/build.sh --version 0.0.0-repro --channel dev --targets linux/amd64 --dist dist-a
+          bash build/build.sh --version 0.0.0-repro --channel dev --targets linux/amd64 --dist dist-b
+          cmp dist-a/seagull-agent_0.0.0-repro_linux_amd64.tar.gz dist-b/seagull-agent_0.0.0-repro_linux_amd64.tar.gz
+          cmp dist-a/seagull-agent_0.0.0-repro_linux_amd64.cdx.json dist-b/seagull-agent_0.0.0-repro_linux_amd64.cdx.json
