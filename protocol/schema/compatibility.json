@@ -1,12 +1,13 @@
 {
-  "$id": "https://github.com/dynasmon/Seagull-agent/protocol/schema/compatibility.json",
+  "$id": "https://github.com/dynasmon/seagull-agent/protocol/schema/compatibility.json",
   "title": "Seagull agent and platform compatibility window",
   "protocol_version": 1,
   "event_schema_version": 1,
   "agent": {
     "speaks_protocol": 1,
     "accepts_server_protocol": { "min": 1, "max": 1 },
-    "emits_event_schema": 1
+    "emits_event_schema": 1,
+    "supports_event_schema": { "min": 1, "max": 1 }
   },
   "server": {
     "oldest_supported_agent_protocol": 1,
@@ -22,7 +23,16 @@
     "absent_server_descriptor": "treated as protocol 1, negotiation marked degraded",
     "unsupported_protocol_version": "server answers HTTP 426 and the agent stops retrying that operation",
     "unsupported_response_action": "agent answers with status failed and an unsupported_action_type error",
-    "privileged_action_on_sensor_profile": "agent refuses locally regardless of server intent"
+    "unexpected_response_action_status": "agent rejects the action before execution and reports an invalid response action",
+    "privileged_action_on_sensor_profile": "agent refuses locally regardless of server intent",
+    "fresh_revisionless_configuration": "accepted for protocol 1 compatibility",
+    "revisionless_configuration_after_persisted_state": "rejected",
+    "stale_configuration_revision": "rejected",
+    "same_revision_with_different_content": "rejected",
+    "write_ahead_delivery": "batches are persisted before delivery whenever the durable queue is available; direct delivery is attempted only after queue persistence fails",
+    "durable_delivery_acknowledgement": "required before the agent removes a persisted batch",
+    "legacy_delivery_acknowledgement": "rejected because durable acceptance must be explicit",
+    "duplicate_batch_in_flight": "retryable and never acknowledged as durable"
   },
   "independent_release": {
     "server_upgrade_requires_agent_upgrade": false,
