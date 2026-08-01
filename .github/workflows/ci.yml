@@ -202,6 +202,10 @@ jobs:
             test -x /usr/local/bin/seagull-agent
             test -f /etc/systemd/system/seagull-agent.service
             test "$(stat -c '%a' /var/lib/seagull/bootstrap.token)" = 600
+            if grep -nE '^SEAGULL_[A-Z_]*_(FILE|DIR)=[^/]' /etc/seagull/agent.env; then
+              echo "the installed configuration must reference absolute paths" >&2
+              exit 1
+            fi
             ./uninstall.sh --purge
             test ! -e /usr/local/bin/seagull-agent
             test ! -e /var/lib/seagull

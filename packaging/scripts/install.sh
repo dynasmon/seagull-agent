@@ -219,8 +219,6 @@ resolve_configuration() {
 }
 
 configure_env_file() {
-  local root
-  root="$(install_root)"
   set_env_value SEAGULL_AGENT_ID "${EFFECTIVE_AGENT_ID}" "${ENV_PATH}"
   set_env_value SEAGULL_API_URL "${EFFECTIVE_API_URL}" "${ENV_PATH}"
   if [[ -n "${EFFECTIVE_ENROLL_URL}" ]]; then
@@ -231,15 +229,15 @@ configure_env_file() {
   if [[ -n "${ARG_TLS_SERVER_NAME}" ]]; then
     set_env_value SEAGULL_TLS_SERVER_NAME "${ARG_TLS_SERVER_NAME}" "${ENV_PATH}"
   fi
-  ensure_env_value SEAGULL_AGENT_CONFIG_FILE "${STATE_DIR#${root}}/agent.config.json" "${ENV_PATH}"
-  ensure_env_value SEAGULL_AGENT_IDENTITY_STATE_FILE "${IDENTITY_PATH#${root}}" "${ENV_PATH}"
-  ensure_env_value SEAGULL_AGENT_CREDENTIAL_FILE "${CREDENTIAL_PATH#${root}}" "${ENV_PATH}"
-  ensure_env_value SEAGULL_AGENT_BOOTSTRAP_TOKEN_FILE "${TOKEN_PATH#${root}}" "${ENV_PATH}"
-  ensure_env_value SEAGULL_TLS_CERT_FILE "${CLIENT_CERT_PATH#${root}}" "${ENV_PATH}"
-  ensure_env_value SEAGULL_TLS_KEY_FILE "${CLIENT_KEY_PATH#${root}}" "${ENV_PATH}"
-  ensure_env_value SEAGULL_AGENT_SPOOL_DIR "${SPOOL_DIR#${root}}" "${ENV_PATH}"
-  ensure_env_value SEAGULL_AUTHLOG_CHECKPOINT_FILE "${CHECKPOINT_DIR#${root}}/authlog.json" "${ENV_PATH}"
-  ensure_env_value SEAGULL_RESPONSE_ACTION_JOURNAL_DIR "${RESPONSE_ACTION_DIR#${root}}" "${ENV_PATH}"
+  ensure_env_value SEAGULL_AGENT_CONFIG_FILE "$(unrooted "${STATE_DIR}")/agent.config.json" "${ENV_PATH}"
+  ensure_env_value SEAGULL_AGENT_IDENTITY_STATE_FILE "$(unrooted "${IDENTITY_PATH}")" "${ENV_PATH}"
+  ensure_env_value SEAGULL_AGENT_CREDENTIAL_FILE "$(unrooted "${CREDENTIAL_PATH}")" "${ENV_PATH}"
+  ensure_env_value SEAGULL_AGENT_BOOTSTRAP_TOKEN_FILE "$(unrooted "${TOKEN_PATH}")" "${ENV_PATH}"
+  ensure_env_value SEAGULL_TLS_CERT_FILE "$(unrooted "${CLIENT_CERT_PATH}")" "${ENV_PATH}"
+  ensure_env_value SEAGULL_TLS_KEY_FILE "$(unrooted "${CLIENT_KEY_PATH}")" "${ENV_PATH}"
+  ensure_env_value SEAGULL_AGENT_SPOOL_DIR "$(unrooted "${SPOOL_DIR}")" "${ENV_PATH}"
+  ensure_env_value SEAGULL_AUTHLOG_CHECKPOINT_FILE "$(unrooted "${CHECKPOINT_DIR}")/authlog.json" "${ENV_PATH}"
+  ensure_env_value SEAGULL_RESPONSE_ACTION_JOURNAL_DIR "$(unrooted "${RESPONSE_ACTION_DIR}")" "${ENV_PATH}"
 }
 
 install_ca_file() {
@@ -250,7 +248,7 @@ install_ca_file() {
   fi
   atomic_replace_from_stdin "${CA_PATH}" 0644 < "${ARG_CA_FILE}"
   own "${CA_PATH}"
-  set_env_value SEAGULL_TLS_CA_FILE "${CA_PATH#$(install_root)}" "${ENV_PATH}"
+  set_env_value SEAGULL_TLS_CA_FILE "$(unrooted "${CA_PATH}")" "${ENV_PATH}"
   log "installed server CA to ${CA_PATH}"
 }
 

@@ -38,6 +38,16 @@ rooted() {
   printf '%s%s' "${root}" "$1"
 }
 
+unrooted() {
+  local root
+  root="$(install_root)"
+  if [[ "${root}" == "/" ]]; then
+    printf '%s' "$1"
+    return
+  fi
+  printf '%s' "${1#"${root}"}"
+}
+
 is_staged_root() {
   [[ "$(install_root)" != "/" ]]
 }
