@@ -186,12 +186,16 @@ func (m *Manager) ApplyCredentialUpdate(update protocol.Credential, recoveryMeth
 	return nil
 }
 
+func (m *Manager) HasUsableIdentity() bool {
+	return m.CurrentCredential() != "" && m.certificateIdentityUsable()
+}
+
 func (m *Manager) EnsureInitialIdentity(rootCtx context.Context) error {
 	if _, err := m.resumePendingEnrollment(); err != nil {
 		return fmt.Errorf("resume pending enrollment: %w", err)
 	}
 	cred := m.CurrentCredential()
-	if cred != "" && m.certificateIdentityUsable() {
+	if m.HasUsableIdentity() {
 		if m.cfg.CredentialFile != "" {
 			_ = agentcfg.AtomicWriteFile(m.cfg.CredentialFile, []byte(cred+"\n"), 0o600)
 		}

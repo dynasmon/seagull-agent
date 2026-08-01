@@ -273,3 +273,84 @@ func TestCompletedResponseActionIsRetriedWithoutReexecution(t *testing.T) {
 		t.Fatalf("unexpected delivery state=%+v attempts=%d", state, terminalAttempts.Load())
 	}
 }
+
+func TestServiceProbesTheApiOnlyWithAnIdentity(t *testing.T) {
+	t.Run("an enrolled agent waits for the api", func(t *testing.T) {
+		var healthProbes atomic.Int64
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+			switch request.URL.Path {
+			case "/agent/health":
+				healthProbes.Add(1)
+				w.WriteHeader(http.StatusNoContent)
+			case "/agent/agents/heartbeat":
+				json.NewEncoder(w).Encode(protocol.LocalDescriptor())
+			case "/agent/agents/config":
+				json.NewEncoder(w).Encode(map[string]interface{}{"revision": 1})
+			default:
+				http.NotFound(w, request)
+			}
+		}))
+		defer server.Close()
+
+		cfg := runtimeTestConfig(server.URL, t.TempDir())
+		httpClient, err := transport.NewHTTPClient(time.Second, transport.TLSOptions{})
+		if err != nil {
+			t.Fatalf("create HTTP client: %v", err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		service, err := New(ctx, cfg, cancel, httpClient)
+		if err != nil {
+			t.Fatalf("create service: %v", err)
+		}
+		result := make(chan error, 1)
+		go func() {
+			result <- service.Run(ctx)
+		}()
+		time.Sleep(80 * time.Millisecond)
+		cancel()
+		select {
+		case err := <-result:
+			if err != nil {
+				t.Fatalf("service run: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("service did not stop")
+		}
+		if healthProbes.Load() == 0 {
+			t.Fatalf("an enrolled agent skipped the readiness probe")
+		}
+	})
+
+	t.Run("an unenrolled agent enrolls without probing the api", func(t *testing.T) {
+		var healthProbes atomic.Int64
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+			if request.URL.Path == "/agent/health" {
+				healthProbes.Add(1)
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			http.NotFound(w, request)
+		}))
+		defer server.Close()
+
+		cfg := runtimeTestConfig(server.URL, t.TempDir())
+		cfg.AgentCredential = ""
+		cfg.EnrollURL = server.URL
+		httpClient, err := transport.NewHTTPClient(time.Second, transport.TLSOptions{})
+		if err != nil {
+			t.Fatalf("create HTTP client: %v", err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		service, err := New(ctx, cfg, cancel, httpClient)
+		if err != nil {
+			t.Fatalf("create service: %v", err)
+		}
+		if err := service.Run(ctx); err == nil {
+			t.Fatalf("expected the run to fail without an enrollment token")
+		}
+		if healthProbes.Load() != 0 {
+			t.Fatalf("the agent probed the api %d times before holding an identity", healthProbes.Load())
+		}
+	})
+}

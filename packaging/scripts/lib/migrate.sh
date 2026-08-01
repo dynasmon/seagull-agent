@@ -21,7 +21,7 @@ migrate_legacy_ca_layout() {
     log "migrated the server trust anchor to ${CA_PATH}"
   fi
   if [[ "${configured}" == "/etc/seagull/pki/root_ca.crt" ]]; then
-    set_env_value SEAGULL_TLS_CA_FILE "${CA_PATH#$(install_root)}" "${ENV_PATH}"
+    set_env_value SEAGULL_TLS_CA_FILE "$(unrooted "${CA_PATH}")" "${ENV_PATH}"
     log "rewrote the legacy server CA path in ${ENV_PATH}"
   fi
 }
@@ -62,8 +62,8 @@ migrate_legacy_pki_layout() {
   cert_env="$(env_value SEAGULL_TLS_CERT_FILE "${ENV_PATH}")"
   key_env="$(env_value SEAGULL_TLS_KEY_FILE "${ENV_PATH}")"
   if [[ "${cert_env}" == "/etc/seagull/pki/agent.crt" || "${key_env}" == "/etc/seagull/pki/agent.key" ]]; then
-    set_env_value SEAGULL_TLS_CERT_FILE "${CLIENT_CERT_PATH#$(install_root)}" "${ENV_PATH}"
-    set_env_value SEAGULL_TLS_KEY_FILE "${CLIENT_KEY_PATH#$(install_root)}" "${ENV_PATH}"
+    set_env_value SEAGULL_TLS_CERT_FILE "$(unrooted "${CLIENT_CERT_PATH}")" "${ENV_PATH}"
+    set_env_value SEAGULL_TLS_KEY_FILE "$(unrooted "${CLIENT_KEY_PATH}")" "${ENV_PATH}"
     log "rewrote legacy client certificate paths in ${ENV_PATH}"
   fi
 }

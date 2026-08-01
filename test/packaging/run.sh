@@ -39,6 +39,26 @@ file_contains() { grep -q "$2" "$1"; }
 file_lacks() { ! grep -q "$2" "$1"; }
 mode_is() { [[ "$(stat -c '%a' "$1")" == "$2" ]]; }
 files_equal() { cmp -s "$1" "$2"; }
+path_round_trips() {
+  local root="$1"
+  local path="$2"
+  local pkg="$3"
+  (
+    export SEAGULL_INSTALL_ROOT="${root}"
+    source "${pkg}/lib/common.sh"
+    [[ "$(unrooted "$(rooted "${path}")")" == "${path}" ]]
+  )
+}
+staged_root_is_applied() {
+  local root="$1"
+  local path="$2"
+  local pkg="$3"
+  (
+    export SEAGULL_INSTALL_ROOT="${root}"
+    source "${pkg}/lib/common.sh"
+    [[ "$(rooted "${path}")" == "${root}${path}" ]]
+  )
+}
 
 build_packages() {
   printf '::: building release packages\n'
@@ -88,6 +108,14 @@ main() {
     have() { return 1; }
     artifact_verify_manifest '${pkg1}'
   "
+
+  printf '\n::: runtime paths stay absolute at every install root\n'
+  check "paths round trip at the filesystem root" \
+    path_round_trips / /var/lib/seagull/pki/server-ca.crt "${pkg1}"
+  check "paths round trip under a staged root" \
+    path_round_trips "${WORK}/stage" /var/lib/seagull/pki/server-ca.crt "${pkg1}"
+  check "a staged root is applied to runtime paths" \
+    staged_root_is_applied "${WORK}/stage" /etc/seagull/agent.env "${pkg1}"
 
   printf '\n::: fresh install\n'
   local token="abt.agent-test-1.0123456789abcdef0123456789abcdef"
@@ -139,6 +167,8 @@ main() {
   check "agent id was derived from the bound token" file_contains "${root}/etc/seagull/agent.env" 'SEAGULL_AGENT_ID=agent-test-1'
   check "release stores its systemd unit" file_exists "${root}/usr/local/lib/seagull/releases/1.0.0/seagull-agent.service"
   check "release stores its metadata" file_exists "${root}/usr/local/lib/seagull/releases/1.0.0/VERSION"
+  refute "installed configuration carries no relative path" \
+    grep -qE '^SEAGULL_[A-Z_]*_(FILE|DIR)=[^/]' "${root}/etc/seagull/agent.env"
 
   printf '\n::: sensor is the default profile and grants no response privileges\n'
   check "profile defaults to sensor" file_contains "${root}/etc/seagull/agent.env" 'SEAGULL_AGENT_PROFILE=sensor'

@@ -195,14 +195,16 @@ func New(ctx context.Context, cfg agentcfg.Config, stop context.CancelFunc, http
 }
 
 func (s *Service) Run(rootCtx context.Context) error {
-	ctx, cancel := context.WithTimeout(rootCtx, 30*time.Second)
-	if err := transport.WaitForHealth(ctx, s.cfg.APIURL, s.httpClient); err != nil {
-		agentcfg.LogJSON(agentcfg.LevelWarn, "backend_not_ready", map[string]interface{}{
-			"agent_id": s.cfg.AgentID,
-			"error":    err.Error(),
-		})
+	if s.enrollment.HasUsableIdentity() {
+		ctx, cancel := context.WithTimeout(rootCtx, 30*time.Second)
+		if err := transport.WaitForHealth(ctx, s.cfg.APIURL, s.httpClient); err != nil {
+			agentcfg.LogJSON(agentcfg.LevelWarn, "backend_not_ready", map[string]interface{}{
+				"agent_id": s.cfg.AgentID,
+				"error":    err.Error(),
+			})
+		}
+		cancel()
 	}
-	cancel()
 
 	if err := s.enrollment.EnsureInitialIdentity(rootCtx); err != nil {
 		return fmt.Errorf("establish agent identity: %w", err)
