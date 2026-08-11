@@ -151,3 +151,51 @@ func TestAuthLogCorruptCheckpointFailsClosed(t *testing.T) {
 		t.Fatal("corrupt checkpoint was accepted")
 	}
 }
+
+func TestParseLineKeepsSrcIPAnAddress(t *testing.T) {
+	c := NewAuthLogCapturer("agent-1", AuthLogOptions{})
+	c.hostIP = "10.0.0.5"
+	now := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+
+	ev, _, ok := c.parseLine(now, "Failed password for root from 203.0.113.10 port 51514 ssh2")
+	if !ok {
+		t.Fatalf("expected parsed event")
+	}
+	if ev.SrcIP != "203.0.113.10" {
+		t.Fatalf("unexpected src ip: %s", ev.SrcIP)
+	}
+	if _, ok := ev.Extra["src_host"]; ok {
+		t.Fatalf("an address must not be reported as a hostname")
+	}
+}
+
+func TestParseLineMovesAResolvedHostnameOutOfSrcIP(t *testing.T) {
+	c := NewAuthLogCapturer("agent-1", AuthLogOptions{})
+	c.hostIP = "10.0.0.5"
+	now := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+
+	ev, _, ok := c.parseLine(now, "Failed password for root from scanner.example.test port 51514 ssh2")
+	if !ok {
+		t.Fatalf("expected parsed event")
+	}
+	if ev.SrcIP != "" {
+		t.Fatalf("a hostname must not be sent as an address: %s", ev.SrcIP)
+	}
+	if ev.Extra["src_host"] != "scanner.example.test" {
+		t.Fatalf("the hostname must be kept as evidence: %v", ev.Extra["src_host"])
+	}
+}
+
+func TestParseLineKeepsIPv6Addresses(t *testing.T) {
+	c := NewAuthLogCapturer("agent-1", AuthLogOptions{})
+	c.hostIP = "10.0.0.5"
+	now := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+
+	ev, _, ok := c.parseLine(now, "Invalid user admin from 2001:db8::1 port 51514")
+	if !ok {
+		t.Fatalf("expected parsed event")
+	}
+	if ev.SrcIP != "2001:db8::1" {
+		t.Fatalf("unexpected src ip: %s", ev.SrcIP)
+	}
+}
