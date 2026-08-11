@@ -446,11 +446,16 @@ func (c *AuthLogCapturer) pruneDedup(now time.Time) {
 	}
 }
 
-func (c *AuthLogCapturer) newSSHEndpointEvent(now time.Time, srcIP string, dstPort int, extra map[string]interface{}) protocol.NetEvent {
+func (c *AuthLogCapturer) newSSHEndpointEvent(now time.Time, remote string, dstPort int, extra map[string]interface{}) protocol.NetEvent {
 	if extra == nil {
 		extra = map[string]interface{}{}
 	}
 	extra["source"] = "auth.log"
+
+	srcIP, srcHost := splitRemoteEndpoint(remote)
+	if srcHost != "" {
+		extra["src_host"] = srcHost
+	}
 
 	return protocol.NetEvent{
 		AgentID:   c.agentID,
@@ -500,6 +505,18 @@ func normalizeIP(s string) string {
 		return s
 	}
 	return ip.String()
+}
+
+func splitRemoteEndpoint(s string) (string, string) {
+	remote := strings.TrimSpace(s)
+	if remote == "" {
+		return "", ""
+	}
+	ip := net.ParseIP(remote)
+	if ip == nil {
+		return "", remote
+	}
+	return ip.String(), ""
 }
 
 func toInt(s string) int {
