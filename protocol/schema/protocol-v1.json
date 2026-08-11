@@ -511,7 +511,9 @@
         },
         "event_type": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 32,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,31}$"
         },
         "schema_version": {
           "type": "integer",
@@ -523,10 +525,14 @@
           "format": "date-time"
         },
         "src_ip": {
-          "type": "string"
+          "type": "string",
+          "format": "ip-address",
+          "maxLength": 45
         },
         "dst_ip": {
-          "type": "string"
+          "type": "string",
+          "format": "ip-address",
+          "maxLength": 45
         },
         "src_port": {
           "type": "integer",
@@ -539,15 +545,23 @@
           "maximum": 65535
         },
         "proto": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16
         },
         "bytes": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 9223372036854775807
         },
         "extra": {
           "type": "object",
-          "additionalProperties": true
+          "additionalProperties": true,
+          "maxProperties": 512,
+          "x-max-depth": 8,
+          "x-max-key-length": 128,
+          "x-max-string-length": 4096,
+          "x-max-serialized-bytes": 32768
         }
       },
       "additionalProperties": true
