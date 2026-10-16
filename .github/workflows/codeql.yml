@@ -32,7 +32,7 @@ jobs:
           cache: true
       - name: install build dependencies
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpcap-dev
-      - uses: github/codeql-action/init@f205ea1c3313d32999d8d6a48b4f6530d4437b38
+      - uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d
         with:
           languages: go
           build-mode: manual
